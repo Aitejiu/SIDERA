@@ -12,7 +12,7 @@ from sidera_agents.contracts import (
     StartReceipt,
     ToolBinding,
 )
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, true, update
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.domain.agent_bindings import AssignmentDenied
@@ -23,6 +23,7 @@ from sidera_control_plane.domain.planning_authority import (
 from sidera_control_plane.persistence.models import (
     PlanningAgentLinkModel,
     PlanningAuthorityModel,
+    PlanningRunModel,
 )
 
 
@@ -160,6 +161,69 @@ class PlanningAuthorityRepository:
             response_id=row.response_id,
             closed=row.closed,
             reason_code=row.reason_code,
+        )
+
+    def list_reconciliation_links(
+        self, workspace_id, *, limit=100, after_planning_run_id=None
+    ):
+        rows = self._session.scalars(
+            select(PlanningAgentLinkModel)
+            .join(
+                PlanningRunModel,
+                and_(
+                    PlanningRunModel.id == PlanningAgentLinkModel.planning_run_id,
+                    PlanningRunModel.workspace_id
+                    == PlanningAgentLinkModel.workspace_id,
+                ),
+            )
+            .where(
+                PlanningAgentLinkModel.workspace_id == workspace_id,
+                or_(
+                    PlanningRunModel.status == "running",
+                    and_(
+                        PlanningRunModel.status.in_(("blocked", "failed", "cancelled")),
+                        PlanningAgentLinkModel.status.in_(
+                            ("cleanup_pending", "unknown")
+                        ),
+                        PlanningAgentLinkModel.closed.is_(False),
+                    ),
+                ),
+                true()
+                if after_planning_run_id is None
+                else PlanningAgentLinkModel.planning_run_id > after_planning_run_id,
+            )
+            .order_by(PlanningAgentLinkModel.planning_run_id)
+            .limit(limit)
+        )
+        return tuple(
+            link
+            for row in rows
+            if (link := self.get_link(workspace_id, row.planning_run_id)) is not None
+        )
+
+    def save_original_observation(
+        self, expected: PlanningAgentLink, *, event_cursor, response_id, closed
+    ):
+        current = self.get_link(
+            expected.workspace_id, expected.planning_run_id, for_update=True
+        )
+        if (
+            current is None
+            or current != expected
+            or event_cursor < current.event_cursor
+            or (current.response_id is not None and response_id != current.response_id)
+        ):
+            raise AssignmentDenied("original planning observation changed")
+        if current.closed:
+            if not closed or event_cursor != current.event_cursor:
+                raise AssignmentDenied("closed original planning evidence changed")
+            return current
+        return self.save_link(
+            current,
+            event_cursor=event_cursor,
+            response_id=response_id,
+            status="closed" if closed else current.status,
+            closed=closed,
         )
 
     def save_link(self, expected: PlanningAgentLink, **changes):

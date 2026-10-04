@@ -1,6 +1,6 @@
 from dataclasses import replace
 from datetime import datetime
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sidera_agents.contracts import (
     CredentialRef,
@@ -12,7 +12,7 @@ from sidera_agents.contracts import (
     StartReceipt,
     ToolBinding,
 )
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, or_, select, true, update
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.domain.agent_bindings import (
@@ -28,10 +28,12 @@ from sidera_control_plane.persistence.models import (
     AgentAdmissionPinHistoryModel,
     AgentExecutionLinkModel,
     ExecutionAuthorityModel,
+    ExecutionModel,
     ExecutionSessionModel,
     TaskModel,
     WorkerItemModel,
 )
+from sidera_control_plane.persistence.session_repository import SessionRepository
 from sidera_control_plane.persistence.workspace_repository import WorkspaceRepository
 
 
@@ -474,7 +476,42 @@ class ExecutionAuthorityRepository:
             .order_by(AgentExecutionLinkModel.execution_id)
             .limit(limit)
         )
-        return tuple(self.get_link(workspace_id, execution_id) for execution_id in ids)
+        return tuple(
+            link
+            for execution_id in ids
+            if (link := self.get_link(workspace_id, execution_id)) is not None
+        )
+
+    def list_reconciliation_links(
+        self, workspace_id, *, limit=100, after_execution_id=None
+    ):
+        ids = self._session.scalars(
+            select(AgentExecutionLinkModel.execution_id)
+            .join(
+                ExecutionModel,
+                (ExecutionModel.id == AgentExecutionLinkModel.execution_id)
+                & (ExecutionModel.workspace_id == AgentExecutionLinkModel.workspace_id),
+            )
+            .where(
+                AgentExecutionLinkModel.workspace_id == workspace_id,
+                true()
+                if after_execution_id is None
+                else AgentExecutionLinkModel.execution_id > after_execution_id,
+                or_(
+                    AgentExecutionLinkModel.status.not_in(
+                        {"succeeded", "failed", "stopped", "cancelled"}
+                    ),
+                    ExecutionModel.status.in_({"leased", "running"}),
+                ),
+            )
+            .order_by(AgentExecutionLinkModel.execution_id)
+            .limit(limit)
+        )
+        return tuple(
+            link
+            for execution_id in ids
+            if (link := self.get_link(workspace_id, execution_id)) is not None
+        )
 
     def advance_link(
         self, *, workspace_id, execution_id, authority_id, run_id, event_cursor, status
@@ -521,3 +558,117 @@ class ExecutionAuthorityRepository:
             .values(run_id=run_id, event_cursor=event_cursor, status=status)
         )
         return replacement
+
+    def lock_original_observation(
+        self, expected: AgentExecutionLink, *, principal_id: str
+    ):
+        """Lock only saved original history, without granting current writer rights."""
+        authority = self.get(expected.authority_id, workspace_id=expected.workspace_id)
+        if (
+            authority is None
+            or authority.principal_id != principal_id
+            or not principal_id
+        ):
+            raise AssignmentDenied("original observation authority unavailable")
+        model = TaskModel if authority.target_type == "subtask" else WorkerItemModel
+        target = self._session.scalar(
+            select(model)
+            .where(
+                model.id == authority.target_id,
+                model.workspace_id == expected.workspace_id,
+            )
+            .with_for_update()
+        )
+        execution = ExecutionRepository(self._session).get(
+            expected.execution_id, expected.workspace_id, for_update=True
+        )
+        lease = LeaseStore(self._session).get(
+            authority.lease_id, expected.workspace_id, for_update=True
+        )
+        link = self.get_link(
+            expected.workspace_id, expected.execution_id, for_update=True
+        )
+        from sidera_control_plane.persistence.agent_binding_repository import (
+            AgentBindingRepository,
+        )
+
+        bindings = AgentBindingRepository(self._session)
+        bindings.get(
+            expected.workspace_id,
+            authority.target_type,
+            authority.target_id,
+            for_update=True,
+        )
+        historical = next(
+            (
+                binding
+                for binding in bindings.history(
+                    expected.workspace_id, authority.target_type, authority.target_id
+                )
+                if binding.version == expected.binding_version
+            ),
+            None,
+        )
+        session = (
+            None
+            if expected.run_id is None
+            else SessionRepository(self._session).get_any(
+                uuid5(NAMESPACE_URL, f"sidera.native.session:{expected.run_id}"),
+                expected.workspace_id,
+                for_update=True,
+            )
+        )
+        if (
+            link is None
+            or link != expected
+            or target is None
+            or execution is None
+            or lease is None
+            or session is None
+            or "run.read" not in authority.actions
+            or historical is None
+            or historical.profile_ref != expected.profile_ref
+            or authority.execution_id != expected.execution_id
+            or authority.profile_ref != expected.profile_ref
+            or authority.binding_version != expected.binding_version
+            or authority.workspace_id != expected.workspace_id
+            or (
+                execution.worker_item_id
+                if authority.target_type == "worker_item"
+                else execution.task_id
+            )
+            != authority.target_id
+            or execution.last_fencing_token != authority.fencing_token
+            or lease.execution_id != execution.id
+            or lease.fencing_token != authority.fencing_token
+            or session.execution_id != execution.id
+            or session.worker_id != lease.worker_id
+            or session.adapter_session_id != f"agent-run:{expected.run_id}"
+            or session.last_sequence < expected.event_cursor
+        ):
+            raise AssignmentDenied("original observation pin or fence changed")
+        return execution, session, link, authority
+
+    def save_original_observation(
+        self, expected: AgentExecutionLink, *, principal_id, event_cursor, status
+    ):
+        _, _, link, _ = self.lock_original_observation(
+            expected, principal_id=principal_id
+        )
+        if type(event_cursor) is not int or event_cursor != link.event_cursor + 1:
+            raise AssignmentDenied("original observation must advance by exactly one")
+        if (
+            link.status in {"succeeded", "failed", "stopped", "cancelled"}
+            and status != link.status
+        ):
+            raise AssignmentDenied("original terminal observation changed")
+        self._session.execute(
+            update(AgentExecutionLinkModel)
+            .where(
+                AgentExecutionLinkModel.workspace_id == link.workspace_id,
+                AgentExecutionLinkModel.execution_id == link.execution_id,
+                AgentExecutionLinkModel.event_cursor == link.event_cursor,
+            )
+            .values(event_cursor=event_cursor, status=status)
+        )
+        return replace(link, event_cursor=event_cursor, status=status)

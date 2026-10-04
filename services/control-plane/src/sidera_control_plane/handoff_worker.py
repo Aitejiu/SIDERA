@@ -58,6 +58,7 @@ def build_handoff_worker(
         projection_change_retention_seconds=(
             settings.projection_change_retention_seconds
         ),
+        before_commit=gateway_runtime.before_commit,
     )
     if workspace_provider is None:
         workspace_provider = GitWorktreeWorkspaceManager(
@@ -99,6 +100,7 @@ def build_handoff_worker(
             uow_factory,
             native_services=native_services,
             clock=lambda: datetime.now(UTC),
+            owner_check=gateway_runtime.owner_check,
         ),
     )
     return HandoffWorkerRuntime(

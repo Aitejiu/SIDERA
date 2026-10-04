@@ -210,7 +210,15 @@ def native_scenario(database, workspace_id, tmp_path):
 
 
 class NativeScenario:
-    def __init__(self, database, workspace_id, tmp_path, *, pipeline=False):
+    def __init__(
+        self,
+        database,
+        workspace_id,
+        tmp_path,
+        *,
+        pipeline=False,
+        principal_id="operator",
+    ):
         import inspect
 
         from sidera_control_plane.adapters.git_results import GitResultStore
@@ -294,7 +302,7 @@ class NativeScenario:
         self.workspace_id, self.uow, self.principal = (
             workspace_id,
             self.cp.uow_factory,
-            "operator",
+            principal_id,
         )
         self.verification_adapter = None
         if pipeline:

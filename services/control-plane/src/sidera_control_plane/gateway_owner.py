@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from sidera_control_plane.application.agent_worker_adapter import require_gateway_owner
 from sidera_control_plane.config import Settings
 from sidera_control_plane.gateway_worker import (
     GatewayRuntime,
@@ -137,6 +138,10 @@ class GatewayOwner:
     def gateway(self):
         return self.gateway_runtime.gateway
 
+    def require_owner(self) -> None:
+        if self.owner_lock is not None:
+            require_gateway_owner(self.owner_lock.check)
+
     def close(self) -> None:
         try:
             self.gateway_runtime.close()
@@ -156,9 +161,11 @@ def build_gateway_owner(settings: Settings, *, native_services=None) -> GatewayO
     gateway_runtime: GatewayRuntime | None = None
     try:
         gateway_runtime = (
-            build_gateway(settings)
+            build_gateway(settings, owner_check=owner_lock.check)
             if native_services is None
-            else build_gateway(settings, native_services=native_services)
+            else build_gateway(
+                settings, native_services=native_services, owner_check=owner_lock.check
+            )
         )
         input_runtime = build_input_dispatcher(
             settings, gateway_runtime=gateway_runtime

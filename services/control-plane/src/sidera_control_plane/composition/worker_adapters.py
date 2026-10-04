@@ -152,6 +152,7 @@ def build_native_worker_adapter(
     execution_id,
     capability_snapshot,
     clock,
+    owner_check=None,
 ):
     builder = TaskExecutionInputBuilder(
         uow_factory,
@@ -169,6 +170,7 @@ def build_native_worker_adapter(
         execution_id=execution_id,
         clock=clock,
         capability_snapshot=capability_snapshot,
+        owner_check=owner_check,
     )
 
 

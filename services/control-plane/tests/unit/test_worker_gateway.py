@@ -421,6 +421,63 @@ def test_outbox_claim_keeper_renews_and_records_claim_loss() -> None:
     assert keeper.lost is True
 
 
+def test_outbox_claim_keeper_detected_owner_loss_stops_without_renewal() -> None:
+    message = _message()
+    store = RecordingStore((message,))
+    checked = threading.Event()
+
+    def lost():
+        checked.set()
+        return False
+
+    keeper = OutboxClaimKeeper(store, message, interval_seconds=0.01, owner_check=lost)
+    try:
+        keeper.start()
+        assert checked.wait(2)
+    finally:
+        keeper.stop()
+    assert keeper.lost and not keeper._thread.is_alive()
+    assert not store.renewed
+    assert not keeper.renew_once()
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_gateway_runner_detected_owner_loss_retains_claim_without_followups(failure):
+    messages = (_message(STOP_TOPIC), _message(ASSIGNMENT_TOPIC))
+    store = RecordingStore(messages)
+    alive = [True]
+    handled = []
+
+    class LosingGateway(RecordingGateway):
+        def handle(self, message):
+            handled.append(message)
+            alive[0] = False
+            if failure:
+                raise RuntimeError("controlled uncertain public action")
+
+    runner = GatewayAssignmentRunner(
+        store,
+        LosingGateway(),
+        owner_check=lambda: alive[0],
+        active_session_sync=lambda: pytest.fail("lost owner started active sync"),
+    )
+    with pytest.raises(Exception, match="owner"):
+        runner.run_once()
+    assert handled == [messages[0]]
+    assert store.claim_topics_history == [{STOP_TOPIC}]
+    assert not store.acknowledged and not store.rescheduled
+
+
+def test_gateway_runner_detected_owner_loss_prevents_initial_claim():
+    store = RecordingStore((_message(),))
+    runner = GatewayAssignmentRunner(
+        store, RecordingGateway(), owner_check=lambda: False
+    )
+    with pytest.raises(Exception, match="owner"):
+        runner.run_once()
+    assert not store.claim_topics_history
+
+
 def test_assignment_lease_keeper_requires_renew_interval_below_half_ttl() -> None:
     with pytest.raises(ValueError, match="less than half"):
         AssignmentLeaseKeeper(

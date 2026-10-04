@@ -66,6 +66,96 @@ def test_unconfirmed_close_never_projects_a_terminal_session(state):
 
 
 @pytest.mark.parametrize(
+    ("kind", "status", "expected"),
+    (
+        ("run.closed", "completed", "session.completed"),
+        ("run.closed", "stopped", "session.closed"),
+        ("run.failed", "failed", "session.failed"),
+    ),
+)
+def test_immutable_terminal_fact_wins_over_earlier_run_snapshot(kind, status, expected):
+    from datetime import UTC, datetime
+
+    event = RunEvent(
+        run_id=uuid4(),
+        sequence=2,
+        kind=kind,
+        occurred_at=datetime.now(UTC),
+        operation_id=None,
+        response_id=None,
+        data={"status": status},
+    )
+    first = native_adapter().project_run_event(event, run_state="running")
+    replay = native_adapter().project_run_event(event, run_state=status)
+    assert first.event_type == expected
+    assert first == replay
+    assert first.raw_ref.startswith("native-event-sha256:")
+
+
+def test_native_event_identity_detects_content_hidden_by_redaction():
+    from datetime import UTC, datetime
+
+    from sidera_control_plane.application.event_ingestor import _redact_payload
+
+    event = RunEvent(
+        run_id=uuid4(),
+        sequence=2,
+        kind="message",
+        occurred_at=datetime.now(UTC),
+        operation_id=None,
+        response_id=None,
+        data={"token": "first-private-value", "text": "progress"},
+    )
+    changed = event.model_copy(
+        update={"data": {**event.data, "token": "changed-private-value"}}
+    )
+    first = native_adapter().project_run_event(event)
+    second = native_adapter().project_run_event(changed)
+    assert _redact_payload(first.payload) == _redact_payload(second.payload)
+    assert first.raw_ref != second.raw_ref
+    assert "private-value" not in first.raw_ref
+
+
+@pytest.mark.parametrize("status", (None, "running", "closing", "unknown", "invalid"))
+def test_snapshot_cannot_change_identity_of_incomplete_closed_event(status):
+    from datetime import UTC, datetime
+
+    event = RunEvent(
+        run_id=uuid4(),
+        sequence=2,
+        kind="run.closed",
+        occurred_at=datetime.now(UTC),
+        operation_id=None,
+        response_id=None,
+        data={} if status is None else {"status": status},
+    )
+    before = native_adapter().project_run_event(event, run_state="running")
+    after = native_adapter().project_run_event(event, run_state="completed")
+    assert before == after
+    assert after.event_type == "native.run.closed"
+
+
+@pytest.mark.parametrize("status", ([], {}, True, 1, 1.5))
+def test_malformed_terminal_status_is_stable_unconfirmed_observation(status):
+    from datetime import UTC, datetime
+
+    event = RunEvent(
+        run_id=uuid4(),
+        sequence=2,
+        kind="run.closed",
+        occurred_at=datetime.now(UTC),
+        operation_id=None,
+        response_id=None,
+        data={"status": status},
+    )
+    first = native_adapter().project_run_event(event, run_state="running")
+    replay = native_adapter().project_run_event(event, run_state="completed")
+    assert first.event_type == "native.run.closed"
+    assert first == replay
+    assert first.raw_ref.startswith("native-event-sha256:")
+
+
+@pytest.mark.parametrize(
     "read", ("start_operation", "start_workspace", "run_id", "run_workspace")
 )
 def test_workspace_coarse_public_reads_are_pinned_before_forwarding(read):

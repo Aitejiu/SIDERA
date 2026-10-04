@@ -449,6 +449,14 @@ class ExecutionSession:
         self.last_activity_at = now
         self.version += 1
 
+    def record_historical_observation(self, *, sequence: int, now: datetime) -> None:
+        """Advance authorized original history without reopening the Session."""
+        if type(sequence) is not int or sequence != self.last_sequence + 1:
+            raise ValidationError("session sequence must increase by exactly one")
+        self.last_sequence = sequence
+        self.last_activity_at = now
+        self.version += 1
+
     def close(self, *, lost: bool, now: datetime) -> None:
         if self.status is not ExecutionSessionStatus.ACTIVE:
             raise InvalidTransition("session is already terminal")

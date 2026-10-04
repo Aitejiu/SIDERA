@@ -2558,6 +2558,30 @@ class AgentBindingRepositoryPort(Protocol):
 
 
 class ExecutionAuthorityRepositoryPort(Protocol):
+    def list_reconciliation_links(
+        self,
+        workspace_id: UUID,
+        *,
+        limit: int = 100,
+        after_execution_id: UUID | None = None,
+    ) -> tuple[AgentExecutionLink, ...]:
+        raise NotImplementedError
+
+    def lock_original_observation(
+        self, expected: AgentExecutionLink, *, principal_id: str
+    ):
+        raise NotImplementedError
+
+    def save_original_observation(
+        self,
+        expected: AgentExecutionLink,
+        *,
+        principal_id: str,
+        event_cursor: int,
+        status: str,
+    ) -> AgentExecutionLink:
+        raise NotImplementedError
+
     def save_preparation(
         self, expected, preparation: Mapping[str, object], *, now: datetime
     ):
@@ -2632,6 +2656,21 @@ class ExecutionAuthorityRepositoryPort(Protocol):
 
 
 class PlanningAuthorityRepositoryPort(Protocol):
+    def list_reconciliation_links(
+        self,
+        workspace_id: UUID,
+        *,
+        limit: int = 100,
+        after_planning_run_id: UUID | None = None,
+    ) -> tuple[PlanningAgentLink, ...]: ...
+    def save_original_observation(
+        self,
+        expected: PlanningAgentLink,
+        *,
+        event_cursor: int,
+        response_id: UUID | None,
+        closed: bool,
+    ) -> PlanningAgentLink: ...
     def add(self, authority: PlanningAuthority) -> None: ...
     def get(
         self, authority_id: UUID, *, workspace_id: UUID | None = None

@@ -37,6 +37,7 @@ def test_input_dispatcher_uses_injected_gateway_runtime(monkeypatch) -> None:
 
     assert result.gateway_runtime is runtime
     assert captured["gateway"] is runtime.worker_gateway
+    assert captured["uow_factory"]()._before_commit is runtime.before_commit
 
 
 @pytest.mark.parametrize("shared", [False, True])
@@ -100,6 +101,7 @@ def test_handoff_worker_uses_injected_gateway_runtime(monkeypatch, shared) -> No
     assert result.catalog is runtime.catalog
     assert captured["gateway"] is runtime.worker_gateway
     assert captured["workspace_handoff"].provider is provider
+    assert captured["uow_factory"]()._before_commit is runtime.before_commit
 
 
 def test_native_handoff_factory_requires_owned_workspace_provider() -> None:
@@ -128,12 +130,21 @@ def test_gateway_owner_builds_consumers_from_one_runtime(monkeypatch) -> None:
         def acquire(self) -> bool:
             return True
 
+        def check(self) -> bool:
+            return True
+
         def close(self) -> None:
             return None
 
     monkeypatch.setattr(gateway_owner, "Database", lambda _url: _Database())
     monkeypatch.setattr(gateway_owner, "GatewayOwnerLock", _Lock)
-    monkeypatch.setattr(gateway_owner, "build_gateway", lambda _settings: runtime)
+
+    def build(_settings, *, owner_check):
+        assert owner_check()
+        runtime.owner_check = owner_check
+        return runtime
+
+    monkeypatch.setattr(gateway_owner, "build_gateway", build)
     monkeypatch.setattr(
         gateway_owner,
         "build_input_dispatcher",
@@ -155,6 +166,7 @@ def test_gateway_owner_builds_consumers_from_one_runtime(monkeypatch) -> None:
 
     assert calls == [("input", runtime), ("handoff", runtime)]
     assert owner.gateway_runtime is runtime
+    assert runtime.owner_check == owner.owner_lock.check
 
 
 def test_gateway_owner_acquires_database_lock_before_consumable_runtime(
@@ -175,6 +187,9 @@ def test_gateway_owner_acquires_database_lock_before_consumable_runtime(
             events.append("lock-acquired")
             return True
 
+        def check(self) -> bool:
+            return True
+
         def close(self) -> None:
             events.append("lock-closed")
 
@@ -188,7 +203,7 @@ def test_gateway_owner_acquires_database_lock_before_consumable_runtime(
     monkeypatch.setattr(
         gateway_owner,
         "build_gateway",
-        lambda _settings: events.append("runtime-built") or runtime,
+        lambda _settings, *, owner_check: events.append("runtime-built") or runtime,
     )
     monkeypatch.setattr(
         gateway_owner,

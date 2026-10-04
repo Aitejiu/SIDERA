@@ -5,6 +5,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol, cast
@@ -31,6 +32,7 @@ from sidera_control_plane.application.agent_sources import (
     context_source_items,
 )
 from sidera_control_plane.application.agent_worker_adapter import (
+    AgentWorkerAdapter,
     NativeContextPreparationReceipt,
     NativeDeferredResult,
     NativeSourceValidation,
@@ -42,6 +44,7 @@ from sidera_control_plane.application.agent_worker_adapter import (
     native_operation_id,
     native_preparation_command,
     read_native_preparation_receipt,
+    require_gateway_owner,
 )
 from sidera_control_plane.application.artifact_content import (
     ALLOWED_ARTIFACT_MEDIA_TYPES,
@@ -717,6 +720,7 @@ class WorkerGateway:
         assignment_lease_ttl_seconds: int = 30,
         assignment_lease_renew_interval_seconds: float = 0.0,
         acceptance_guard: RuntimeBudgetGuard | None = None,
+        owner_check: Callable[[], bool] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._uow_factory = uow_factory
@@ -752,6 +756,7 @@ class WorkerGateway:
             assignment_lease_renew_interval_seconds
         )
         self._acceptance_guard = acceptance_guard
+        self._owner_check = owner_check
 
     def _begin_acceptance_worker_call(
         self,
@@ -1056,6 +1061,7 @@ class WorkerGateway:
             execution_id=context.execution.id,
             clock=self._clock,
             capability_snapshot=context.binding.capability_snapshot,
+            owner_check=self._owner_check,
         )
 
     def _adapter_for_context(self, context, *, operation):
@@ -1066,6 +1072,7 @@ class WorkerGateway:
         )
 
     def _handle_native(self, context):
+        require_gateway_owner(self._owner_check)
         binding = self._native_binding(context)
         if binding is None or not binding.runnable or binding.profile_ref is None:
             raise GatewayMessageError(
@@ -1345,6 +1352,7 @@ class WorkerGateway:
         return manifest
 
     def _prepare_native_context(self, context, spec, binding):
+        require_gateway_owner(self._owner_check)
         facts = self._native_facts(context)
         workspace = self._ensure_native_workspace(context, spec, binding)
         provider = self._workspace_provider(
@@ -4995,15 +5003,87 @@ class WorkerGateway:
         adapter = self._adapter_for_context(
             context, operation=RuntimeModuleOperation.OBSERVE
         )
+        native_link = None
+        if isinstance(adapter, AgentWorkerAdapter):
+            with self._uow_factory() as uow:
+                native_link = uow.execution_authorities.get_link(
+                    workspace_id, execution_id
+                )
         adapter_events = tuple(adapter.read_events(handle))
-        event_report = self._event_ingestor.ingest(
-            workspace_id=workspace_id,
-            execution_id=execution_id,
-            session_id=session_id,
-            lease_id=lease_id,
-            fencing_token=fencing_token,
-            events=adapter_events,
+        require_gateway_owner(self._owner_check)
+        if native_link is not None:
+            services = self._native_services
+            if (
+                services is None
+                or native_link.run_id is None
+                or session_id
+                != uuid5(NAMESPACE_URL, f"sidera.native.session:{native_link.run_id}")
+            ):
+                raise GatewayMessageError("original native observation is unavailable")
+            event_report = self._event_ingestor.ingest_original_page(
+                expected=native_link,
+                principal_id=services.principal_id,
+                events=adapter_events,
+            )
+        else:
+            event_report = self._event_ingestor.ingest(
+                workspace_id=workspace_id,
+                execution_id=execution_id,
+                session_id=session_id,
+                lease_id=lease_id,
+                fencing_token=fencing_token,
+                events=adapter_events,
+            )
+        return self._finish_session_sync(
+            context, session_id, handle, adapter, event_report
         )
+
+    def finish_original_observation(
+        self, expected: AgentExecutionLink, report: EventIngestionReport
+    ):
+        require_gateway_owner(self._owner_check)
+        with self._uow_factory() as uow:
+            current = uow.execution_authorities.get_link(
+                expected.workspace_id, expected.execution_id
+            )
+            authority = uow.execution_authorities.get(
+                expected.authority_id, workspace_id=expected.workspace_id
+            )
+            session = (
+                None
+                if expected.run_id is None
+                else uow.sessions.get_any(
+                    uuid5(NAMESPACE_URL, f"sidera.native.session:{expected.run_id}"),
+                    expected.workspace_id,
+                )
+            )
+            if (
+                current != expected
+                or authority is None
+                or authority.revoked
+                or session is None
+                or session.status is not ExecutionSessionStatus.ACTIVE
+            ):
+                raise GatewayRecoveryRequired(
+                    "original completion no longer owns the active Session"
+                )
+        context = self._load_context_by_ids(
+            workspace_id=expected.workspace_id,
+            execution_id=expected.execution_id,
+            lease_id=authority.lease_id,
+            fencing_token=authority.fencing_token,
+            operation=RuntimeModuleOperation.OBSERVE,
+        )
+        adapter = self._native_adapter(context)
+        return self._finish_session_sync(
+            context, session.id, _session_handle(session), adapter, report
+        )
+
+    def _finish_session_sync(self, context, session_id, handle, adapter, event_report):
+        require_gateway_owner(self._owner_check)
+        workspace_id = context.execution.workspace_id
+        execution_id = context.execution.id
+        fencing_token = context.binding.fencing_token
         completion_decision = self._load_completion_decision(
             context,
             session_id=session_id,
@@ -5033,6 +5113,7 @@ class WorkerGateway:
                         decision=completion_decision,
                     )
                 else:
+                    require_gateway_owner(self._owner_check)
                     code_result = self._capture_completion_result(
                         context,
                         completion_decision,
@@ -5077,6 +5158,7 @@ class WorkerGateway:
         self._report_local_verification_completion(context, event_report)
         self._report_interview_demo_completion(context, event_report)
         if completion_decision is not None:
+            require_gateway_owner(self._owner_check)
             reported = self._report_execution_completion(
                 context,
                 session_id=session_id,
@@ -5327,6 +5409,88 @@ class WorkerGateway:
                     exc_info=True,
                 )
         return synced
+
+    def reconcile_native_intention(self, expected: AgentExecutionLink):
+        require_gateway_owner(self._owner_check)
+        with self._uow_factory() as uow:
+            link = uow.execution_authorities.get_link(
+                expected.workspace_id, expected.execution_id
+            )
+            authority = uow.execution_authorities.get(
+                expected.authority_id, workspace_id=expected.workspace_id
+            )
+            if (
+                link != expected
+                or authority is None
+                or self._native_services is None
+                or authority.principal_id != self._native_services.principal_id
+            ):
+                raise GatewayRecoveryRequired("original native intention changed")
+        context = self._load_context_by_ids(
+            workspace_id=expected.workspace_id,
+            execution_id=expected.execution_id,
+            lease_id=authority.lease_id,
+            fencing_token=authority.fencing_token,
+            operation=RuntimeModuleOperation.START,
+            causation_id=self._native_preparation_receipt(expected).command_id,
+        )
+        self._require_normal_handoff_schedule(context.execution)
+        return self._handle_native(context)
+
+    @contextmanager
+    def original_observation_keeper(self, expected: AgentExecutionLink):
+        require_gateway_owner(self._owner_check)
+        with self._uow_factory() as uow:
+            authority = uow.execution_authorities.get(
+                expected.authority_id, workspace_id=expected.workspace_id
+            )
+            execution = uow.executions.get(expected.execution_id, expected.workspace_id)
+            lease = (
+                None
+                if authority is None
+                else uow.leases.get(authority.lease_id, expected.workspace_id)
+            )
+            live = (
+                authority is not None
+                and not authority.revoked
+                and execution is not None
+                and lease is not None
+                and execution.status
+                in {ExecutionStatus.LEASED, ExecutionStatus.RUNNING}
+                and execution.active_lease_id == lease.id
+                and execution.last_fencing_token == authority.fencing_token
+                and lease.status.value == "active"
+                and lease.expires_at > self._clock()
+            )
+        keeper = None
+        if live and authority is not None:
+            try:
+                context = self._load_context_by_ids(
+                    workspace_id=expected.workspace_id,
+                    execution_id=expected.execution_id,
+                    lease_id=authority.lease_id,
+                    fencing_token=authority.fencing_token,
+                    operation=RuntimeModuleOperation.OBSERVE,
+                )
+            except (GatewayError, DomainError):
+                context = None
+            if context is not None:
+                keeper = self._lease_keeper(context)
+        try:
+            if keeper is not None:
+                keeper.start()
+            yield
+            require_gateway_owner(self._owner_check)
+            if keeper is not None and (
+                keeper.health_error is not None or keeper.cancel_requested
+            ):
+                raise GatewayRecoveryRequired(
+                    "original observation lease is unavailable",
+                    code="native_recovery_required",
+                )
+        finally:
+            if keeper is not None:
+                keeper.stop()
 
     def sync_active_demo_sessions(self, workspace_id: UUID) -> int:
         """Backward-compatible name for the interview demo integration."""
@@ -6140,9 +6304,11 @@ class WorkerGateway:
             execution_id=item.execution_id,
             clock=self._clock,
             capability_snapshot=native_capabilities(),
+            owner_check=self._owner_check,
         )
 
     def _send_native_input(self, item, identity):
+        require_gateway_owner(self._owner_check)
         query_only = False
         with self._uow_factory() as uow:
             operation = uow.gateway_operations.get_by_operation_id(
@@ -6194,6 +6360,8 @@ class WorkerGateway:
             )
             return replace(delivery, native_identity=identity)
         except AgentError as exc:
+            if exc.code == "gateway_owner_lost":
+                raise
             return DeliveryResult(
                 identity.operation_id,
                 DeliveryOutcome.BLOCKED,
@@ -7689,12 +7857,14 @@ class OutboxClaimKeeper:
         message: OutboxMessage,
         *,
         interval_seconds: float,
+        owner_check: Callable[[], bool] | None = None,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("claim renewal interval must be positive")
         self._store = store
         self._message = message
         self._interval_seconds = interval_seconds
+        self._owner_check = owner_check
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lost = False
@@ -7724,6 +7894,7 @@ class OutboxClaimKeeper:
         if self._lost:
             return False
         try:
+            require_gateway_owner(self._owner_check)
             renewed = self._store.renew_claim(
                 self._message.id, self._message.claim_token
             )
@@ -7731,6 +7902,7 @@ class OutboxClaimKeeper:
             renewed = False
         if not renewed:
             self._lost = True
+            self._stop_event.set()
         return renewed
 
     def _run(self) -> None:
@@ -7751,6 +7923,7 @@ class GatewayAssignmentRunner:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         claim_renew_interval_seconds: float = 10.0,
         start_concurrency: int = 1,
+        owner_check: Callable[[], bool] | None = None,
     ) -> None:
         if claim_renew_interval_seconds <= 0:
             raise ValueError("claim renewal interval must be positive")
@@ -7762,6 +7935,7 @@ class GatewayAssignmentRunner:
         self._clock = clock
         self._claim_renew_interval_seconds = claim_renew_interval_seconds
         self._start_concurrency = start_concurrency
+        self._owner_check = owner_check
 
     def run_once(self, batch_size: int = 20) -> tuple[int, int, int]:
         if not 1 <= batch_size <= 1_000:
@@ -7773,6 +7947,7 @@ class GatewayAssignmentRunner:
 
         # Handle already-published stops before claiming assignments, so a slow
         # stop handler cannot leave a newly claimed assignment idle.
+        require_gateway_owner(self._owner_check)
         stop_messages = self._store.claim(batch_size, topics={STOP_TOPIC})
         claimed += len(stop_messages)
         stop_processed, stop_failed = self._process_messages(
@@ -7781,6 +7956,7 @@ class GatewayAssignmentRunner:
         processed += stop_processed
         failed += stop_failed
 
+        require_gateway_owner(self._owner_check)
         assignment_capacity = min(
             batch_size - claimed, self._start_concurrency
         )
@@ -7814,6 +7990,7 @@ class GatewayAssignmentRunner:
                     continue
 
                 stop_capacity = batch_size - claimed
+                require_gateway_owner(self._owner_check)
                 late_stop_messages = self._store.claim(
                     stop_capacity, topics={STOP_TOPIC}
                 )
@@ -7842,6 +8019,7 @@ class GatewayAssignmentRunner:
                 )
                 if assignment_capacity <= 0:
                     continue
+                require_gateway_owner(self._owner_check)
                 late_assignment_messages = self._store.claim(
                     assignment_capacity,
                     topics={ASSIGNMENT_TOPIC},
@@ -7850,10 +8028,12 @@ class GatewayAssignmentRunner:
                 for message in late_assignment_messages:
                     pending.add(executor.submit(self._process_message, message))
 
+        require_gateway_owner(self._owner_check)
         if self._active_session_sync is not None:
             try:
                 self._active_session_sync()
             except Exception:
+                require_gateway_owner(self._owner_check)
                 logger.exception("worker_gateway_active_session_sync_failed")
         return claimed, processed, failed
 
@@ -7874,16 +8054,19 @@ class GatewayAssignmentRunner:
         return sum(processed), sum(failed)
 
     def _process_message(self, message: OutboxMessage) -> tuple[int, int]:
+        require_gateway_owner(self._owner_check)
         claim_keeper = OutboxClaimKeeper(
             self._store,
             message,
             interval_seconds=self._claim_renew_interval_seconds,
+            owner_check=self._owner_check,
         )
         claim_keeper.start()
         try:
             self._gateway.handle(message)
         except (GatewayTerminalAssignmentError, GatewayObsoleteAssignmentError):
             claim_keeper.stop()
+            require_gateway_owner(self._owner_check)
             if claim_keeper.lost:
                 self._log_claim_loss(message)
                 return 0, 0
@@ -7893,6 +8076,7 @@ class GatewayAssignmentRunner:
             )
         except Exception as exc:  # noqa: BLE001
             claim_keeper.stop()
+            require_gateway_owner(self._owner_check)
             if claim_keeper.lost:
                 self._log_claim_loss(message)
                 return 0, 0
@@ -7909,6 +8093,7 @@ class GatewayAssignmentRunner:
             retry_at = self._clock().replace(microsecond=0)
             delay_seconds = min(300, 2 ** min(message.attempts, 8))
             retry_at += timedelta(seconds=delay_seconds)
+            require_gateway_owner(self._owner_check)
             return (
                 0,
                 int(
@@ -7922,6 +8107,7 @@ class GatewayAssignmentRunner:
             )
 
         claim_keeper.stop()
+        require_gateway_owner(self._owner_check)
         if claim_keeper.lost:
             self._log_claim_loss(message)
             return 0, 0

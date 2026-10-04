@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
+from sidera_control_plane.application.agent_worker_adapter import native_binding
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
@@ -148,6 +149,9 @@ class Reconciler:
                 or execution.status
                 not in {ExecutionStatus.LEASED, ExecutionStatus.RUNNING}
             ):
+                return _LeaseReconcileResult(expired=False, retry_queued=False)
+            if self._native_execution(uow, execution):
+                # Only original native operation proof/owned cleanup can release this writer.
                 return _LeaseReconcileResult(expired=False, retry_queued=False)
             worker = uow.workers.get(lease.worker_id, workspace_id, for_update=True)
             if worker is None:
@@ -333,6 +337,29 @@ class Reconciler:
                 expired=True,
                 retry_queued=retry is not None,
             )
+
+    @staticmethod
+    def _native_execution(uow: ControlPlaneUnitOfWork, execution: Execution) -> bool:
+        if (
+            uow.execution_authorities.get_link(execution.workspace_id, execution.id)
+            is not None
+        ):
+            return True
+        saved = uow.bindings.get_for_execution(execution.id, execution.workspace_id)
+        if saved is not None:
+            instance = uow.modules.get_instance(
+                saved.adapter_module_id, execution.workspace_id
+            )
+            definition = (
+                None
+                if instance is None
+                else uow.modules.get_definition(
+                    instance.definition_id, execution.workspace_id
+                )
+            )
+            if definition is not None and definition.provider == "agent-run":
+                return True
+        return native_binding(uow, execution) is not None
 
 
 def _system_envelope(

@@ -476,8 +476,14 @@ class WorkerItemProjectionService:
         placement_history = tuple(
             _placement_projection(item) for item in placement_values
         )
-        latest_event = _latest(self.events, key=_event_sort_key)
-        latest_checkpoint = _latest_checkpoint(self.events)
+        current_events = tuple(
+            event
+            for event in self.events
+            if current_execution is not None
+            and event.execution_id == current_execution.id
+        )
+        latest_event = _latest(current_events, key=_event_sort_key)
+        latest_checkpoint = _latest_checkpoint(current_events)
         read_only_reason = _read_only_reason(
             self.worker_item,
             current_runtime,

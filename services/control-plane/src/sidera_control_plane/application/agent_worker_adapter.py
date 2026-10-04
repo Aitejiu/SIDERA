@@ -342,12 +342,32 @@ def native_capabilities():
 def project_run_event(event: RunEvent, *, run_state=None):
     kind = f"native.{event.kind}"
     if event.kind in {"run.closed", "run.completed", "run.failed", "run.stopped"}:
-        state = run_state or event.data.get("state")
-        kind = {
-            "completed": "session.completed",
-            "failed": "session.failed",
-            "stopped": "session.closed",
-        }.get(state, kind)
+        # A snapshot can precede this immutable event or change before replay.
+        state = event.data.get("status", event.data.get("state"))
+        declared = {
+            "run.completed": "completed",
+            "run.failed": "failed",
+            "run.stopped": "stopped",
+        }.get(event.kind)
+        if state is None:
+            state = declared
+        if declared is not None and state != declared:
+            state = None
+        if not isinstance(state, str) or state not in {
+            "completed",
+            "failed",
+            "stopped",
+        }:
+            state = None
+        kind = (
+            {
+                "completed": "session.completed",
+                "failed": "session.failed",
+                "stopped": "session.closed",
+            }.get(state, kind)
+            if state is not None
+            else kind
+        )
     payload = dict(event.data)
     payload.update(run_id=str(event.run_id), native_kind=event.kind)
     if event.operation_id is not None:
@@ -356,7 +376,25 @@ def project_run_event(event: RunEvent, *, run_state=None):
         payload["response_id"] = str(event.response_id)
     if kind == "session.completed":
         payload["outcome"] = "succeeded"
-    return AdapterEvent(kind, event.sequence, payload, event.occurred_at)
+    canonical = json.dumps(
+        event.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return AdapterEvent(
+        kind,
+        event.sequence,
+        payload,
+        event.occurred_at,
+        raw_ref=f"native-event-sha256:{digest}",
+    )
+
+
+def require_gateway_owner(owner_check):
+    if owner_check is not None and not owner_check():
+        raise AgentError("gateway_owner_lost", "Native owner is no longer available.")
 
 
 class AgentWorkerAdapter:
@@ -371,12 +409,14 @@ class AgentWorkerAdapter:
         execution_id,
         clock=None,
         capability_snapshot=None,
+        owner_check=None,
     ):
         self._uow_factory, self._execution = uow_factory, execution
         self._builder, self._authorizer = input_builder, authorizer
         self._workspace_id, self._execution_id = workspace_id, execution_id
         self._clock = clock or (lambda: datetime.now(UTC))
         self._capabilities = capability_snapshot or native_capabilities()
+        self._owner_check = owner_check
 
     def probe(self, config):
         return self._capabilities
@@ -451,6 +491,7 @@ class AgentWorkerAdapter:
         return page
 
     def start_session(self, spec, workspace, *, operation_id):
+        require_gateway_owner(self._owner_check)
         if (
             spec.workspace_id != self._workspace_id
             or spec.execution_id != self._execution_id
@@ -487,6 +528,7 @@ class AgentWorkerAdapter:
                         "native_request_changed",
                         "Native start request no longer matches its saved fingerprint.",
                     )
+            require_gateway_owner(self._owner_check)
             try:
                 receipt = self._execution.start(request)
             except Exception:  # noqa: BLE001 - an unconfirmed external admission is query-only
@@ -496,11 +538,16 @@ class AgentWorkerAdapter:
                     run_id=None,
                     reason_code="native_start_unconfirmed",
                 )
+            require_gateway_owner(self._owner_check)
             try:
                 with self._uow_factory() as uow:
                     link = uow.execution_authorities.record_start(
                         link, receipt, now=self._clock()
                     )
+            except AgentError as exc:
+                if exc.code == "gateway_owner_lost":
+                    raise
+                raise NativeStartDeferred(self._canonical()) from None
             except Exception:  # noqa: BLE001 - a lost persistence ACK cannot authorize replay
                 # The saved starting intention remains query-only after a lost ACK.
                 raise NativeStartDeferred(self._canonical()) from None
@@ -511,6 +558,7 @@ class AgentWorkerAdapter:
                 raise NativeStartDeferred(link) from None
             if not lookup.found or lookup.receipt is None:
                 raise NativeStartDeferred(link)
+            require_gateway_owner(self._owner_check)
             with self._uow_factory() as uow:
                 link = uow.execution_authorities.record_start(
                     link, lookup.receipt, now=self._clock()
@@ -547,7 +595,7 @@ class AgentWorkerAdapter:
                 raise AgentError(
                     "permission_denied", "Original native Session is unavailable."
                 )
-            sequence = session.last_sequence
+            sequence = min(session.last_sequence, link.event_cursor)
         snapshot = self.get_run(link.workspace_id, link.run_id)
         page = self._events(link, sequence)
         return tuple(
@@ -568,9 +616,11 @@ class AgentWorkerAdapter:
             )
 
     def stop_session(self, handle, *, operation_id):
+        require_gateway_owner(self._owner_check)
         link = self._canonical()
         self._check_handle(link, handle)
         self._authorizer.require(link.authority_id, "run.stop", link.workspace_id)
+        require_gateway_owner(self._owner_check)
         receipt = self._execution.stop(
             RunStop(
                 workspace_id=link.workspace_id,
@@ -593,6 +643,7 @@ class AgentWorkerAdapter:
         )
 
     def send_input(self, handle, text, attachment_refs, *, operation_id):
+        require_gateway_owner(self._owner_check)
         link = self._canonical()
         self._check_handle(link, handle)
         self._authorizer.require(link.authority_id, "run.input", link.workspace_id)
@@ -612,6 +663,7 @@ class AgentWorkerAdapter:
             attachment_refs=attachment_refs,
         )
         self._authorizer.require(link.authority_id, "run.input", link.workspace_id)
+        require_gateway_owner(self._owner_check)
         try:
             return self._input_result(
                 link, operation_id, self._execution.send_input(request)

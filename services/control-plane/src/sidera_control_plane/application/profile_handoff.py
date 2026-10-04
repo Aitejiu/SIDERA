@@ -13,6 +13,7 @@ from sidera_agents.errors import AgentError
 from sidera_control_plane.application.agent_worker_adapter import (
     NativeContextPreparationReceipt,
     read_native_preparation_receipt,
+    require_gateway_owner,
 )
 from sidera_control_plane.application.assignments import (
     AssignmentCommandHandler,
@@ -783,10 +784,11 @@ class ProfileHandoffValidator:
 class ProfileHandoffPhaseService:
     """Translate native public facts; the existing Coordinator owns phase changes."""
 
-    def __init__(self, uow_factory, *, native_services, clock):
+    def __init__(self, uow_factory, *, native_services, clock, owner_check=None):
         self._uow_factory = uow_factory
         self._services = native_services
         self._clock = clock
+        self._owner_check = owner_check
         self._reader = ExecutionAuthorityReader(
             uow_factory,
             principal=lambda: native_services.principal_id,
@@ -1198,6 +1200,7 @@ class ProfileHandoffPhaseService:
         return operation, True
 
     def _run(self, payload):
+        require_gateway_owner(self._owner_check)
         self._reader.require(
             payload.source_authority_id, "run.read", payload.workspace_id
         )
@@ -1206,6 +1209,7 @@ class ProfileHandoffPhaseService:
             payload.source_run_id,
             grant_id=payload.source_authority_id,
         )
+        require_gateway_owner(self._owner_check)
         self._reader.require(
             payload.source_authority_id, "run.read", payload.workspace_id
         )
@@ -1330,6 +1334,7 @@ class ProfileHandoffPhaseService:
         return evidence
 
     def stop(self, transition):
+        require_gateway_owner(self._owner_check)
         with self._uow_factory() as uow:
             current = self._current(
                 uow, transition, HandoffGateOperation.COORDINATOR_STOP_SOURCE, lock=True
@@ -1367,6 +1372,7 @@ class ProfileHandoffPhaseService:
                     "run.stop" if first else "run.read",
                     payload.workspace_id,
                 )
+                require_gateway_owner(self._owner_check)
                 receipt = (
                     self._services.execution.stop(
                         RunStop(
@@ -1384,6 +1390,7 @@ class ProfileHandoffPhaseService:
                         grant_id=payload.source_authority_id,
                     )
                 )
+                require_gateway_owner(self._owner_check)
                 self._reader.require(
                     payload.source_authority_id, "run.read", payload.workspace_id
                 )
@@ -1425,8 +1432,13 @@ class ProfileHandoffPhaseService:
                     observed_sequence=snapshot.last_event_sequence,
                 )
                 evidence.assert_matches(checkpoint)
-            except (AgentError, TimeoutError, ValidationError, ContractValidationError):
+            except AgentError as exc:
+                if exc.code == "gateway_owner_lost":
+                    raise
                 return None
+            except (TimeoutError, ValidationError, ContractValidationError):
+                return None
+        require_gateway_owner(self._owner_check)
         with self._uow_factory() as uow:
             locked = self._current(
                 uow, transition, HandoffGateOperation.COORDINATOR_STOP_SOURCE, lock=True
@@ -1502,6 +1514,7 @@ class ProfileHandoffPhaseService:
                 )
                 uow.handoff_transitions.save(locked, previous_transition)
             if owned:
+                require_gateway_owner(self._owner_check)
                 assert lease is not None and worker is not None
                 previous = session.version
                 session.close(lost=False, now=self._clock())

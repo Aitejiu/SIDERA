@@ -17,6 +17,7 @@ from sidera_control_plane.application.agent_sources import (
 from sidera_control_plane.application.agent_worker_adapter import (
     native_authority_pins,
     request_fingerprint,
+    require_gateway_owner,
 )
 from sidera_control_plane.application.execution_authority import (
     PlanningActionTarget,
@@ -51,6 +52,7 @@ class AgentPlannerAdapter:
         clock=None,
         wait=None,
         poll_interval_seconds=1.0,
+        owner_check=None,
     ):
         if poll_interval_seconds <= 0:
             raise ValueError("native planner poll interval must be positive")
@@ -59,6 +61,7 @@ class AgentPlannerAdapter:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._wait = wait or time.sleep
         self._poll_interval = poll_interval_seconds
+        self._owner_check = owner_check
         self._sources = PlanningContextSourceReader(
             uow_factory,
             authorizer=services.authorizer,
@@ -67,6 +70,7 @@ class AgentPlannerAdapter:
         )
 
     def plan(self, planner_input, control):
+        require_gateway_owner(self._owner_check)
         usage = PlanningUsage.unknown()
         if (
             control.operation_id != planner_input.operation_id
@@ -121,9 +125,12 @@ class AgentPlannerAdapter:
                         "workspace.execute",
                         link.start_request.workspace,
                     )
+                    require_gateway_owner(self._owner_check)
                     receipt = self._services.execution.start(link.start_request)
+                    require_gateway_owner(self._owner_check)
                     link = self._record_receipt(link, receipt)
                 except Exception:  # noqa: BLE001 - Preserve uncertain public admission or commit.
+                    require_gateway_owner(self._owner_check)
                     # A failed public call or receipt commit cannot prove non-admission.
                     link = self._original(planner_input)
                     if link is None:
@@ -143,10 +150,11 @@ class AgentPlannerAdapter:
                         link.start_operation_id,
                         grant_id=link.authority_id,
                     )
+                    require_gateway_owner(self._owner_check)
                     if found.found and found.receipt is not None:
                         link = self._record_receipt(link, found.receipt)
-                except Exception:  # noqa: BLE001, S110 - Keep original uncertainty; no private diagnostics.
-                    pass
+                except Exception:  # noqa: BLE001 - Keep original uncertainty; no private diagnostics.
+                    require_gateway_owner(self._owner_check)
             if link.status == "waiting_capacity":
                 backoff = planner_input.profile_snapshot.retry_policy.backoff_seconds
                 delay = (
@@ -263,7 +271,112 @@ class AgentPlannerAdapter:
                 )
             self._pause(self._poll_interval, control)
 
+    def recover_original_result(self, planner_input):
+        require_gateway_owner(self._owner_check)
+        link = self._original(planner_input)
+        if link is None or link.run_id is None:
+            return None
+        text, cursor, response_id, completed = "", 0, None, False
+        usage = PlanningUsage.unknown()
+        # The saved cursor is observation progress, not a durable output buffer.
+        for _ in range(100):
+            self._require_original(link, "run.read")
+            page = self._services.execution.list_events(
+                link.workspace_id,
+                link.run_id,
+                cursor,
+                limit=100,
+                grant_id=link.authority_id,
+            )
+            require_gateway_owner(self._owner_check)
+            for event in page.events:
+                if (
+                    event.run_id != link.run_id
+                    or event.sequence != cursor + 1
+                    or (
+                        event.operation_id is not None
+                        and event.operation_id != link.start_operation_id
+                    )
+                ):
+                    raise AgentError(
+                        "configuration_mismatch",
+                        "Original planning event identity changed.",
+                    )
+                cursor = event.sequence
+                if event.kind == "response.started":
+                    if response_id is not None and event.response_id != response_id:
+                        raise AgentError(
+                            "configuration_mismatch",
+                            "Original planning response changed.",
+                        )
+                    response_id = event.response_id
+                elif response_id is not None and event.response_id == response_id:
+                    if event.kind == "progress.updated":
+                        value, update_type = (
+                            event.data.get("text"),
+                            event.data.get("update_type"),
+                        )
+                        if isinstance(value, str) and update_type in {
+                            "agent_message_chunk",
+                            "agent_message",
+                        }:
+                            text = (
+                                text + value
+                                if update_type == "agent_message_chunk"
+                                else value
+                            )
+                            if (
+                                len(text.encode("utf-8"))
+                                > planner_input.profile_snapshot.budget.max_context_bytes
+                            ):
+                                raise AgentError(
+                                    "native_output_budget_exceeded",
+                                    "Original planning output exceeds its saved budget.",
+                                )
+                    elif event.kind == "response.completed":
+                        completed = True
+                    elif event.kind == "usage":
+                        usage = self._observed_usage(event, usage)
+            if page.next_sequence != cursor:
+                raise AgentError(
+                    "configuration_mismatch", "Original planning event cursor changed."
+                )
+            self._require_original(link, "run.read")
+            snapshot = self._services.execution.get_run(
+                link.workspace_id, link.run_id, grant_id=link.authority_id
+            )
+            require_gateway_owner(self._owner_check)
+            self._check_snapshot(link, snapshot)
+            terminal = snapshot.state.value in {"completed", "failed", "stopped"}
+            closed = (
+                terminal
+                and not page.has_more
+                and cursor >= snapshot.last_event_sequence
+            )
+            if closed:
+                with self._uow_factory() as uow:
+                    uow.planning_authorities.save_original_observation(
+                        link,
+                        event_cursor=max(cursor, link.event_cursor),
+                        response_id=response_id,
+                        closed=True,
+                    )
+                if completed and snapshot.state.value == "completed":
+                    return parse_planner_result(
+                        text, planner_input, "agent-run", observed_usage=usage
+                    )
+                return self._failure(
+                    "invalid_planner_output", False, usage, retryable=True
+                )
+            if not page.has_more:
+                return None
+        raise AgentError(
+            "native_recovery_required",
+            "Original planning output needs a larger bounded recovery scan.",
+        )
+
     def _prepare(self, planner_input, control):
+        require_gateway_owner(self._owner_check)
         if self._workspace_provider is None:
             raise AgentError(
                 "planning_workspace_unavailable", "Planning workspace is unavailable."
@@ -524,6 +637,7 @@ class AgentPlannerAdapter:
             return link
 
     def _save(self, link, **changes):
+        require_gateway_owner(self._owner_check)
         with self._uow_factory() as uow:
             authority = uow.planning_authorities.get(link.authority_id)
             run = uow.planning_runs.get(link.planning_run_id, link.workspace_id)
@@ -635,6 +749,7 @@ class AgentPlannerAdapter:
             )
 
     def _halt(self, planner_input, link, code, usage):
+        require_gateway_owner(self._owner_check)
         if link.not_admitted or link.status == "pending":
             return self._failure(
                 "native_capacity_timeout" if code == "native_deadline" else code,
@@ -649,6 +764,7 @@ class AgentPlannerAdapter:
         link = self._try_save(link, status="cleanup_pending", reason_code=code)
         try:
             self._require_original(link, "run.stop")
+            require_gateway_owner(self._owner_check)
             receipt = self._services.execution.stop(
                 RunStop(
                     workspace_id=link.workspace_id,
@@ -677,6 +793,7 @@ class AgentPlannerAdapter:
         return self._failure("native_cleanup_pending", True, usage)
 
     def classify_failure(self, planner_input, code, *, usage=None):
+        require_gateway_owner(self._owner_check)
         link = self._original(planner_input)
         unknown = (
             link is not None

@@ -249,6 +249,45 @@ def _service(**changes: object) -> WorkerItemProjectionService:
     return WorkerItemProjectionService(**values)
 
 
+@pytest.mark.parametrize("current_has_events", [True, False])
+def test_late_original_history_cannot_replace_current_progress(current_has_events):
+    old_progress = replace(
+        _events()[0],
+        id=UUID(int=901),
+        execution_id=EXECUTION_ONE_ID,
+        session_id=SESSION_ONE_ID,
+        occurred_at=NOW + timedelta(minutes=10),
+        event_type="progress",
+        payload={"summary": "late original history"},
+    )
+    old_checkpoint = replace(
+        _events()[1],
+        id=UUID(int=902),
+        execution_id=EXECUTION_ONE_ID,
+        session_id=SESSION_ONE_ID,
+        occurred_at=NOW + timedelta(minutes=11),
+        payload={"title": "old checkpoint"},
+    )
+    current = _events() if current_has_events else ()
+    service = _service(events=(*current, old_progress, old_checkpoint))
+    workspace = service.compose_workspace()
+    expected = _service(events=current).compose_workspace()
+    assert workspace.current_runtime.execution_id == EXECUTION_TWO_ID
+    assert workspace.current_step == expected.current_step
+    assert workspace.latest_checkpoint == expected.latest_checkpoint
+    assert service.events[-2:] == (old_progress, old_checkpoint)
+    assert {fact.id for fact in service.activity_facts()} >= {
+        old_progress.id,
+        old_checkpoint.id,
+    }
+
+
+def test_no_execution_does_not_borrow_historical_progress():
+    workspace = _service(executions=()).compose_workspace()
+    assert workspace.current_step is None
+    assert workspace.latest_checkpoint is None
+
+
 def test_worker_workspace_exposes_current_runtime_and_placement_history() -> None:
     workspace = _service().compose_workspace()
 

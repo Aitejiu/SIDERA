@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from types import TracebackType
 from typing import Self
@@ -223,10 +223,15 @@ class SqlAlchemyUnitOfWork:
     results: ResultRepositoryPort
 
     def __init__(
-        self, database: Database, *, projection_change_retention_seconds: int = 604_800
+        self,
+        database: Database,
+        *,
+        projection_change_retention_seconds: int = 604_800,
+        before_commit: Callable[[], None] | None = None,
     ) -> None:
         self._database = database
         self._projection_change_retention_seconds = projection_change_retention_seconds
+        self._before_commit = before_commit
 
     def __enter__(self) -> Self:
         self.session = Session(self._database.engine, expire_on_commit=False)
@@ -315,6 +320,8 @@ class SqlAlchemyUnitOfWork:
     ) -> None:
         try:
             if exc_type is None:
+                if self._before_commit is not None:
+                    self._before_commit()
                 self.session.commit()
             else:
                 self.session.rollback()
