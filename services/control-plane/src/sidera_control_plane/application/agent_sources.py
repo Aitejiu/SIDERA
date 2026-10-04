@@ -356,7 +356,12 @@ class TaskContextSourceReader:
         return _read_pinned_source(self, grant_id, ref)
 
     def context_items(
-        self, grant_id: UUID, execution_id: UUID, *, reserved_bytes: int = 0
+        self,
+        grant_id: UUID,
+        execution_id: UUID,
+        *,
+        reserved_bytes: int = 0,
+        required_refs: tuple[SourceRef, ...] = (),
     ) -> tuple[ContextItem, ...]:
         if type(reserved_bytes) is not int or reserved_bytes < 0:
             raise ValueError("Reserved input bytes must be non-negative")
@@ -369,6 +374,10 @@ class TaskContextSourceReader:
             ):
                 _deny()
             refs = authority.sources
+        if len(set(required_refs)) != len(required_refs) or set(required_refs) - set(
+            refs
+        ):
+            _deny()
         facts = self.validated_facts(grant_id, refs[0])
         identities = tuple(_identity(ref) for ref in refs)
         if len({identity.section for identity in identities}) != len(refs):
@@ -393,6 +402,9 @@ class TaskContextSourceReader:
                     _deny()
                 continue
             item = _item(ref, section, len(result), required)
+            required = required or ref in required_refs
+            if required and not item.required:
+                item = item.model_copy(update={"required": True})
             try:
                 content = self.read(grant_id, ref)
             except AgentError as exc:
@@ -405,6 +417,8 @@ class TaskContextSourceReader:
             else:
                 total_bytes += len(content.text.encode("utf-8"))
             result.append(item)
+        if set(required_refs) - {item.source_ref for item in result}:
+            _deny()
         limit = MAX_CONTEXT_PAYLOAD_BYTES
         if (
             isinstance(

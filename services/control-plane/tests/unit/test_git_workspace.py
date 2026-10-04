@@ -16,6 +16,7 @@ from sidera_control_plane.domain.workspace import (
     CheckoutMode,
     ExecutionSpec,
     RepositoryCheckoutSpec,
+    WorkspaceLifecycle,
 )
 
 NOW = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
@@ -210,3 +211,76 @@ def test_release_refuses_active_workspace_and_quarantines_failed_cleanup(
     with pytest.raises(WorkspaceProviderError, match="quarantined"):
         manager.release(manifest, operation_id=uuid4())
     assert manifest.lifecycle.value == "quarantined"
+
+
+def test_freeze_recognizes_exact_persisted_activation(tmp_path: Path) -> None:
+    repository, revision = _repository(tmp_path)
+    root = tmp_path / "workspaces"
+    root.mkdir()
+    manager = GitWorktreeWorkspaceManager(root)
+    prepared = manager.prepare(_spec(repository, revision), operation_id=uuid4())
+    prepared.mark_preparing()
+    prepared.mark_ready()
+    persisted = replace(prepared)
+    persisted.mark_active()
+
+    frozen = manager.freeze(persisted, operation_id=uuid4())
+
+    assert frozen is persisted
+    assert frozen.lifecycle is WorkspaceLifecycle.FROZEN
+    assert frozen.version == 5
+    assert prepared.lifecycle is WorkspaceLifecycle.READY
+    assert prepared.version == 3
+    assert (
+        manager.physical_directory(frozen)
+        == (root / str(frozen.execution_id)).resolve()
+    )
+    assert manager.freeze(replace(frozen), operation_id=uuid4()).id == frozen.id
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        "stale_version",
+        "jumped_version",
+        "workspace",
+        "fence",
+        "location",
+        "checkout",
+        "branch",
+        "lifecycle",
+    ],
+)
+def test_freeze_rejects_other_persisted_activation_changes(
+    tmp_path: Path, changed: str
+) -> None:
+    repository, revision = _repository(tmp_path)
+    root = tmp_path / "workspaces"
+    root.mkdir()
+    manager = GitWorktreeWorkspaceManager(root)
+    prepared = manager.prepare(_spec(repository, revision), operation_id=uuid4())
+    prepared.mark_preparing()
+    prepared.mark_ready()
+    persisted = replace(prepared)
+    persisted.mark_active()
+    if changed == "stale_version":
+        persisted.version = prepared.version
+    elif changed == "jumped_version":
+        persisted.version += 1
+    elif changed == "workspace":
+        persisted.workspace_id = uuid4()
+    elif changed == "fence":
+        persisted.fencing_token += 1
+    elif changed == "location":
+        persisted.location_ref = "git-worktree://wrong-location"
+    elif changed == "checkout":
+        persisted.checkouts = (replace(persisted.checkouts[0], branch="wrong-branch"),)
+    elif changed == "branch":
+        _git(root / str(prepared.execution_id), "checkout", "-b", "wrong-branch")
+    else:
+        persisted.lifecycle = WorkspaceLifecycle.PREPARING
+
+    with pytest.raises(WorkspaceProviderError):
+        manager.freeze(persisted, operation_id=uuid4())
+    assert prepared.lifecycle is WorkspaceLifecycle.READY
+    assert prepared.version == 3

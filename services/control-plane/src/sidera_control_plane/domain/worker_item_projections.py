@@ -216,7 +216,7 @@ class ActiveHandoffProjection:
     source_execution_id: UUID
     source_session_id: UUID
     source_worker_id: UUID
-    target_worker_id: UUID
+    target_worker_id: UUID | None
     target_execution_id: UUID | None
     target_session_id: UUID | None
     attention_required: bool

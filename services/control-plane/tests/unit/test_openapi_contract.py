@@ -111,6 +111,7 @@ EXPECTED_TYPED_POST_RESPONSES = {
 }
 
 EXPECTED_PLANNING_COMMAND_PAYLOADS = {
+    "SendExecutionInput": "SendExecutionInputPayload",
     "SetSubtaskAssignee": "SetAgentAssigneePayload",
     "SetWorkerItemAssignee": "SetAgentAssigneePayload",
     "UpdateUnstartedAgentBinding": "UpdateUnstartedAgentBindingPayload",
@@ -141,6 +142,8 @@ EXPECTED_PLANNING_COMMAND_PAYLOADS = {
     "RecoverWorkerTransition": "RecoverWorkerTransitionPayload",
     "PrepareWorkerHandoff": "PrepareWorkerHandoffPayload",
     "ConfirmWorkerHandoff": "ConfirmWorkerHandoffPayload",
+    "PrepareProfileHandoff": "PrepareProfileHandoffPayload",
+    "ConfirmProfileHandoff": "ConfirmProfileHandoffPayload",
     "CancelWorkerHandoff": "CancelWorkerHandoffPayload",
     "RecoverWorkerHandoff": "RecoverWorkerHandoffPayload",
     "PauseCollaborationRelease": "PauseCollaborationReleasePayload",
@@ -232,7 +235,18 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
         response_schema = first["paths"][path]["get"]["responses"]["200"]["content"][
             "application/json"
         ]["schema"]
-        assert response_schema == {"$ref": f"#/components/schemas/{schema_name}"}
+        native_variant = {
+            "HandoffProposalResponse": "NativeHandoffProposalResponse",
+            "HandoffTransitionResponse": "NativeHandoffTransitionResponse",
+        }.get(schema_name)
+        if native_variant is None:
+            assert response_schema == {"$ref": f"#/components/schemas/{schema_name}"}
+        else:
+            assert response_schema["anyOf"] == [
+                {"$ref": f"#/components/schemas/{schema_name}"},
+                {"$ref": f"#/components/schemas/{native_variant}"},
+            ]
+            assert native_variant in first["components"]["schemas"]
         assert schema_name in first["components"]["schemas"]
 
     for path, schema_name in EXPECTED_TYPED_POST_RESPONSES.items():
@@ -599,9 +613,54 @@ def test_native_assignment_and_planning_policy_export(tmp_path: Path) -> None:
             ]
 
 
+def test_native_input_command_exports_exact_context_variants(tmp_path: Path) -> None:
+    document = export_openapi(tmp_path / "openapi.json")
+    schemas = document["components"]["schemas"]
+    assert document["x-sidera-command-payloads"]["SendExecutionInput"] == {
+        "$ref": "#/components/schemas/SendExecutionInputPayload"
+    }
+    assert schemas["SendExecutionInputPayload"]["properties"]["context"] == {
+        "anyOf": [
+            {"$ref": "#/components/schemas/ExecutionContextAddressPayload"},
+            {"$ref": "#/components/schemas/NativeExecutionContextAddressPayload"},
+        ],
+        "title": "Context",
+    }
+    native = schemas["NativeExecutionContextAddressPayload"]
+    assert native["additionalProperties"] is False
+    assert native["properties"]["execution_mode"]["const"] == "native_profile"
+    assert native["properties"]["binding_version"]["minimum"] == 1
+    assert native["properties"]["run_id"]["format"] == "uuid"
+    assert native["required"] == schemas["ExecutionContextAddressPayload"][
+        "required"
+    ] + [
+        "execution_mode",
+        "binding_version",
+        "run_id",
+    ]
+
+
 def test_committed_openapi_matches_current_export(tmp_path: Path) -> None:
     output = tmp_path / "openapi.json"
     exported = export_openapi(output)
     committed_path = Path(__file__).resolve().parents[4] / "apps/web/openapi.json"
 
     assert json.loads(committed_path.read_text(encoding="utf-8")) == exported
+
+
+def test_active_handoff_export_allows_only_truthful_nullable_target(
+    tmp_path: Path,
+) -> None:
+    schemas = export_openapi(tmp_path / "openapi.json")["components"]["schemas"]
+    summary = schemas["ActiveHandoffProjectionResponse"]
+    assert summary["properties"]["target_worker_id"]["anyOf"] == [
+        {"type": "string", "format": "uuid"},
+        {"type": "null"},
+    ]
+    assert "target_worker_id" in summary["required"]
+    assert schemas["WorkerWorkspaceProjectionResponse"]["properties"]["active_handoff"][
+        "anyOf"
+    ] == [
+        {"$ref": "#/components/schemas/ActiveHandoffProjectionResponse"},
+        {"type": "null"},
+    ]

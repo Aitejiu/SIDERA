@@ -23,6 +23,7 @@ from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.application.handoff_commands import HandoffCommandError
 from sidera_control_plane.config import Settings
 from sidera_control_plane.demo.governance import arm_demo_governance_evaluation
+from sidera_control_plane.domain.agent_bindings import AssignmentDenied
 from sidera_control_plane.domain.errors import ValidationError
 
 router = APIRouter(prefix="/api/v1")
@@ -141,6 +142,15 @@ def _execute_command(
     settings: Settings,
     trusted_identity: TrustedAssignmentIdentity | None = None,
 ) -> CommandResponse:
+    if request.command_type in {"PrepareProfileHandoff", "ConfirmProfileHandoff"}:
+        require_trusted_assignment_identity(request.to_envelope(), trusted_identity)
+        if (
+            request.command_type == "ConfirmProfileHandoff"
+            and request.actor.type != "user"
+        ):
+            raise AssignmentDenied(
+                "native handoff confirmation requires a trusted Web human"
+            )
     if request.command_type in ASSIGNMENT_COMMAND_TYPES:
         require_trusted_assignment_identity(request.to_envelope(), trusted_identity)
     require_demo_runtime_binding(request, settings)

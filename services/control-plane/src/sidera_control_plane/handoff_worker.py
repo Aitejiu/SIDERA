@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from sidera_control_plane.adapters.git_workspace import GitWorktreeWorkspaceManager
+from sidera_control_plane.application.agent_worker_adapter import NativeWorkerServices
 from sidera_control_plane.application.handoff_context import HandoffContextService
 from sidera_control_plane.application.handoff_coordinator import (
     HandoffCoordinator,
@@ -19,8 +20,10 @@ from sidera_control_plane.application.handoff_input_transfer import (
     HandoffInputTransferService,
 )
 from sidera_control_plane.application.handoff_target import HandoffTargetService
+from sidera_control_plane.application.profile_handoff import ProfileHandoffPhaseService
 from sidera_control_plane.application.scheduler import Scheduler
 from sidera_control_plane.application.worker_policy import LowestCostWorkerPolicy
+from sidera_control_plane.application.worker_runtime import WorkerRuntimeResolver
 from sidera_control_plane.application.workspace_handoff import WorkspaceHandoffService
 from sidera_control_plane.config import Settings
 from sidera_control_plane.gateway_worker import GatewayRuntime
@@ -41,8 +44,14 @@ class HandoffWorkerRuntime:
 
 
 def build_handoff_worker(
-    settings: Settings, *, gateway_runtime: GatewayRuntime
+    settings: Settings,
+    *,
+    gateway_runtime: GatewayRuntime,
+    native_services: NativeWorkerServices | None = None,
 ) -> HandoffWorkerRuntime:
+    workspace_provider = gateway_runtime.workspace_provider
+    if native_services is not None and workspace_provider is None:
+        raise ValueError("native_handoff_workspace_provider_required")
     database = gateway_runtime.database
     uow_factory = lambda: SqlAlchemyUnitOfWork(
         database,
@@ -50,11 +59,12 @@ def build_handoff_worker(
             settings.projection_change_retention_seconds
         ),
     )
-    workspace_provider = GitWorktreeWorkspaceManager(
-        settings.workspace_root,
-        retention_seconds=settings.workspace_retention_seconds,
-        git_executable=settings.git_executable,
-    )
+    if workspace_provider is None:
+        workspace_provider = GitWorktreeWorkspaceManager(
+            settings.workspace_root,
+            retention_seconds=settings.workspace_retention_seconds,
+            git_executable=settings.git_executable,
+        )
     scheduler = Scheduler(
         uow_factory=uow_factory,
         policy=LowestCostWorkerPolicy(),
@@ -63,6 +73,7 @@ def build_handoff_worker(
         worker_heartbeat_timeout_seconds=settings.worker_heartbeat_timeout_seconds,
         context_enforcement=True,
         context_package_cutover_at=settings.context_package_cutover_at,
+        runtime_resolver=WorkerRuntimeResolver(native_services=native_services),
     )
     coordinator = HandoffCoordinator(
         uow_factory=uow_factory,
@@ -82,6 +93,13 @@ def build_handoff_worker(
         lease_ttl_seconds=settings.handoff_lease_ttl_seconds,
         backoff_max_seconds=settings.handoff_backoff_max_seconds,
         clock=lambda: datetime.now(UTC),
+        native_handoff=None
+        if native_services is None
+        else ProfileHandoffPhaseService(
+            uow_factory,
+            native_services=native_services,
+            clock=lambda: datetime.now(UTC),
+        ),
     )
     return HandoffWorkerRuntime(
         coordinator=coordinator,

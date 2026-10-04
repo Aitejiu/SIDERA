@@ -163,8 +163,14 @@ def build_gateway_owner(settings: Settings, *, native_services=None) -> GatewayO
         input_runtime = build_input_dispatcher(
             settings, gateway_runtime=gateway_runtime
         )
-        handoff_runtime = build_handoff_worker(
-            settings, gateway_runtime=gateway_runtime
+        handoff_runtime = (
+            build_handoff_worker(settings, gateway_runtime=gateway_runtime)
+            if native_services is None
+            else build_handoff_worker(
+                settings,
+                gateway_runtime=gateway_runtime,
+                native_services=native_services,
+            )
         )
     except BaseException:
         if gateway_runtime is not None:

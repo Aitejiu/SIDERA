@@ -2343,6 +2343,9 @@ class ExecutionInputModel(TimestampMixin, Base):
     attachment_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     operation_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    last_query_selected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     failure_code: Mapped[str | None] = mapped_column(String(100))
     superseded_reason: Mapped[str | None] = mapped_column(String(500))
     version: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -5384,8 +5387,20 @@ class HandoffProposalModel(TimestampMixin, Base):
     __tablename__ = "handoff_proposals"
     __table_args__ = (
         CheckConstraint(
-            "proposal_schema_version >= 1",
+            "proposal_schema_version IN (1, 2)",
             name="ck_handoff_proposals_schema_version",
+        ),
+        CheckConstraint(
+            "((proposal_schema_version = 1 AND target_worker_id IS NOT NULL "
+            "AND target_worker_version IS NOT NULL AND target_capability_snapshot_hash IS NOT NULL) "
+            "OR (proposal_schema_version = 2 AND target_worker_id IS NULL "
+            "AND target_worker_version IS NULL AND target_capability_snapshot_hash IS NULL "
+            "AND jsonb_typeof(payload->'proposal_schema_version') = 'number' "
+            "AND payload->>'proposal_schema_version' = '2' "
+            "AND jsonb_typeof(payload->'target_assignee') = 'object' "
+            "AND payload->'target_assignee'->>'kind' IN ('profile', 'human') "
+            "AND jsonb_typeof(payload->'target_assignee'->'id') = 'string')) IS TRUE",
+            name="ck_handoff_proposals_variant",
         ),
         CheckConstraint(
             "source_execution_version >= 1 AND source_session_version >= 1 "
@@ -5562,16 +5577,12 @@ class HandoffProposalModel(TimestampMixin, Base):
     )
     observed_plan_generation: Mapped[int] = mapped_column(Integer, nullable=False)
     observed_plan_head_version: Mapped[int] = mapped_column(Integer, nullable=False)
-    target_worker_id: Mapped[UUID] = mapped_column(
-        PostgreSQLUUID(as_uuid=True), nullable=False
-    )
-    target_worker_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    target_worker_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    target_worker_version: Mapped[int | None] = mapped_column(Integer)
     target_runtime_snapshot: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False
     )
-    target_capability_snapshot_hash: Mapped[str] = mapped_column(
-        String(64), nullable=False
-    )
+    target_capability_snapshot_hash: Mapped[str | None] = mapped_column(String(64))
     target_policy_reason: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     target_policy_facts: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     transfer_mode: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -5604,6 +5615,20 @@ class HandoffProposalModel(TimestampMixin, Base):
 class HandoffTransitionModel(TimestampMixin, Base):
     __tablename__ = "handoff_transitions"
     __table_args__ = (
+        CheckConstraint(
+            "((handoff_schema_version = 1 AND target_worker_id IS NOT NULL "
+            "AND native_payload IS NULL AND target_binding_version IS NULL AND manual_context_facts IS NULL) "
+            "OR (handoff_schema_version = 2 AND native_payload IS NOT NULL "
+            "AND jsonb_typeof(native_payload) = 'object' "
+            "AND jsonb_typeof(native_payload->'proposal_schema_version') = 'number' "
+            "AND native_payload->>'proposal_schema_version' = '2' "
+            "AND jsonb_typeof(native_payload->'target_assignee') = 'object' "
+            "AND native_payload->'target_assignee'->>'kind' IN ('profile', 'human') "
+            "AND jsonb_typeof(native_payload->'target_assignee'->'id') = 'string' "
+            "AND (target_binding_version IS NULL OR target_binding_version >= 1) "
+            "AND (manual_context_facts IS NULL OR jsonb_typeof(manual_context_facts) = 'object'))) IS TRUE",
+            name="ck_handoff_transitions_variant",
+        ),
         CheckConstraint(
             "status IN ('pending', 'running', 'blocked', 'blocked_unknown', 'failed', 'converged')",
             name="ck_handoff_transitions_status",
@@ -5762,9 +5787,7 @@ class HandoffTransitionModel(TimestampMixin, Base):
     source_workspace_manifest_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
-    target_worker_id: Mapped[UUID] = mapped_column(
-        PostgreSQLUUID(as_uuid=True), nullable=False
-    )
+    target_worker_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     target_runtime_snapshot: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False
     )
@@ -5820,6 +5843,16 @@ class HandoffTransitionModel(TimestampMixin, Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    handoff_schema_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    native_payload: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
+    target_binding_version: Mapped[int | None] = mapped_column(Integer)
+    manual_context_facts: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -5832,7 +5865,20 @@ class HandoffContextBundleModel(TimestampMixin, Base):
     __tablename__ = "handoff_context_bundles"
     __table_args__ = (
         CheckConstraint(
-            "schema_version >= 1", name="ck_handoff_context_bundles_schema_version"
+            "schema_version IN (1, 2)", name="ck_handoff_context_bundles_schema_version"
+        ),
+        CheckConstraint(
+            "((schema_version = 1 AND target_worker_id IS NOT NULL "
+            "AND target_runtime_snapshot_hash IS NOT NULL AND target_profile_ref IS NULL "
+            "AND target_binding_version IS NULL AND target_native_metadata IS NULL) "
+            "OR (schema_version = 2 AND target_worker_id IS NULL "
+            "AND target_runtime_snapshot_hash IS NULL AND target_profile_ref IS NOT NULL "
+            "AND jsonb_typeof(target_profile_ref) = 'object' "
+            "AND target_profile_ref ?& ARRAY['workspace_id', 'profile_id', 'revision'] "
+            "AND target_binding_version IS NOT NULL AND target_binding_version >= 1 "
+            "AND target_native_metadata IS NOT NULL AND jsonb_typeof(target_native_metadata) = 'object' "
+            "AND target_native_metadata->>'execution_mode' = 'native_profile')) IS TRUE",
+            name="ck_handoff_context_bundles_variant",
         ),
         CheckConstraint(
             "logical_attempt >= 1 AND source_checkpoint_sequence >= 0 "
@@ -5971,11 +6017,14 @@ class HandoffContextBundleModel(TimestampMixin, Base):
     target_execution_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), nullable=False
     )
-    target_worker_id: Mapped[UUID] = mapped_column(
-        PostgreSQLUUID(as_uuid=True), nullable=False
+    target_worker_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    target_runtime_snapshot_hash: Mapped[str | None] = mapped_column(String(64))
+    target_profile_ref: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
     )
-    target_runtime_snapshot_hash: Mapped[str] = mapped_column(
-        String(64), nullable=False
+    target_binding_version: Mapped[int | None] = mapped_column(Integer)
+    target_native_metadata: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
     )
     target_context_version: Mapped[int] = mapped_column(Integer, nullable=False)
     source_workspace_manifest_id: Mapped[UUID] = mapped_column(

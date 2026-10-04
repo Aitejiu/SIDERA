@@ -4,11 +4,13 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
 from uuid import UUID
+
+from sidera_agents.contracts import ProfileRef
 
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.gateway import GatewayOperationType
@@ -75,6 +77,14 @@ class HandoffCheckpointEvidence:
     quiescent: bool
     produced_at: datetime
     schema_version: int = 1
+    workspace_id: UUID | None = None
+    source_execution_id: UUID | None = None
+    source_run_id: UUID | None = None
+    source_authority_id: UUID | None = None
+    source_binding_version: int | None = None
+    source_profile_ref: ProfileRef | None = None
+    observation_kind: str | None = None
+    expected_stop_operation_id: UUID | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -84,7 +94,23 @@ class HandoffCheckpointEvidence:
             "context_package_id",
         ):
             _uuid(getattr(self, name), f"checkpoint {name}")
-        _schema(self.schema_version, "checkpoint")
+        if self.schema_version == 2:
+            if type(self.schema_version) is not int:
+                raise ValidationError(
+                    "native checkpoint discriminator must be integer 2"
+                )
+            _native_run_pin(self)
+            _uuid(self.expected_stop_operation_id, "native expected stop operation")
+            if (
+                self.observation_kind != "cp_run_snapshot"
+                or self.quiescent is not False
+            ):
+                raise ValidationError("native snapshot is not a quiescent checkpoint")
+        else:
+            _schema(self.schema_version, "checkpoint")
+            _reject_native_pin(
+                self, self.observation_kind, self.expected_stop_operation_id
+            )
         _non_negative(self.accepted_sequence, "checkpoint accepted_sequence")
         _hash(self.workspace_digest, "checkpoint workspace_digest")
         _hash(self.context_package_hash, "checkpoint context_package_hash")
@@ -104,12 +130,12 @@ class HandoffCheckpointEvidence:
             "evidence_refs",
             _opaque_refs(self.evidence_refs, "checkpoint evidence_refs"),
         )
-        if self.quiescent is not True:
+        if self.schema_version == 1 and self.quiescent is not True:
             raise ValidationError("checkpoint evidence must be quiescent")
         _aware(self.produced_at, "checkpoint produced_at")
 
     def to_mapping(self) -> dict[str, object]:
-        return {
+        result = {
             "operation_id": str(self.operation_id),
             "transition_id": str(self.transition_id),
             "source_session_id": str(self.source_session_id),
@@ -125,6 +151,63 @@ class HandoffCheckpointEvidence:
             "produced_at": self.produced_at.isoformat(),
             "schema_version": self.schema_version,
         }
+        if self.schema_version == 2:
+            result.update(_native_run_pin_mapping(self))
+            result.update(
+                observation_kind=self.observation_kind,
+                expected_stop_operation_id=str(self.expected_stop_operation_id),
+            )
+        return result
+
+    @classmethod
+    def from_native_mapping(
+        cls, facts: Mapping[str, object]
+    ) -> HandoffCheckpointEvidence:
+        _native_evidence_shape(cls, facts)
+        if facts["quiescent"] is not False:
+            raise ValidationError("native snapshot is not a quiescent checkpoint")
+        values = _native_run_pin_values(facts)
+        return cls(
+            operation_id=UUID(str(facts["operation_id"])),
+            transition_id=UUID(str(facts["transition_id"])),
+            source_session_id=UUID(str(facts["source_session_id"])),
+            accepted_sequence=_non_negative(
+                facts["accepted_sequence"], "checkpoint accepted_sequence"
+            ),
+            workspace_digest=_hash(
+                facts["workspace_digest"], "checkpoint workspace_digest"
+            ),
+            context_package_id=UUID(str(facts["context_package_id"])),
+            context_package_hash=_hash(
+                facts["context_package_hash"], "checkpoint context_package_hash"
+            ),
+            context_version=_positive(
+                facts["context_version"], "checkpoint context_version"
+            ),
+            progress_summary_ref=_opaque_ref(
+                facts["progress_summary_ref"], "progress_summary_ref"
+            ),
+            artifact_refs=tuple(
+                _opaque_ref(item, "checkpoint artifact_refs")
+                for item in _sequence(
+                    facts["artifact_refs"], "checkpoint artifact_refs"
+                )
+            ),
+            evidence_refs=tuple(
+                _opaque_ref(item, "checkpoint evidence_refs")
+                for item in _sequence(
+                    facts["evidence_refs"], "checkpoint evidence_refs"
+                )
+            ),
+            quiescent=False,
+            produced_at=datetime.fromisoformat(str(facts["produced_at"])),
+            schema_version=2,
+            observation_kind=_text(
+                facts["observation_kind"], "native observation_kind"
+            ),
+            expected_stop_operation_id=UUID(str(facts["expected_stop_operation_id"])),
+            **values,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,11 +217,51 @@ class HandoffStopEvidence:
     accepted_sequence: int
     stopped: bool
     produced_at: datetime
+    schema_version: int = 1
+    transition_id: UUID | None = None
+    workspace_id: UUID | None = None
+    source_execution_id: UUID | None = None
+    source_run_id: UUID | None = None
+    source_authority_id: UUID | None = None
+    source_binding_version: int | None = None
+    source_profile_ref: ProfileRef | None = None
+    run_state: str | None = None
+    input_open: bool | None = None
+    active_response_id: UUID | None = None
+    observed_sequence: int | None = None
 
     def __post_init__(self) -> None:
         _uuid(self.operation_id, "stop operation_id")
         _uuid(self.source_session_id, "stop source_session_id")
         _non_negative(self.accepted_sequence, "stop accepted_sequence")
+        if self.schema_version == 2:
+            if type(self.schema_version) is not int:
+                raise ValidationError("native stop discriminator must be integer 2")
+            _native_run_pin(self)
+            _uuid(self.transition_id, "native stop transition")
+            _positive(self.accepted_sequence, "native stop accepted_sequence")
+            observed_sequence = _positive(
+                self.observed_sequence, "native stop observed_sequence"
+            )
+            if (
+                self.run_state != "stopped"
+                or self.input_open is not False
+                or self.active_response_id is not None
+                or observed_sequence < self.accepted_sequence
+            ):
+                raise ValidationError(
+                    "native stop requires authoritative closed Run proof"
+                )
+        else:
+            _schema(self.schema_version, "stop")
+            _reject_native_pin(
+                self,
+                self.transition_id,
+                self.run_state,
+                self.input_open,
+                self.active_response_id,
+                self.observed_sequence,
+            )
         if self.stopped is not True:
             raise ValidationError("stop evidence must prove stopped=true")
         _aware(self.produced_at, "stop produced_at")
@@ -146,8 +269,21 @@ class HandoffStopEvidence:
     def assert_matches(self, checkpoint: HandoffCheckpointEvidence) -> None:
         if not isinstance(checkpoint, HandoffCheckpointEvidence):
             raise ValidationError("stop evidence requires checkpoint evidence")
+        if self.schema_version != checkpoint.schema_version:
+            raise ValidationError("native and legacy source evidence cannot mix")
         if self.source_session_id != checkpoint.source_session_id:
             raise ValidationError("stop session does not match checkpoint session")
+        if self.schema_version == 2:
+            if (
+                _native_run_pin_mapping(self) != _native_run_pin_mapping(checkpoint)
+                or self.transition_id != checkpoint.transition_id
+                or self.operation_id != checkpoint.expected_stop_operation_id
+                or self.accepted_sequence < checkpoint.accepted_sequence
+            ):
+                raise ValidationError(
+                    "native stop does not match original snapshot pins"
+                )
+            return
         if self.accepted_sequence != checkpoint.accepted_sequence:
             raise ValidationError("stop sequence does not match checkpoint sequence")
 
@@ -155,13 +291,52 @@ class HandoffStopEvidence:
         self.assert_matches(checkpoint)
 
     def to_mapping(self) -> dict[str, object]:
-        return {
+        result = {
             "operation_id": str(self.operation_id),
             "source_session_id": str(self.source_session_id),
             "accepted_sequence": self.accepted_sequence,
             "stopped": self.stopped,
             "produced_at": self.produced_at.isoformat(),
         }
+        if self.schema_version == 2:
+            result.update(_native_run_pin_mapping(self))
+            result.update(
+                schema_version=2,
+                transition_id=str(self.transition_id),
+                run_state=self.run_state,
+                input_open=self.input_open,
+                active_response_id=None,
+                observed_sequence=self.observed_sequence,
+            )
+        return result
+
+    @classmethod
+    def from_native_mapping(cls, facts: Mapping[str, object]) -> HandoffStopEvidence:
+        _native_evidence_shape(cls, facts)
+        if (
+            facts["stopped"] is not True
+            or facts["input_open"] is not False
+            or facts["active_response_id"] is not None
+        ):
+            raise ValidationError("native stop requires authoritative closed Run proof")
+        return cls(
+            operation_id=UUID(str(facts["operation_id"])),
+            source_session_id=UUID(str(facts["source_session_id"])),
+            accepted_sequence=_positive(
+                facts["accepted_sequence"], "native stop accepted_sequence"
+            ),
+            stopped=True,
+            produced_at=datetime.fromisoformat(str(facts["produced_at"])),
+            schema_version=2,
+            transition_id=UUID(str(facts["transition_id"])),
+            run_state=_text(facts["run_state"], "native stop run_state"),
+            input_open=False,
+            active_response_id=None,
+            observed_sequence=_positive(
+                facts["observed_sequence"], "native stop observed_sequence"
+            ),
+            **_native_run_pin_values(facts),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,25 +385,51 @@ class HandoffWorkspaceTargetSpec:
     workspace_id: UUID
     task_id: UUID
     target_execution_id: UUID
-    target_worker_id: UUID
-    adapter_module_ref: UUID
-    adapter_config_version: int
+    target_worker_id: UUID | None
+    adapter_module_ref: UUID | None
+    adapter_config_version: int | None
     workspace_module_ref: UUID
     workspace_config_version: int
     repositories: tuple[Mapping[str, object], ...]
     anticipated_fencing_token: int
+    schema_version: int = 1
+    target_profile_ref: ProfileRef | None = None
+    target_binding_version: int | None = None
 
     def __post_init__(self) -> None:
         for name in (
             "workspace_id",
             "task_id",
             "target_execution_id",
-            "target_worker_id",
-            "adapter_module_ref",
             "workspace_module_ref",
         ):
             _uuid(getattr(self, name), f"workspace target {name}")
-        _positive(self.adapter_config_version, "adapter_config_version")
+        if self.schema_version == 2:
+            if type(self.schema_version) is not int:
+                raise ValidationError(
+                    "native workspace discriminator must be integer 2"
+                )
+            _native_target_pin(self)
+            if (
+                self.target_worker_id is not None
+                or self.adapter_module_ref is not None
+                or (self.adapter_config_version is not None)
+            ):
+                raise ValidationError(
+                    "native pre-reservation target cannot contain legacy adapter pins"
+                )
+        else:
+            _schema(self.schema_version, "workspace target")
+            _uuid(self.target_worker_id, "workspace target worker")
+            _uuid(self.adapter_module_ref, "workspace target adapter")
+            _positive(self.adapter_config_version, "adapter_config_version")
+            if (
+                self.target_profile_ref is not None
+                or self.target_binding_version is not None
+            ):
+                raise ValidationError(
+                    "legacy workspace target cannot contain native pins"
+                )
         _positive(self.workspace_config_version, "workspace_config_version")
         _positive(self.anticipated_fencing_token, "anticipated_fencing_token")
         repositories = tuple(
@@ -586,8 +787,8 @@ class HandoffContextBundle:
     source_context_package_hash: str
     source_worker_context_version: int
     target_execution_id: UUID
-    target_worker_id: UUID
-    target_runtime_snapshot_hash: str
+    target_worker_id: UUID | None
+    target_runtime_snapshot_hash: str | None
     target_context_version: int
     source_workspace_manifest_id: UUID
     source_workspace_version: int
@@ -602,6 +803,9 @@ class HandoffContextBundle:
     excluded_input_refs: tuple[UUID, ...]
     bundle_hash: str
     created_at: datetime
+    target_profile_ref: ProfileRef | None = None
+    target_binding_version: int | None = None
+    target_native_metadata: Mapping[str, object] | None = None
 
     @classmethod
     def create(
@@ -622,8 +826,8 @@ class HandoffContextBundle:
         source_context_package_hash: str,
         source_worker_context_version: int,
         target_execution_id: UUID,
-        target_worker_id: UUID,
-        target_runtime_snapshot_hash: str,
+        target_worker_id: UUID | None,
+        target_runtime_snapshot_hash: str | None,
         target_context_version: int,
         source_workspace_manifest_id: UUID,
         source_workspace_version: int,
@@ -637,6 +841,9 @@ class HandoffContextBundle:
         transferable_input_refs: tuple[UUID, ...],
         excluded_input_refs: tuple[UUID, ...],
         created_at: datetime,
+        target_profile_ref: ProfileRef | None = None,
+        target_binding_version: int | None = None,
+        target_native_metadata: Mapping[str, object] | None = None,
     ) -> HandoffContextBundle:
         values = {
             "id": id,
@@ -669,13 +876,51 @@ class HandoffContextBundle:
             "transferable_input_refs": transferable_input_refs,
             "excluded_input_refs": excluded_input_refs,
             "created_at": created_at,
+            "target_profile_ref": target_profile_ref,
+            "target_binding_version": target_binding_version,
+            "target_native_metadata": target_native_metadata,
         }
         bundle_hash = hashlib.sha256(_canonical(_bundle_payload(values))).hexdigest()
         return cls(**values, bundle_hash=bundle_hash)
 
     def __post_init__(self) -> None:
         _uuid(self.id, "bundle id")
-        _schema(self.schema_version, "bundle")
+        if self.schema_version == 2:
+            if type(self.schema_version) is not int:
+                raise ValidationError("native bundle discriminator must be integer 2")
+            _native_target_pin(self)
+            if (
+                self.target_worker_id is not None
+                or self.target_runtime_snapshot_hash is not None
+            ):
+                raise ValidationError(
+                    "native bundle cannot contain legacy target runtime pins"
+                )
+            metadata = _mapping(self.target_native_metadata, "native target metadata")
+            if metadata.get("execution_mode") != "native_profile" or set(metadata) - {
+                "execution_mode",
+                "runtime_ref",
+                "runtime_version",
+                "profile_config_hash",
+                "capability_requirements",
+            }:
+                raise ValidationError("native target metadata has unsupported fields")
+            object.__setattr__(self, "target_native_metadata", metadata)
+        else:
+            _schema(self.schema_version, "bundle")
+            _uuid(self.target_worker_id, "bundle target_worker_id")
+            _hash(
+                self.target_runtime_snapshot_hash, "bundle target_runtime_snapshot_hash"
+            )
+            if any(
+                value is not None
+                for value in (
+                    self.target_profile_ref,
+                    self.target_binding_version,
+                    self.target_native_metadata,
+                )
+            ):
+                raise ValidationError("legacy bundle cannot contain native target pins")
         for name in (
             "workspace_id",
             "worker_item_id",
@@ -684,7 +929,6 @@ class HandoffContextBundle:
             "source_session_id",
             "source_context_package_id",
             "target_execution_id",
-            "target_worker_id",
             "source_workspace_manifest_id",
         ):
             _uuid(getattr(self, name), f"bundle {name}")
@@ -706,7 +950,6 @@ class HandoffContextBundle:
             _positive(getattr(self, name), f"bundle {name}")
         for name in (
             "source_context_package_hash",
-            "target_runtime_snapshot_hash",
             "workspace_location_ref_hash",
         ):
             _hash(getattr(self, name), f"bundle {name}")
@@ -771,6 +1014,69 @@ class HandoffContextBundle:
 def _schema(value: object, label: str) -> None:
     if value != 1:
         raise ValidationError(f"{label} schema_version must be 1")
+
+
+_NATIVE_RUN_PIN_FIELDS = (
+    "workspace_id",
+    "source_execution_id",
+    "source_run_id",
+    "source_authority_id",
+    "source_binding_version",
+    "source_profile_ref",
+)
+
+
+def _native_evidence_shape(evidence_type, facts) -> None:
+    if (
+        not isinstance(facts, Mapping)
+        or set(facts) != {field.name for field in fields(evidence_type)}
+        or type(facts.get("schema_version")) is not int
+        or facts["schema_version"] != 2
+    ):
+        raise ValidationError("native evidence requires exact schema-2 shape")
+
+
+def _native_run_pin(source) -> None:
+    for name in _NATIVE_RUN_PIN_FIELDS[:4]:
+        _uuid(getattr(source, name), f"native source {name}")
+    _positive(source.source_binding_version, "native source binding version")
+    if not isinstance(source.source_profile_ref, ProfileRef) or (
+        source.source_profile_ref.workspace_id != source.workspace_id
+    ):
+        raise ValidationError(
+            "native source requires original workspace-scoped Profile"
+        )
+
+
+def _reject_native_pin(source, *extra) -> None:
+    if any(getattr(source, name) is not None for name in _NATIVE_RUN_PIN_FIELDS) or (
+        any(value is not None for value in extra)
+    ):
+        raise ValidationError("legacy evidence cannot contain native source pins")
+
+
+def _native_run_pin_mapping(source) -> dict[str, object]:
+    return {
+        **{name: str(getattr(source, name)) for name in _NATIVE_RUN_PIN_FIELDS[:4]},
+        "source_binding_version": source.source_binding_version,
+        "source_profile_ref": source.source_profile_ref.model_dump(mode="json"),
+    }
+
+
+def _native_run_pin_values(facts):
+    return {
+        **{name: UUID(str(facts[name])) for name in _NATIVE_RUN_PIN_FIELDS[:4]},
+        "source_binding_version": facts["source_binding_version"],
+        "source_profile_ref": ProfileRef.model_validate(facts["source_profile_ref"]),
+    }
+
+
+def _native_target_pin(source) -> None:
+    _positive(source.target_binding_version, "native target binding version")
+    if not isinstance(source.target_profile_ref, ProfileRef) or (
+        source.target_profile_ref.workspace_id != source.workspace_id
+    ):
+        raise ValidationError("native target requires exact workspace-scoped Profile")
 
 
 def _enum[EnumValue: StrEnum](
@@ -958,7 +1264,7 @@ def _bundle_payload(source: object) -> dict[str, object]:
         return getattr(source, name)
 
     recovery_decision_id = value("recovery_decision_id")
-    return {
+    payload = {
         "schema_version": value("schema_version"),
         "workspace_id": str(value("workspace_id")),
         "worker_item_id": str(value("worker_item_id")),
@@ -1001,6 +1307,17 @@ def _bundle_payload(source: object) -> dict[str, object]:
             for item in _sequence(value("excluded_input_refs"), "excluded_input_refs")
         ],
     }
+    if value("schema_version") == 2:
+        profile = value("target_profile_ref")
+        payload.update(
+            target_worker_id=None,
+            target_profile_ref=profile.model_dump(mode="json")
+            if isinstance(profile, ProfileRef)
+            else None,
+            target_binding_version=value("target_binding_version"),
+            target_native_metadata=_plain(value("target_native_metadata")),
+        )
+    return payload
 
 
 def _sequence(value: object, label: str) -> Sequence[object]:

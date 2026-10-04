@@ -11,6 +11,7 @@ from pydantic import (
     StrictInt,
     StringConstraints,
     field_serializer,
+    field_validator,
     model_validator,
 )
 from sidera_agents.contracts import ProfileRef
@@ -2059,7 +2060,7 @@ class ActiveHandoffProjectionResponse(BaseModel):
     source_execution_id: UUID
     source_session_id: UUID
     source_worker_id: UUID
-    target_worker_id: UUID
+    target_worker_id: UUID | None
     target_execution_id: UUID | None
     target_session_id: UUID | None
     attention_required: bool
@@ -2237,6 +2238,89 @@ class HandoffTransitionResponse(BaseModel):
     target_trace_descriptor: TraceDescriptorProjectionResponse | None
     recovery_evidence_refs: tuple[str, ...]
     recovery_inspected_at: datetime | None
+
+
+class NativeHandoffAssignee(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["human", "profile"]
+    id: NonEmptyString
+
+    @model_validator(mode="after")
+    def validate_profile_id(self):
+        if self.kind == "profile":
+            UUID(self.id)
+        return self
+
+
+class NativeHandoffProposalResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    proposal_schema_version: Literal[2]
+    workspace_id: UUID
+    root_task_id: UUID
+    subtask_id: UUID
+    worker_item_id: UUID
+    source_worker_item_version: int
+    version: int
+    proposal_hash: str
+    status: str
+    stale_reason: str | None
+    created_at: datetime
+    expires_at: datetime
+    confirmed_at: datetime | None
+    cancelled_at: datetime | None
+    source_execution_id: UUID
+    source_session_id: UUID
+    source_run_id: UUID
+    source_binding_version: int
+    source_profile_ref: ProfileRef
+    target_assignee: NativeHandoffAssignee
+    target_profile_ref: ProfileRef | None
+    target_worker_id: None
+    handoff_reason: str
+    handoff_instruction: str
+    context: HandoffContextSummaryResponse
+    plan_base: HandoffPlanBaseResponse
+
+
+class NativeHandoffTransitionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    handoff_schema_version: Literal[2]
+    workspace_id: UUID
+    worker_item_id: UUID
+    proposal_id: UUID
+    source_execution_id: UUID
+    source_session_id: UUID
+    source_run_id: UUID
+    source_binding_version: int
+    source_profile_ref: ProfileRef
+    target_assignee: NativeHandoffAssignee
+    target_profile_ref: ProfileRef | None
+    target_binding_version: int | None
+    target_worker_id: UUID | None
+    target_execution_id: UUID | None
+    target_session_id: UUID | None
+    target_run_id: UUID | None
+    version: int
+    status: str
+    phase: str
+    writer_state: str
+    logical_attempt: int
+    source_input_cutoff_sequence: int
+    target_context_version: int
+    failure_code: str | None
+    blocked_operation_id: UUID | None
+    next_attempt_at: datetime | None
+    confirmed_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    context: HandoffContextSummaryResponse
+    plan_base: HandoffPlanBaseResponse
+    available_recovery_strategies: tuple[str, ...]
 
 
 class WorkerArtifactSummaryProjectionResponse(BaseModel):
@@ -2741,10 +2825,16 @@ class ExecutionContextAddressPayload(BaseModel):
     worker_id: UUID
 
 
+class NativeExecutionContextAddressPayload(ExecutionContextAddressPayload):
+    execution_mode: Literal["native_profile"]
+    binding_version: int = Field(ge=1)
+    run_id: UUID
+
+
 class SendExecutionInputPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    context: ExecutionContextAddressPayload
+    context: ExecutionContextAddressPayload | NativeExecutionContextAddressPayload
     client_idempotency_key: NonEmptyString
     text: InputText
     attachment_refs: tuple[NonEmptyString, ...] = Field(default_factory=tuple)
@@ -2812,6 +2902,50 @@ class ConfirmWorkerHandoffPayload(BaseModel):
     expected_proposal_version: int = Field(ge=1)
     expected_proposal_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     expected_worker_item_version: int = Field(ge=1)
+
+
+class NativeHandoffContextAddressPayload(NativeExecutionContextAddressPayload):
+    plan_generation: StrictInt = Field(ge=1)
+    context_version: StrictInt = Field(ge=1)
+    session_version: StrictInt = Field(ge=1)
+    binding_version: StrictInt = Field(ge=1)
+
+
+class PrepareProfileHandoffPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_schema_version: Literal[2]
+    context: NativeHandoffContextAddressPayload
+    target_assignee: NativeHandoffAssignee
+    target_profile_ref: ProfileRef | None
+    handoff_reason: NonEmptyString
+    handoff_instruction: NonEmptyString
+    input_plan: dict[str, Any]
+    proposal_ttl_seconds: StrictInt = Field(gt=0, le=86_400)
+
+    @field_validator("proposal_schema_version", mode="before")
+    @classmethod
+    def validate_native_discriminator(cls, value):
+        if type(value) is not int or value != 2:
+            raise ValueError("native handoff schema must be integer 2")
+        return value
+
+    @model_validator(mode="after")
+    def validate_target(self):
+        if self.target_assignee.kind == "human":
+            if self.target_profile_ref is not None:
+                raise ValueError("human cannot have a target Profile")
+        elif (
+            self.target_profile_ref is None
+            or self.target_profile_ref.profile_id != UUID(self.target_assignee.id)
+        ):
+            raise ValueError("exact target Profile identity required")
+        return self
+
+
+class ConfirmProfileHandoffPayload(ConfirmWorkerHandoffPayload):
+    expected_proposal_version: StrictInt = Field(ge=1)
+    expected_worker_item_version: StrictInt = Field(ge=1)
 
 
 class CancelWorkerHandoffPayload(BaseModel):
@@ -2937,6 +3071,8 @@ class CommandRequest(BaseModel):
             "SetSubtaskAssignee",
             "SetWorkerItemAssignee",
             "UpdateUnstartedAgentBinding",
+            "PrepareProfileHandoff",
+            "ConfirmProfileHandoff",
         }:
             version = value.get("expected_version")
             if type(version) is not int or version < 1:
@@ -3147,6 +3283,28 @@ class CommandRequest(BaseModel):
         elif self.command_type == "RetryBlockedExecutionInput":
             self._require_mutation_target("execution_session")
             parsed = RetryBlockedExecutionInputPayload.model_validate(self.payload)
+        elif self.command_type == "PrepareProfileHandoff":
+            self._require_mutation_target("worker_item")
+            parsed = PrepareProfileHandoffPayload.model_validate(self.payload)
+            if parsed.context.worker_item_id != self.target_id:
+                raise ValueError("native context WorkerItem must match target_id")
+            if (
+                parsed.target_profile_ref is not None
+                and parsed.target_profile_ref.workspace_id != self.workspace_id
+            ):
+                raise ValueError(
+                    "target Profile workspace must match command workspace"
+                )
+        elif self.command_type == "ConfirmProfileHandoff":
+            self._require_mutation_target("handoff_proposal")
+            parsed = ConfirmProfileHandoffPayload.model_validate(self.payload)
+            if (
+                parsed.proposal_id != self.target_id
+                or parsed.expected_proposal_version != self.expected_version
+            ):
+                raise ValueError(
+                    "native proposal identity/version must match command target"
+                )
         elif self.command_type == "PrepareWorkerHandoff":
             self._require_mutation_target("worker_item")
             parsed = PrepareWorkerHandoffPayload.model_validate(self.payload)

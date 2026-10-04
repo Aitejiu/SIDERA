@@ -195,6 +195,42 @@ def test_fake_adapter_exposes_patch_delivery_classification(
     assert adapter.applied_context_patches == ()
 
 
+@pytest.mark.parametrize("outcome", [DeliveryOutcome.ACCEPTED, "accepted"])
+def test_fake_patch_rejects_accepted_before_mutating_outcome_queue(outcome) -> None:
+    adapter = FakeWorkerAdapter()
+    handle = _handle(adapter)
+    now = _now()
+    materialization = ContextPatchMaterializationV1(
+        schema_version=1,
+        patch=_patch(created_at=now, expires_at=now + timedelta(minutes=10)),
+    )
+    adapter.inject_patch_outcome(DeliveryOutcome.BLOCKED, error_code="prompt_busy")
+    with pytest.raises(ValueError, match="unsupported patch outcome"):
+        adapter.inject_patch_outcome(outcome)
+
+    first = adapter.apply_context_patch(handle, materialization, operation_id=uuid4())
+    second = adapter.apply_context_patch(handle, materialization, operation_id=uuid4())
+    assert first.outcome == "blocked" and first.error_code == "prompt_busy"
+    assert second.outcome == "delivered" and second.accepted_sequence == 2
+    assert adapter.applied_context_patches == (materialization,)
+
+
+@pytest.mark.parametrize("outcome", [DeliveryOutcome.DELIVERED, "delivered"])
+def test_fake_patch_accepts_explicit_delivered_outcome(outcome) -> None:
+    adapter = FakeWorkerAdapter()
+    handle = _handle(adapter)
+    now = _now()
+    materialization = ContextPatchMaterializationV1(
+        schema_version=1,
+        patch=_patch(created_at=now, expires_at=now + timedelta(minutes=10)),
+    )
+    adapter.inject_patch_outcome(outcome)
+    result = adapter.apply_context_patch(handle, materialization, operation_id=uuid4())
+    assert result.outcome == "delivered" and result.accepted_sequence == 2
+    assert result.error_code is None
+    assert adapter.applied_context_patches == (materialization,)
+
+
 def test_fake_adapter_rejects_expired_patch_before_execution() -> None:
     adapter = FakeWorkerAdapter()
     handle = _handle(adapter)

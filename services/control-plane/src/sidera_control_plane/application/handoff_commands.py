@@ -20,6 +20,10 @@ from sidera_control_plane.application.handoff_recovery import (
     HandoffRecoveryService,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.profile_handoff import (
+    native_proposal_projection,
+    native_transition_projection,
+)
 from sidera_control_plane.application.worker_runtime import (
     WorkerRuntimeInspectionPort,
     WorkerRuntimeResolver,
@@ -40,6 +44,7 @@ from sidera_control_plane.domain.handoffs import (
     HandoffSourceChannel,
     HandoffTransferMode,
     HandoffTransition,
+    NativeHandoffProposalPayload,
 )
 from sidera_control_plane.domain.worker_item import WorkerItemStatus
 
@@ -94,6 +99,8 @@ class HandoffCommandHandler:
             "CancelWorkerHandoff",
             "ConfirmWorkerHandoff",
             "RecoverWorkerHandoff",
+            "PrepareProfileHandoff",
+            "ConfirmProfileHandoff",
         }
     )
 
@@ -106,6 +113,7 @@ class HandoffCommandHandler:
         recovery_service: HandoffRecoveryService | None = None,
         default_proposal_ttl_seconds: int = 900,
         max_proposal_ttl_seconds: int = 86_400,
+        native_validator=None,
     ) -> None:
         self._clock = clock
         self._candidate_service = candidate_service
@@ -113,10 +121,50 @@ class HandoffCommandHandler:
         self._recovery_service = recovery_service
         self._default_proposal_ttl_seconds = default_proposal_ttl_seconds
         self._max_proposal_ttl_seconds = max_proposal_ttl_seconds
+        self._native_validator = native_validator
+
+    def preflight(self, uow, envelope):
+        if envelope.command_type in {"CancelWorkerHandoff", "ConfirmWorkerHandoff"}:
+            proposal = uow.handoff_proposals.get(
+                envelope.target_id, envelope.workspace_id
+            )
+            if proposal is not None and isinstance(
+                proposal.payload, NativeHandoffProposalPayload
+            ):
+                if envelope.command_type == "ConfirmWorkerHandoff":
+                    raise HandoffCommandError(
+                        "native_handoff_command_required",
+                        "native proposals require explicit human Profile confirmation",
+                    )
+                if self._native_validator is None:
+                    raise HandoffCommandError(
+                        "assignment_forbidden",
+                        "trusted native cancellation services required",
+                    )
+                self._native_validator.preflight_cancel(uow, envelope, proposal.payload)
+        if envelope.command_type == "RecoverWorkerHandoff":
+            transition = uow.handoff_transitions.get(
+                envelope.target_id, envelope.workspace_id
+            )
+            if transition is not None and transition.handoff_schema_version == 2:
+                raise HandoffCommandError(
+                    "native_handoff_recovery_unsupported",
+                    "native recovery is not a legacy Worker command",
+                )
+        if envelope.command_type in {"PrepareProfileHandoff", "ConfirmProfileHandoff"}:
+            if self._native_validator is None:
+                raise HandoffCommandError(
+                    "assignment_forbidden", "trusted native handoff services required"
+                )
+            self._native_validator.preflight(uow, envelope)
 
     def handle(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
+        if envelope.command_type == "PrepareProfileHandoff":
+            return self._prepare_native(uow, envelope)
+        if envelope.command_type == "ConfirmProfileHandoff":
+            return self._confirm_native(uow, envelope)
         if envelope.command_type == "PrepareWorkerHandoff":
             return self._prepare(uow, envelope)
         if envelope.command_type == "CancelWorkerHandoff":
@@ -128,6 +176,126 @@ class HandoffCommandHandler:
         raise HandoffCommandError(
             "validation_error",
             f"unsupported handoff command: {envelope.command_type}",
+        )
+
+    def _prepare_native(self, uow, envelope):
+        self.preflight(uow, envelope)
+        if self._native_validator is None:
+            raise HandoffCommandError(
+                "assignment_denied", "native handoff services required"
+            )
+        payload = self._native_validator.prepare_payload(
+            uow, envelope, max_proposal_ttl_seconds=self._max_proposal_ttl_seconds
+        )
+        now = self._clock()
+        proposal = HandoffProposal.create(
+            id=uuid4(),
+            payload=payload,
+            created_by_type=envelope.actor_type,
+            created_by_id=envelope.actor_id,
+            source_channel=HandoffSourceChannel.WEB,
+            created_at=now,
+            expires_at=now
+            + timedelta(seconds=envelope.payload["proposal_ttl_seconds"]),
+        )
+        prior = uow.handoff_proposals.find_prepared_for_worker_item(
+            payload.worker_item_id, payload.workspace_id, for_update=True
+        )
+        event_ids = []
+        if prior is not None:
+            previous = prior.version
+            prior.mark_stale(reason="superseded_by_new_proposal", now=now)
+            uow.handoff_proposals.save_status(prior, previous)
+            stale = _proposal_event(
+                prior,
+                event_type="HandoffProposalStale",
+                envelope=envelope,
+                reason="superseded_by_new_proposal",
+            )
+            uow.events.append_with_outbox(stale)
+            event_ids.append(stale.id)
+        uow.handoff_proposals.add(proposal)
+        event = _proposal_event(
+            proposal, event_type="HandoffProposalPrepared", envelope=envelope
+        )
+        uow.events.append_with_outbox(event)
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=proposal.id,
+            aggregate_version=proposal.version,
+            event_ids=(*event_ids, event.id),
+            data={"proposal": native_proposal_projection(proposal)},
+        )
+
+    def _confirm_native(self, uow, envelope):
+        self.preflight(uow, envelope)
+        if self._native_validator is None:
+            raise HandoffCommandError(
+                "assignment_denied", "native handoff services required"
+            )
+        confirm = _confirm_payload(envelope.payload)
+        if (
+            confirm["proposal_id"] != envelope.target_id
+            or envelope.expected_version != confirm["expected_proposal_version"]
+        ):
+            raise HandoffCommandError(
+                "validation_error", "native proposal target/version mismatch"
+            )
+        proposal = uow.handoff_proposals.get(envelope.target_id, envelope.workspace_id)
+        if proposal is None or not isinstance(
+            proposal.payload, NativeHandoffProposalPayload
+        ):
+            raise HandoffCommandError("not_found", "native handoff proposal not found")
+        _assert_confirm_base(proposal, confirm)
+        if (
+            proposal.status is not HandoffProposalStatus.PREPARED
+            or self._clock() >= proposal.expires_at
+        ):
+            raise HandoffCommandError(
+                "handoff_proposal_stale", "native proposal is no longer prepared"
+            )
+        if (
+            confirm["expected_worker_item_version"]
+            != proposal.payload.source_worker_item_version
+        ):
+            raise HandoffCommandError(
+                "handoff_proposal_stale", "native WorkerItem version changed"
+            )
+        self._native_validator.validate_payload(uow, proposal.payload)
+        locked = uow.handoff_proposals.get(
+            proposal.id, envelope.workspace_id, for_update=True
+        )
+        if locked is None or locked.status is not HandoffProposalStatus.PREPARED:
+            raise HandoffCommandError(
+                "handoff_proposal_stale", "native proposal changed during confirmation"
+            )
+        _assert_confirm_base(locked, confirm)
+        _lock_confirm_tasks(uow, locked.payload, envelope.workspace_id)
+        now = self._clock()
+        previous = locked.version
+        locked.mark_confirmed(now=now)
+        uow.handoff_proposals.save_status(locked, previous)
+        transition = HandoffTransition.create(
+            id=uuid4(),
+            proposal=locked,
+            confirmed_by_type=envelope.actor_type,
+            confirmed_by_id=envelope.actor_id,
+            confirmed_at=now,
+        )
+        uow.handoff_transitions.add(transition)
+        event = _handoff_transition_event(
+            transition, envelope, source_worker_id=locked.payload.source_worker_id
+        )
+        uow.events.append_with_outbox(event)
+        return CommandResult(
+            command_id=envelope.id,
+            aggregate_id=transition.id,
+            aggregate_version=transition.version,
+            event_ids=(event.id,),
+            data={
+                "proposal": native_proposal_projection(locked),
+                "transition": native_transition_projection(transition),
+            },
         )
 
     def _prepare(
@@ -392,6 +560,7 @@ class HandoffCommandHandler:
     def _cancel(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
+        self.preflight(uow, envelope)
         if envelope.target_type != "handoff_proposal":
             raise HandoffCommandError(
                 "validation_error", "CancelWorkerHandoff targets a handoff_proposal"
@@ -433,12 +602,17 @@ class HandoffCommandHandler:
             aggregate_id=proposal.id,
             aggregate_version=proposal.version,
             event_ids=(event.id,),
-            data={"proposal": proposal.to_mapping()},
+            data={
+                "proposal": native_proposal_projection(proposal)
+                if isinstance(proposal.payload, NativeHandoffProposalPayload)
+                else proposal.to_mapping()
+            },
         )
 
     def _confirm(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
+        self.preflight(uow, envelope)
         if envelope.target_type != "handoff_proposal":
             raise HandoffCommandError(
                 "validation_error", "ConfirmWorkerHandoff targets a handoff_proposal"
@@ -587,6 +761,7 @@ class HandoffCommandHandler:
     def _recover(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
+        self.preflight(uow, envelope)
         if self._recovery_service is None:
             raise HandoffCommandError(
                 "handoff_recovery_not_allowed",
@@ -840,7 +1015,9 @@ def _assert_confirm_base(
         )
 
 
-def _confirm_head_matches(head: Any, payload: HandoffProposalPayload) -> bool:
+def _confirm_head_matches(
+    head: Any, payload: HandoffProposalPayload | NativeHandoffProposalPayload
+) -> bool:
     return (
         getattr(head, "active_snapshot_id", None) == payload.observed_plan_snapshot_id
         and getattr(head, "active_generation", None) == payload.observed_plan_generation
@@ -850,7 +1027,7 @@ def _confirm_head_matches(head: Any, payload: HandoffProposalPayload) -> bool:
 
 def _lock_confirm_tasks(
     uow: ControlPlaneUnitOfWork,
-    payload: HandoffProposalPayload,
+    payload: HandoffProposalPayload | NativeHandoffProposalPayload,
     workspace_id: UUID,
 ) -> None:
     task_ids = tuple(sorted({payload.root_task_id, payload.subtask_id}, key=str))

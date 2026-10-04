@@ -32,6 +32,7 @@ from sidera_control_plane.application.knowledge_candidate_submission import (
     FileCandidateProposalSpool,
     KnowledgeCandidateSubmissionService,
 )
+from sidera_control_plane.application.ports import WorkspaceProvider
 from sidera_control_plane.application.worker_gateway import (
     ConfiguredExecutionSpecFactory,
     GatewayAssignmentRunner,
@@ -60,6 +61,7 @@ class GatewayRuntime:
     worker_gateway: WorkerGateway
     database: Database
     catalog: KnowledgeHttpAdapter
+    workspace_provider: WorkspaceProvider | None = None
     _closed: bool = False
 
     def close(self) -> None:
@@ -228,6 +230,7 @@ def build_gateway(
         worker_gateway=worker_gateway,
         database=database,
         catalog=catalog,
+        workspace_provider=workspace_manager,
     )
 
 

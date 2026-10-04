@@ -20,6 +20,7 @@ from sidera_control_plane.api.schemas import (
     ConfigureWorkerRuntimePayload,
     ConfirmPlanningProposalPayload,
     ConfirmPlanRevisionPayload,
+    ConfirmProfileHandoffPayload,
     ConfirmWorkerHandoffPayload,
     ConfirmWorkerTransitionStoppedPayload,
     ErrorBody,
@@ -38,6 +39,7 @@ from sidera_control_plane.api.schemas import (
     NotificationReadinessResponse,
     PauseCollaborationReleasePayload,
     PinExecutionWorkerPayload,
+    PrepareProfileHandoffPayload,
     PrepareWorkerHandoffPayload,
     ReconcileWorkerTransitionPayload,
     RecoverWorkerHandoffPayload,
@@ -57,6 +59,7 @@ from sidera_control_plane.api.schemas import (
     RetryResultVerificationPayload,
     ReviseWorkContextPayload,
     RevokeContextPackagePayload,
+    SendExecutionInputPayload,
     SetAgentAssigneePayload,
     SetModuleLifecyclePayload,
     SubmitPlanningRequestPayload,
@@ -91,6 +94,7 @@ _PLANNING_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
 )
 
 _RUNTIME_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
+    ("SendExecutionInput", SendExecutionInputPayload),
     ("SetSubtaskAssignee", SetAgentAssigneePayload),
     ("SetWorkerItemAssignee", SetAgentAssigneePayload),
     ("UpdateUnstartedAgentBinding", UpdateUnstartedAgentBindingPayload),
@@ -107,6 +111,8 @@ _TRANSITION_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
 )
 
 _HANDOFF_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
+    ("PrepareProfileHandoff", PrepareProfileHandoffPayload),
+    ("ConfirmProfileHandoff", ConfirmProfileHandoffPayload),
     ("PrepareWorkerHandoff", PrepareWorkerHandoffPayload),
     ("ConfirmWorkerHandoff", ConfirmWorkerHandoffPayload),
     ("CancelWorkerHandoff", CancelWorkerHandoffPayload),

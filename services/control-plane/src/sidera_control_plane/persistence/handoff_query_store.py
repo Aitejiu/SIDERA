@@ -257,6 +257,8 @@ def _trace_descriptor(
 
 
 def _recovery_strategies(row: HandoffTransitionModel) -> tuple[str, ...]:
+    if row.handoff_schema_version == 2:
+        return ()
     if row.status == "blocked" and row.failure_code not in {
         "gateway_recovery_required",
         "recovery_required",

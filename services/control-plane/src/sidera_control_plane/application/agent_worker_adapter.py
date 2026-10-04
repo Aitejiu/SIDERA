@@ -23,6 +23,7 @@ from sidera_agents.api import (
 )
 from sidera_agents.contracts import (
     CredentialRef,
+    InputStatus,
     ProfileRef,
     ResourceKind,
     ResourceRef,
@@ -45,9 +46,14 @@ from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.gateway import (
     AdapterEvent,
     AdapterSessionHandle,
+    DeliveryOutcome,
     DeliveryResult,
 )
-from sidera_control_plane.domain.modules import WorkerAdapterCapabilityProfile
+from sidera_control_plane.domain.inputs import input_operation_id
+from sidera_control_plane.domain.modules import (
+    CapabilityInput,
+    WorkerAdapterCapabilityProfile,
+)
 from sidera_control_plane.domain.result_operations import ResultError
 
 
@@ -322,7 +328,7 @@ def native_binding(uow, execution):
 def native_capabilities():
     # Business protocol support is not a Harness/model capability declaration.
     return WorkerAdapterCapabilityProfile(
-        input="unsupported",
+        input=CapabilityInput.QUEUED,
         idempotency="operation-id",
         resume="none",
         stop="exact-execution",
@@ -584,6 +590,95 @@ class AgentWorkerAdapter:
             receipt.evidence_sequence if delivered else None,
             receipt.reason_code,
             handle.execution_session_id,
+        )
+
+    def send_input(self, handle, text, attachment_refs, *, operation_id):
+        link = self._canonical()
+        self._check_handle(link, handle)
+        self._authorizer.require(link.authority_id, "run.input", link.workspace_id)
+        snapshot = self.get_run(link.workspace_id, link.run_id)
+        if not snapshot.input_open or snapshot.state.value not in {"running", "idle"}:
+            raise AgentError("native_input_closed", "Original native input is closed.")
+        with self._uow_factory() as uow:
+            binding = native_binding(
+                uow, uow.executions.get(link.execution_id, link.workspace_id)
+            )
+        request = self._builder.build_input(
+            link.execution_id,
+            binding,
+            link.authority_id,
+            operation_id=operation_id,
+            text=text,
+            attachment_refs=attachment_refs,
+        )
+        self._authorizer.require(link.authority_id, "run.input", link.workspace_id)
+        try:
+            return self._input_result(
+                link, operation_id, self._execution.send_input(request)
+            )
+        except Exception:  # noqa: BLE001 - post-call failures cannot prove non-admission
+            # An exception after the public write cannot prove non-admission.
+            return DeliveryResult(
+                operation_id,
+                DeliveryOutcome.UNKNOWN,
+                None,
+                "native_input_admission_unconfirmed",
+            )
+
+    def get_input(self, workspace_id, run_id, operation_id):
+        if workspace_id != self._workspace_id:
+            raise AgentError(
+                "permission_denied", "Original native input is unavailable."
+            )
+        link = self._canonical(run_id=run_id)
+        with self._uow_factory() as uow:
+            item = uow.execution_inputs.get_by_operation_id(
+                operation_id, workspace_id, self._execution_id
+            )
+            session = (
+                None
+                if item is None
+                else uow.sessions.get_any(item.session_id, workspace_id)
+            )
+            if (
+                item is None
+                or session is None
+                or item.operation_id != input_operation_id(item.id)
+                or session.execution_id != link.execution_id
+                or session.adapter_session_id != f"agent-run:{link.run_id}"
+            ):
+                raise AgentError(
+                    "permission_denied", "Original native input is unavailable."
+                )
+        self._authorizer.require(link.authority_id, "run.read", link.workspace_id)
+        receipt = self._execution.get_input(
+            workspace_id, run_id, operation_id, grant_id=link.authority_id
+        )
+        return self._input_result(link, operation_id, receipt)
+
+    @staticmethod
+    def _input_result(link, operation_id, receipt):
+        if receipt.run_id != link.run_id or receipt.operation_id != operation_id:
+            raise AgentError("configuration_mismatch", "Native input identity changed.")
+        status = receipt.status
+        outcomes = {
+            InputStatus.ACCEPTED: DeliveryOutcome.ACCEPTED,
+            InputStatus.DELIVERED: DeliveryOutcome.DELIVERED,
+            InputStatus.FAILED: DeliveryOutcome.FAILED,
+            InputStatus.REJECTED: DeliveryOutcome.FAILED,
+            InputStatus.UNKNOWN: DeliveryOutcome.UNKNOWN,
+        }
+        if status is InputStatus.DELIVERED and (
+            type(receipt.evidence_sequence) is not int or receipt.evidence_sequence < 1
+        ):
+            raise AgentError(
+                "native_input_evidence_missing", "Native delivery is unconfirmed."
+            )
+        return DeliveryResult(
+            operation_id,
+            outcomes[status],
+            receipt.evidence_sequence if status is InputStatus.DELIVERED else None,
+            receipt.reason_code,
         )
 
     def collect_artifacts(self, handle, *, operation_id):

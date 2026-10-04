@@ -163,6 +163,7 @@ class UnitOfWork:
         self.executions = executions
         self.sessions = sessions
         self.results = ResultRepository()
+        self.execution_authorities = SimpleNamespace(get_link=lambda *args: None)
         self.gateway_operations = gateway_operations
         self.handoff_transitions = TransitionRepository(transition)
         self.handoff_context_bundles = SimpleNamespace(

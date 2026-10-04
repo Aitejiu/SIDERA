@@ -59,9 +59,7 @@ class GitWorktreeWorkspaceManager:
         self._manifests_by_id: dict[UUID, ExecutionWorkspaceManifest] = {}
         self._manifest_ids_by_location: dict[str, set[UUID]] = {}
         self._target_manifest_id_by_handoff_operation: dict[UUID, UUID] = {}
-        self._handoff_target_identity_by_operation: dict[
-            UUID, tuple[UUID, UUID, UUID, UUID, UUID, int, UUID, int]
-        ] = {}
+        self._handoff_target_identity_by_operation: dict[UUID, tuple[object, ...]] = {}
         self._handoff_inspection_by_operation: dict[
             UUID, HandoffWorkspaceInspection
         ] = {}
@@ -281,8 +279,14 @@ class GitWorktreeWorkspaceManager:
             if stored.lifecycle is WorkspaceLifecycle.FROZEN:
                 return self.inspect_manifest(stored)
             if stored.lifecycle is not manifest.lifecycle:
-                raise WorkspaceProviderError("workspace manifest lifecycle changed")
-            manifest = stored
+                if not (
+                    stored.lifecycle is WorkspaceLifecycle.READY
+                    and manifest.lifecycle is WorkspaceLifecycle.ACTIVE
+                    and manifest.version == stored.version + 1
+                ):
+                    raise WorkspaceProviderError("workspace manifest lifecycle changed")
+            else:
+                manifest = stored
         if manifest.lifecycle not in {
             WorkspaceLifecycle.ACTIVE,
             WorkspaceLifecycle.FROZEN,
@@ -488,16 +492,9 @@ class GitWorktreeWorkspaceManager:
                 or inspection.source_manifest_id != source_manifest.id
             ):
                 raise WorkspaceProviderError("handoff operation identity changed")
-            if self._handoff_target_identity_by_operation.get(operation_id) != (
-                target.workspace_id,
-                target.task_id,
-                target.target_execution_id,
-                target.target_worker_id,
-                target.adapter_module_ref,
-                target.adapter_config_version,
-                target.workspace_module_ref,
-                target.workspace_config_version,
-            ):
+            if self._handoff_target_identity_by_operation.get(
+                operation_id
+            ) != _handoff_target_identity(target):
                 raise WorkspaceProviderError("handoff target identity changed")
             if (
                 existing.workspace_id != target.workspace_id
@@ -553,14 +550,7 @@ class GitWorktreeWorkspaceManager:
         )
         self._target_manifest_id_by_handoff_operation[operation_id] = target_manifest.id
         self._handoff_target_identity_by_operation[operation_id] = (
-            target.workspace_id,
-            target.task_id,
-            target.target_execution_id,
-            target.target_worker_id,
-            target.adapter_module_ref,
-            target.adapter_config_version,
-            target.workspace_module_ref,
-            target.workspace_config_version,
+            _handoff_target_identity(target)
         )
         self._handoff_inspection_by_operation[operation_id] = HandoffWorkspaceInspection(
             transition_id=transition_id,
@@ -886,6 +876,22 @@ class GitWorktreeWorkspaceManager:
         except subprocess.CalledProcessError as exc:
             detail = (exc.stderr or exc.stdout or "git command failed").strip()
             raise WorkspaceProviderError(detail) from exc
+
+
+def _handoff_target_identity(target: HandoffWorkspaceTargetSpec) -> tuple[object, ...]:
+    identity = (
+        target.workspace_id,
+        target.task_id,
+        target.target_execution_id,
+        target.target_worker_id,
+        target.adapter_module_ref,
+        target.adapter_config_version,
+        target.workspace_module_ref,
+        target.workspace_config_version,
+    )
+    if target.schema_version == 2:
+        return (*identity, 2, target.target_profile_ref, target.target_binding_version)
+    return identity
 
 
 def _require_manifest_identity(

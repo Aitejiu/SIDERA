@@ -6,7 +6,7 @@ from enum import StrEnum
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sidera_control_plane.application.code_result_capture import (
-    code_capture_operation_id,
+    capture_operation_for_execution,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.errors import DomainError
@@ -19,6 +19,7 @@ from sidera_control_plane.domain.execution import (
 from sidera_control_plane.domain.gateway import (
     GatewayOperationStatus,
     GatewayOperationType,
+    NativeInputIdentity,
 )
 from sidera_control_plane.domain.handoff_evidence import (
     HandoffContextBundle,
@@ -384,6 +385,7 @@ class HandoffInputTransferService:
                     accepted_sequence,
                     last_sequence=last_sequence,
                 )
+                and _native_delivery_matches(uow, operation, item, transition)
                 else _InputDecision.BLOCK
             )
         if status is ExecutionInputStatus.QUEUED:
@@ -510,7 +512,11 @@ class HandoffInputTransferService:
         now: datetime,
     ) -> ExecutionInput:
         terminal_operation = uow.results.get_operation(
-            code_capture_operation_id(target_execution.id),
+            capture_operation_for_execution(
+                uow,
+                workspace_id=transition.workspace_id,
+                execution_id=target_execution.id,
+            ),
             transition.workspace_id,
             for_update=True,
         )
@@ -728,6 +734,13 @@ def _accepted_sequence(operation: object | None) -> int | None:
     if operation is None or _operation_status(operation) is not GatewayOperationStatus.SUCCEEDED:
         return None
     result_ref = getattr(operation, "result_ref", None)
+    if isinstance(result_ref, str) and result_ref.startswith(
+        ("native-input:", "native-input-delivery:")
+    ):
+        try:
+            return NativeInputIdentity.delivery_sequence_from_result_ref(result_ref)
+        except DomainError:
+            return None
     if not isinstance(result_ref, str) or not result_ref.startswith("sequence:"):
         return None
     suffix = result_ref.removeprefix("sequence:")
@@ -738,6 +751,51 @@ def _accepted_sequence(operation: object | None) -> int | None:
     except ValueError:
         return None
     return sequence if sequence >= 0 else None
+
+
+def _native_delivery_matches(uow, operation, item, transition):
+    repository = getattr(uow, "execution_authorities", None)
+    link = (
+        None
+        if repository is None
+        else repository.get_link(item.workspace_id, item.execution_id)
+    )
+    result_ref = getattr(operation, "result_ref", None)
+    if repository is None or link is None:
+        return not isinstance(result_ref, str) or not result_ref.startswith(
+            ("native-input:", "native-input-delivery:")
+        )
+    if link.run_id is None or item.operation_id != input_operation_id(item.id):
+        return False
+    try:
+        identity = NativeInputIdentity.from_result_ref(result_ref)
+        sequence = NativeInputIdentity.delivery_sequence_from_result_ref(result_ref)
+    except DomainError:
+        return False
+    authority = repository.get(link.authority_id, workspace_id=item.workspace_id)
+    session = uow.sessions.get_any(item.session_id, item.workspace_id)
+    return (
+        identity
+        == NativeInputIdentity(
+            item.workspace_id,
+            item.id,
+            item.execution_id,
+            item.session_id,
+            link.run_id,
+            item.operation_id,
+            link.authority_id,
+            link.binding_version,
+        )
+        and authority is not None
+        and authority.execution_id == item.execution_id
+        and authority.profile_ref == link.profile_ref
+        and authority.binding_version == link.binding_version
+        and session is not None
+        and session.execution_id == item.execution_id
+        and session.adapter_session_id == f"agent-run:{link.run_id}"
+        and session.id == uuid5(NAMESPACE_URL, f"sidera.native.session:{link.run_id}")
+        and sequence is not None
+    )
 
 
 def _derived_input_matches(

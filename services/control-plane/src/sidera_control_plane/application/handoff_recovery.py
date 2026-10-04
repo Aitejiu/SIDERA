@@ -166,8 +166,7 @@ class HandoffRecoveryService:
         """Inspect durable and boundary evidence without issuing an operation."""
 
         _aware(now, "handoff recovery inspection timestamp")
-        if not isinstance(transition, HandoffTransition):
-            raise HandoffRecoveryError("handoff transition is invalid")
+        _require_legacy_transition(transition)
 
         before = self._load_state(transition)
         if before.transition.version != transition.version:
@@ -231,6 +230,9 @@ class HandoffRecoveryService:
     ) -> tuple[HandoffRecoveryStrategy, ...]:
         """Return only strategies supported by this exact inspection."""
 
+        if transition.handoff_schema_version == 2:
+            return ()
+        _require_legacy_transition(transition)
         _validate_inspection(transition, inspection)
         if transition.status not in _FAILURE_STATUSES:
             return ()
@@ -301,6 +303,7 @@ class HandoffRecoveryService:
     ) -> None:
         """Persist provider inspection evidence without advancing the Transition."""
 
+        _require_legacy_transition(transition)
         _validate_inspection(transition, inspection)
         operation = _matching_operation(inspection, GatewayOperationType.START_SESSION)
         if operation is None:
@@ -311,6 +314,12 @@ class HandoffRecoveryService:
         if spec is None or operation.operation_id != spec.operation_id:
             raise HandoffRecoveryError("handoff operation inspection identity changed")
         with self._uow_factory() as uow:
+            current_transition = uow.handoff_transitions.get(
+                transition.id, transition.workspace_id, for_update=True
+            )
+            if current_transition is None:
+                raise HandoffRecoveryError("handoff transition was not found")
+            _require_legacy_transition(current_transition)
             current = uow.gateway_operations.get_by_operation_id(
                 operation.operation_id,
                 transition.workspace_id,
@@ -332,6 +341,7 @@ class HandoffRecoveryService:
         """Apply one append-only, expected-version recovery decision."""
 
         _aware(now, "handoff recovery decision timestamp")
+        _require_legacy_transition(transition)
         inspection = self.inspect_unknown(transition=transition, now=now)
         with self._uow_factory() as uow:
             return self.apply_decision_in_uow(
@@ -354,6 +364,7 @@ class HandoffRecoveryService:
         """Apply a preflighted decision inside the caller's command transaction."""
 
         _aware(now, "handoff recovery decision timestamp")
+        _require_legacy_transition(transition)
         if decision.source_channel is not HandoffSourceChannel.WEB:
             raise HandoffRecoveryError("handoff recovery source channel must be web")
         if decision.handoff_transition_id != transition.id:
@@ -371,6 +382,7 @@ class HandoffRecoveryService:
         )
         if current is None:
             raise HandoffRecoveryError("handoff transition was not found")
+        _require_legacy_transition(current)
         if current.version != decision.expected_transition_version:
             raise VersionConflict(decision.expected_transition_version, current.version)
         if current.version != transition.version:
@@ -432,6 +444,7 @@ class HandoffRecoveryService:
         decision: HandoffRecoveryDecision,
         now: datetime,
     ) -> tuple[UUID, ...]:
+        target_worker_id = _require_legacy_transition(transition)
         if strategy is HandoffRecoveryStrategy.RETRY_CURRENT_PHASE:
             if (
                 transition.phase in _WORKSPACE_PHASES
@@ -495,7 +508,7 @@ class HandoffRecoveryService:
         if strategy is HandoffRecoveryStrategy.CONFIRM_TARGET_ABSENT:
             self._retire_target_lineage(uow, state, now=now)
             transition.begin_recovery_attempt(
-                target_worker_id=transition.target_worker_id,
+                target_worker_id=target_worker_id,
                 target_runtime_snapshot=transition.target_runtime_snapshot,
                 now=now,
             )
@@ -507,7 +520,6 @@ class HandoffRecoveryService:
             HandoffRecoveryStrategy.CONTINUE_WITH_SOURCE_AGENT,
         }:
             self._retire_target_lineage(uow, state, now=now)
-            target_worker_id = transition.target_worker_id
             target_snapshot = transition.target_runtime_snapshot
             if strategy is HandoffRecoveryStrategy.RETRY_SAME_TARGET:
                 target_worker_id, target_snapshot = self._resolve_replacement_target(
@@ -630,6 +642,7 @@ class HandoffRecoveryService:
         uow: ControlPlaneUnitOfWork,
         transition: HandoffTransition,
     ) -> _PersistedState:
+        _require_legacy_transition(transition)
         source_execution = uow.executions.get(
             transition.source_execution_id,
             transition.workspace_id,
@@ -1273,6 +1286,17 @@ def _inspection_refs(
     if workspace_inspection is not None:
         refs.extend(workspace_inspection.evidence_refs)
     return tuple(dict.fromkeys(refs))[:16]
+
+
+def _require_legacy_transition(transition: HandoffTransition) -> UUID:
+    if not isinstance(transition, HandoffTransition):
+        raise HandoffRecoveryError("handoff transition is invalid")
+    if transition.handoff_schema_version != 1 or transition.native_payload is not None:
+        raise HandoffRecoveryError("native handoff does not support legacy recovery")
+    target_worker_id = transition.target_worker_id
+    if not isinstance(target_worker_id, UUID):
+        raise HandoffRecoveryError("legacy handoff target worker is missing")
+    return target_worker_id
 
 
 def _validate_inspection(

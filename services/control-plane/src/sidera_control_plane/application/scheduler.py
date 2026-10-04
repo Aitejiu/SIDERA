@@ -300,120 +300,101 @@ class Scheduler:
                             now=now,
                             execution_id=execution_id,
                         )
-                candidates = uow.workers.lock_candidates(
-                    workspace_id=execution.workspace_id,
-                    required_capabilities=execution.capability_requirements,
-                    pinned_worker_id=execution.pinned_worker_id,
-                    heartbeat_cutoff=now
-                    - timedelta(seconds=self._worker_heartbeat_timeout_seconds),
-                )
-                forbidden_ids = {
-                    worker.id
-                    for worker in candidates
-                    if worker.adapter_type in execution.adapter_forbidden
-                }
-                runtime_candidates = tuple(
-                    worker
-                    for worker in candidates
-                    if worker.id not in forbidden_ids
-                )
-                inspections = self._runtime_resolver.inspect_candidates(
-                    uow,
-                    runtime_candidates,
-                    execution,
-                )
-                if context_package is not None:
-                    inspections = tuple(
-                        _apply_context_capability_gate(
-                            inspection,
-                            required_version=context_package.manifest_schema_version,
-                            requires_code_input=(
-                                getattr(context_package, "code_input_manifest", None)
-                                is not None
-                            ),
-                        )
-                        for inspection in inspections
-                    )
-                diagnostics = list(inspections)
-                remaining = [
-                    inspection
-                    for inspection in inspections
-                    if inspection.resolved is not None
-                ]
-
-                while remaining:
-                    decision = self._policy.select(
-                        execution,
-                        tuple(
-                            WorkerCandidate.from_worker(item.worker)
-                            for item in remaining
-                        ),
-                    )
-                    if decision is None:
-                        break
-                    selected = next(
-                        (
-                            item
-                            for item in remaining
-                            if item.worker.id == decision.worker_id
-                        ),
-                        None,
-                    )
-                    if selected is None:
-                        break
-                    resolved = self._runtime_resolver.lock_and_resolve(
-                        uow,
-                        selected.worker,
-                        execution,
-                    )
-                    if isinstance(resolved, SchedulingIssue):
-                        diagnostics = [
-                            item
-                            for item in diagnostics
-                            if item.worker.id != selected.worker.id
-                        ]
-                        diagnostics.append(
-                            RuntimeCandidateInspection(
-                                worker=selected.worker,
-                                resolved=None,
-                                issue=resolved,
-                            )
-                        )
-                        remaining = [
-                            item
-                            for item in remaining
-                            if item.worker.id != selected.worker.id
-                        ]
-                        continue
-
-                    return self._commit_assignment(
+                selection = self._select_runtime(uow, execution, now, context_package)
+                if isinstance(selection, SchedulingIssue):
+                    return self._commit_deferred(
                         uow=uow,
                         execution=execution,
-                        worker=selected.worker,
-                        resolved=resolved,
-                        decision_reason=decision.reason,
+                        issue=selection,
                         now=now,
                         execution_id=execution_id,
-                        assignment_started_at=assignment_started_at,
                     )
-
-                issue = aggregate_runtime_issues(
-                    execution=execution,
-                    inspections=tuple(diagnostics),
-                    base_candidates=candidates,
-                    forbidden_worker_ids=forbidden_ids,
-                )
-                return self._commit_deferred(
+                worker, resolved, reason = selection
+                return self._commit_assignment(
                     uow=uow,
                     execution=execution,
-                    issue=issue,
+                    worker=worker,
+                    resolved=resolved,
+                    decision_reason=reason,
                     now=now,
                     execution_id=execution_id,
+                    assignment_started_at=assignment_started_at,
                 )
         except IntegrityError as exc:
             if execution_id is None or not _is_known_scheduler_conflict(exc):
                 raise
             return 1, 0, 1, execution_id
+
+    def _select_runtime(self, uow, execution, now, context_package):
+        candidates = uow.workers.lock_candidates(
+            workspace_id=execution.workspace_id,
+            required_capabilities=execution.capability_requirements,
+            pinned_worker_id=execution.pinned_worker_id,
+            heartbeat_cutoff=now
+            - timedelta(seconds=self._worker_heartbeat_timeout_seconds),
+        )
+        forbidden_ids = {
+            worker.id
+            for worker in candidates
+            if worker.adapter_type in execution.adapter_forbidden
+        }
+        inspections = self._runtime_resolver.inspect_candidates(
+            uow,
+            tuple(worker for worker in candidates if worker.id not in forbidden_ids),
+            execution,
+        )
+        if context_package is not None:
+            inspections = tuple(
+                _apply_context_capability_gate(
+                    inspection,
+                    required_version=context_package.manifest_schema_version,
+                    requires_code_input=getattr(
+                        context_package, "code_input_manifest", None
+                    )
+                    is not None,
+                )
+                for inspection in inspections
+            )
+        diagnostics = list(inspections)
+        remaining = [
+            inspection for inspection in inspections if inspection.resolved is not None
+        ]
+        while remaining:
+            decision = self._policy.select(
+                execution,
+                tuple(WorkerCandidate.from_worker(item.worker) for item in remaining),
+            )
+            if decision is None:
+                break
+            selected = next(
+                (item for item in remaining if item.worker.id == decision.worker_id),
+                None,
+            )
+            if selected is None:
+                break
+            resolved = self._runtime_resolver.lock_and_resolve(
+                uow, selected.worker, execution
+            )
+            if isinstance(resolved, SchedulingIssue):
+                diagnostics = [
+                    item for item in diagnostics if item.worker.id != selected.worker.id
+                ]
+                diagnostics.append(
+                    RuntimeCandidateInspection(
+                        worker=selected.worker, resolved=None, issue=resolved
+                    )
+                )
+                remaining = [
+                    item for item in remaining if item.worker.id != selected.worker.id
+                ]
+                continue
+            return selected.worker, resolved, decision.reason
+        return aggregate_runtime_issues(
+            execution=execution,
+            inspections=tuple(diagnostics),
+            base_candidates=candidates,
+            forbidden_worker_ids=forbidden_ids,
+        )
 
     def assign_handoff_target(
         self,
@@ -422,7 +403,7 @@ class Scheduler:
         transition_id: UUID,
         expected_transition_version: int,
         now: datetime,
-    ) -> HandoffTargetAssignment:
+    ) -> HandoffTargetAssignment | None:
         """Assign the exact pinned target after transfer and package gates."""
 
         if expected_transition_version < 1:
@@ -448,6 +429,17 @@ class Scheduler:
             )
             if execution is None:
                 raise HandoffTargetError("handoff target execution was not found")
+            if transition.handoff_schema_version == 2:
+                return self._assign_native_handoff_target(
+                    uow,
+                    transition,
+                    execution,
+                    expected_transition_version,
+                    now,
+                    assignment_started_at,
+                )
+            if transition.target_worker_id is None:
+                raise HandoffTargetError("handoff target worker was not found")
             worker = uow.workers.get(
                 transition.target_worker_id,
                 workspace_id,
@@ -553,6 +545,138 @@ class Scheduler:
                 fencing_token=execution.last_fencing_token,
             )
 
+    def _assign_native_handoff_target(
+        self, uow, transition, execution, expected_version, now, started
+    ):
+        from sidera_control_plane.application.workspace_handoff import (
+            WorkspaceHandoffService,
+        )
+        from sidera_control_plane.domain.workspace import WorkspaceLifecycle
+
+        if transition.version != expected_version:
+            raise HandoffTargetError("handoff transition version is stale")
+        gate = HandoffOperationGate(uow).evaluate(
+            worker_item_id=transition.worker_item_id,
+            workspace_id=transition.workspace_id,
+            operation=HandoffGateOperation.COORDINATOR_ASSIGN_TARGET,
+            transition_id=transition.id,
+            target_execution_id=execution.id,
+        )
+        if not gate.allowed:
+            raise HandoffGateBlocked(gate)
+        payload = transition.native_payload
+        binding = native_binding(uow, execution)
+        if (
+            payload is None
+            or payload.target_assignee.kind != "profile"
+            or binding is None
+            or (
+                not binding.runnable
+                or binding.profile_ref != payload.target_profile_ref
+                or binding.version != transition.target_binding_version
+                or execution.handoff_transition_id != transition.id
+                or execution.source_execution_id != transition.source_execution_id
+                or execution.worker_item_id != transition.worker_item_id
+                or execution.pinned_worker_id is not None
+            )
+        ):
+            raise HandoffTargetError("native handoff target appointment changed")
+        plan = PlanTransitionGate(uow).evaluate(
+            worker_item_id=transition.worker_item_id,
+            workspace_id=transition.workspace_id,
+            plan_generation=payload.observed_plan_generation,
+            operation=PlanTransitionGateOperation.SCHEDULE,
+            target_id=execution.id,
+        )
+        if not plan.allowed:
+            raise HandoffTargetError("native handoff target plan is fenced")
+        WorkspaceHandoffService._validate_native_cleanup(uow, transition)
+        frozen = uow.workspaces.get(
+            transition.source_workspace_manifest_id, transition.workspace_id
+        )
+        if (
+            frozen is None
+            or frozen.lifecycle is not WorkspaceLifecycle.FROZEN
+            or transition.source_workspace_freeze_facts is None
+        ):
+            raise HandoffTargetError("native handoff source is not frozen")
+        package = self._load_handoff_target_package(
+            uow, execution=execution, transition=transition, now=now
+        )
+        if execution.active_lease_id is not None:
+            worker = uow.workers.get(
+                transition.target_worker_id, transition.workspace_id, for_update=True
+            )
+            if worker is None:
+                raise HandoffTargetError(
+                    "native handoff reservation worker is unavailable"
+                )
+            resolved = self._runtime_resolver.lock_and_resolve(uow, worker, execution)
+            if isinstance(resolved, SchedulingIssue):
+                raise HandoffTargetError("native handoff reserved runtime changed")
+            return self._existing_handoff_assignment(
+                uow,
+                execution,
+                worker,
+                transition_id=transition.id,
+                now=now,
+                policy="handoff-native-v2",
+            )
+        if execution.status is not ExecutionStatus.QUEUED:
+            raise HandoffTargetError("native handoff target is not queued")
+        manifest = self._load_handoff_target_manifest(
+            uow, execution=execution, transition=transition
+        )
+        selection = self._select_runtime(uow, execution, now, package)
+        if isinstance(selection, SchedulingIssue):
+            if selection.requires_operator:
+                raise HandoffTargetError(
+                    "native handoff runtime is unavailable",
+                    details={"reason_code": selection.reason_code.value},
+                )
+            return None
+        worker, resolved, reason = selection
+        source_provider = uow.bindings.get_for_execution(
+            transition.source_execution_id, transition.workspace_id
+        )
+        if source_provider is None or (
+            resolved.workspace_module_instance_id != source_provider.workspace_module_id
+            or resolved.workspace_module_config_version
+            != source_provider.workspace_config_version
+        ):
+            raise HandoffTargetError(
+                "native handoff physical workspace provider changed"
+            )
+        committed = self._commit_assignment(
+            uow=uow,
+            execution=execution,
+            worker=worker,
+            resolved=resolved,
+            decision_reason={
+                **reason,
+                "policy": "handoff-native-v2",
+                "handoff_transition_id": str(transition.id),
+            },
+            now=now,
+            execution_id=execution.id,
+            assignment_started_at=started,
+            fencing_token=manifest.fencing_token,
+        )
+        if committed[1] != 1:
+            raise HandoffTargetError("native handoff reservation did not commit")
+        previous = transition.version
+        transition.target_worker_id = worker.id
+        transition.version += 1
+        uow.handoff_transitions.save(transition, previous)
+        return self._existing_handoff_assignment(
+            uow,
+            execution,
+            worker,
+            transition_id=transition.id,
+            now=now,
+            policy="handoff-native-v2",
+        )
+
     def _existing_handoff_assignment(
         self,
         uow: ControlPlaneUnitOfWork,
@@ -561,6 +685,7 @@ class Scheduler:
         *,
         transition_id: UUID,
         now: datetime,
+        policy: str = "handoff-exact-v1",
     ) -> HandoffTargetAssignment | None:
         if execution.active_lease_id is None:
             if execution.status is ExecutionStatus.QUEUED:
@@ -586,7 +711,7 @@ class Scheduler:
             or lease.status is not LeaseStatus.ACTIVE
             or now >= lease.expires_at
             or lease.fencing_token != execution.last_fencing_token
-            or lease.assignment_reason.get("policy") != "handoff-exact-v1"
+            or lease.assignment_reason.get("policy") != policy
             or lease.assignment_reason.get("handoff_transition_id")
             != str(transition_id)
             or binding.execution_id != execution.id

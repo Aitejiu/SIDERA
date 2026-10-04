@@ -2,7 +2,7 @@ from collections.abc import Collection
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
@@ -18,7 +18,7 @@ from sidera_control_plane.domain.artifacts import (
     EvidenceClaim,
     EvidenceClaimStatus,
 )
-from sidera_control_plane.domain.errors import VersionConflict
+from sidera_control_plane.domain.errors import ValidationError, VersionConflict
 from sidera_control_plane.domain.gateway import (
     ExecutionEvent,
     GatewayOperation,
@@ -31,6 +31,7 @@ from sidera_control_plane.domain.inputs import (
     input_operation_id,
 )
 from sidera_control_plane.persistence.models import (
+    AgentExecutionLinkModel,
     ArtifactModel,
     EvidenceClaimModel,
     ExecutionEventModel,
@@ -352,6 +353,72 @@ class EvidenceClaimRepository:
 
 
 class ExecutionInputRepository:
+    def get_by_operation_id(
+        self,
+        operation_id: UUID,
+        workspace_id: UUID,
+        execution_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ExecutionInput | None:
+        statement = (
+            select(ExecutionInputModel)
+            .where(
+                ExecutionInputModel.workspace_id == workspace_id,
+                ExecutionInputModel.execution_id == execution_id,
+                ExecutionInputModel.operation_id == operation_id,
+            )
+            .limit(2)
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        rows = self._session.scalars(statement).all()
+        if len(rows) > 1:
+            raise ValidationError("native input operation is ambiguous")
+        return _to_domain_input(rows[0]) if rows else None
+
+    def select_pending_native(
+        self, limit: int, *, exclude_ids: tuple[UUID, ...] = ()
+    ) -> tuple[ExecutionInput, ...]:
+        if limit < 1:
+            return ()
+        rows = self._session.scalars(
+            select(ExecutionInputModel)
+            .join(
+                AgentExecutionLinkModel,
+                (
+                    AgentExecutionLinkModel.workspace_id
+                    == ExecutionInputModel.workspace_id
+                )
+                & (
+                    AgentExecutionLinkModel.execution_id
+                    == ExecutionInputModel.execution_id
+                ),
+            )
+            .where(
+                ExecutionInputModel.status == ExecutionInputStatus.DISPATCHING.value,
+                ExecutionInputModel.operation_id.is_not(None),
+                ExecutionInputModel.id.not_in(exclude_ids),
+            )
+            .order_by(
+                ExecutionInputModel.last_query_selected_at.asc().nulls_first(),
+                ExecutionInputModel.created_at,
+                ExecutionInputModel.id,
+            )
+            .with_for_update(skip_locked=True, of=ExecutionInputModel)
+            .limit(limit)
+        ).all()
+        if rows:
+            self._session.execute(
+                update(ExecutionInputModel)
+                .where(ExecutionInputModel.id.in_(tuple(row.id for row in rows)))
+                .values(
+                    last_query_selected_at=func.clock_timestamp(),
+                    updated_at=ExecutionInputModel.updated_at,
+                )
+            )
+        return tuple(_to_domain_input(row) for row in rows)
+
     def __init__(self, session: Session) -> None:
         self._session = session
 

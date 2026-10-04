@@ -2016,6 +2016,22 @@ class EvidenceClaimRepositoryPort(Protocol):
 
 
 class ExecutionInputRepositoryPort(Protocol):
+    def get_by_operation_id(
+        self,
+        operation_id: UUID,
+        workspace_id: UUID,
+        execution_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ExecutionInput | None:
+        raise NotImplementedError
+
+    def select_pending_native(
+        self, limit: int, *, exclude_ids: tuple[UUID, ...] = ()
+    ) -> tuple[ExecutionInput, ...]:
+        """Select original native actions for queries, without requeueing them."""
+        raise NotImplementedError
+
     def get(
         self, input_id: UUID, workspace_id: UUID, *, for_update: bool = False
     ) -> ExecutionInput | None:

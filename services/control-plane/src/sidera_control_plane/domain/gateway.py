@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -47,6 +48,7 @@ _HANDOFF_INSPECTION_OUTCOMES = frozenset(
 
 
 class DeliveryOutcome(StrEnum):
+    ACCEPTED = "accepted"
     DELIVERED = "delivered"
     BLOCKED = "blocked"
     FAILED = "failed"
@@ -194,6 +196,7 @@ class GatewayOperation:
             raise InvalidTransition("handoff inspection result is already recorded")
         self.result_ref = marker
         self.version += 1
+
     def retry(self, *, now: datetime) -> None:
         if self.status not in {
             GatewayOperationStatus.FAILED,
@@ -292,12 +295,128 @@ class ExecutionEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeInputIdentity:
+    workspace_id: UUID
+    input_id: UUID
+    execution_id: UUID
+    session_id: UUID
+    run_id: UUID
+    operation_id: UUID
+    authority_id: UUID
+    binding_version: int
+
+    def __post_init__(self) -> None:
+        for name in (
+            "workspace_id",
+            "input_id",
+            "execution_id",
+            "session_id",
+            "run_id",
+            "operation_id",
+            "authority_id",
+        ):
+            if not isinstance(getattr(self, name), UUID):
+                raise ValidationError("native input identity must contain UUIDs")
+        if type(self.binding_version) is not int or self.binding_version < 1:
+            raise ValidationError("native input binding version must be positive")
+
+    def result_ref(self, *, evidence_sequence: int | None = None) -> str:
+        if evidence_sequence is not None and (
+            type(evidence_sequence) is not int or evidence_sequence < 1
+        ):
+            raise ValidationError("native input delivery proof must be positive")
+        names = (
+            "workspace_id",
+            "input_id",
+            "execution_id",
+            "session_id",
+            "run_id",
+            "operation_id",
+            "authority_id",
+            "binding_version",
+        )
+        payload = {
+            name: value if name == "binding_version" else str(value)
+            for name in names
+            for value in (getattr(self, name),)
+        }
+        if evidence_sequence is None:
+            return "native-input:v1:" + json.dumps(payload, sort_keys=True)
+        return "native-input-delivery:v1:" + json.dumps(
+            {"identity": payload, "evidence_sequence": evidence_sequence},
+            sort_keys=True,
+        )
+
+    @classmethod
+    def from_result_ref(cls, value: str | None) -> NativeInputIdentity:
+        return cls._decode_result_ref(value)[0]
+
+    @classmethod
+    def delivery_sequence_from_result_ref(cls, value: str | None) -> int | None:
+        return cls._decode_result_ref(value)[1]
+
+    @classmethod
+    def _decode_result_ref(cls, value):
+        prefixes = ("native-input:v1:", "native-input-delivery:v1:")
+        if not isinstance(value, str) or not value.startswith(prefixes):
+            raise ValidationError("original native input identity is missing")
+        try:
+            delivered = value.startswith(prefixes[1])
+            payload = json.loads(
+                value.removeprefix(prefixes[int(delivered)]),
+                object_pairs_hook=_native_input_fields,
+            )
+            sequence = None
+            if delivered:
+                if set(payload) != {"identity", "evidence_sequence"}:
+                    raise ValueError("invalid native delivery shape")
+                sequence = payload["evidence_sequence"]
+                if type(sequence) is not int or sequence < 1:
+                    raise ValueError("invalid native delivery proof")
+                payload = payload["identity"]
+            if set(payload) != {
+                "workspace_id",
+                "input_id",
+                "execution_id",
+                "session_id",
+                "run_id",
+                "operation_id",
+                "authority_id",
+                "binding_version",
+            }:
+                raise ValueError("invalid native input identity shape")
+            identity = cls(
+                workspace_id=UUID(payload["workspace_id"]),
+                input_id=UUID(payload["input_id"]),
+                execution_id=UUID(payload["execution_id"]),
+                session_id=UUID(payload["session_id"]),
+                run_id=UUID(payload["run_id"]),
+                operation_id=UUID(payload["operation_id"]),
+                authority_id=UUID(payload["authority_id"]),
+                binding_version=payload["binding_version"],
+            )
+            return identity, sequence
+        except (TypeError, ValueError, AttributeError):
+            raise ValidationError(
+                "original native input identity is malformed"
+            ) from None
+
+
+def _native_input_fields(pairs):
+    fields = dict(pairs)
+    if len(fields) != len(pairs):
+        raise ValueError("duplicate native input field")
+    return fields
+
+
+@dataclass(frozen=True, slots=True)
 class DeliveryResult:
     operation_id: UUID
     outcome: DeliveryOutcome
     accepted_sequence: int | None
     failure_code: str | None
     execution_session_id: UUID | None = None
+    native_identity: NativeInputIdentity | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -368,7 +487,13 @@ HANDOFF_OPERATION_NAMESPACE = uuid5(
     "urn:sidera:handoff-operation:v1",
 )
 HANDOFF_STEP_ACTIONS = frozenset(
-    {"checkpoint", "freeze_workspace", "transfer_workspace", "enable_writer"}
+    {
+        "checkpoint",
+        "freeze_workspace",
+        "transfer_workspace",
+        "enable_writer",
+        "stop_source",
+    }
 )
 
 

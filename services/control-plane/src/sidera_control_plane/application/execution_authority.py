@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import UUID
+from typing import NoReturn
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sidera_agents.contracts import (
     CredentialRef,
@@ -15,10 +16,18 @@ from sidera_agents.contracts import (
 from sidera_agents.errors import AgentError
 
 from sidera_control_plane.application.assignments import AssignmentTarget
+from sidera_control_plane.application.handoff_gate import (
+    HandoffGateOperation,
+    HandoffOperationGate,
+)
+from sidera_control_plane.application.plan_transition_gate import (
+    PlanTransitionGate,
+    PlanTransitionGateOperation,
+)
 from sidera_control_plane.domain.errors import DomainError
 
 
-def _deny():
+def _deny() -> NoReturn:
     raise AgentError("permission_denied", "Execution authority denied.")
 
 
@@ -30,6 +39,13 @@ class ExecutionAuthorityReader:
         self._clock = clock or (lambda: datetime.now(UTC))
 
     def require(self, grant_id: UUID, action: str, target: object) -> None:
+        self._require(grant_id, action, target, original_input_command=False)
+
+    def require_input_command_scope(self, grant_id: UUID, workspace_id: UUID) -> None:
+        """Authorize original input receipts without permitting fresh admission."""
+        self._require(grant_id, "run.input", workspace_id, original_input_command=True)
+
+    def _require(self, grant_id, action, target, *, original_input_command):
         principal = self._principal()
         if not principal or not isinstance(grant_id, UUID):
             _deny()
@@ -79,6 +95,28 @@ class ExecutionAuthorityReader:
                 if action == "run.read" and action not in authority.actions:
                     _deny()
                 return
+            if original_input_command and (
+                type(target) is not UUID or target != authority.workspace_id
+            ):
+                _deny()
+            if (
+                not original_input_command
+                and action == "run.input"
+                and execution.worker_item_id is not None
+            ):
+                handoff = HandoffOperationGate(uow).evaluate(
+                    worker_item_id=execution.worker_item_id,
+                    workspace_id=authority.workspace_id,
+                    operation=HandoffGateOperation.USER_INPUT,
+                )
+                plan = PlanTransitionGate(uow).evaluate(
+                    worker_item_id=execution.worker_item_id,
+                    workspace_id=authority.workspace_id,
+                    plan_generation=None,
+                    operation=PlanTransitionGateOperation.INPUT,
+                )
+                if not handoff.allowed or not plan.allowed:
+                    _deny()
             if (
                 authority.revoked
                 or action not in authority.actions
@@ -98,6 +136,8 @@ class ExecutionAuthorityReader:
                 )
             except (DomainError, AgentError):
                 _deny()
+            if original_input_command:
+                return
             binding = uow.agent_bindings.get(
                 authority.workspace_id, authority.target_type, authority.target_id
             )
@@ -110,7 +150,12 @@ class ExecutionAuthorityReader:
                     and action not in {"runtime.read", "profile.read"}
                 )
                 or execution.stop_requested
-                or execution.handoff_transition_id is not None
+                or (
+                    execution.handoff_transition_id is not None
+                    and not self._native_handoff_scope(
+                        uow, execution, binding, link, action=action
+                    )
+                )
                 or execution.status.value not in {"leased", "running"}
             ):
                 _deny()
@@ -171,7 +216,20 @@ class ExecutionAuthorityReader:
                     or link.run_id is None
                 ):
                     _deny()
-                if action in {"run.input", "run.interrupt"} and link.status not in {
+                if action == "run.input":
+                    session = uow.sessions.get_any(
+                        uuid5(NAMESPACE_URL, f"sidera.native.session:{link.run_id}"),
+                        authority.workspace_id,
+                    )
+                    if (
+                        link.status not in {"starting", "running", "waiting"}
+                        or session is None
+                        or session.status.value != "active"
+                        or session.execution_id != authority.execution_id
+                        or session.adapter_session_id != f"agent-run:{link.run_id}"
+                    ):
+                        _deny()
+                elif action == "run.interrupt" and link.status not in {
                     "running",
                     "waiting",
                 }:
@@ -201,6 +259,71 @@ class ExecutionAuthorityReader:
                     _deny()
             else:
                 _deny()
+
+    def _native_handoff_scope(self, uow, execution, binding, link, *, action):
+        from sidera_control_plane.application.workspace_handoff import (
+            WorkspaceHandoffService,
+        )
+        from sidera_control_plane.domain.handoffs import (
+            HandoffPhase,
+            HandoffTransitionStatus,
+        )
+
+        transition = uow.handoff_transitions.get(
+            execution.handoff_transition_id, execution.workspace_id
+        )
+        if (
+            transition is None
+            or transition.handoff_schema_version != 2
+            or transition.native_payload is None
+            or binding is None
+            or (
+                transition.target_execution_id != execution.id
+                or transition.worker_item_id != execution.worker_item_id
+                or transition.target_worker_id != execution.assigned_worker_id
+                or transition.target_binding_version != binding.version
+                or transition.native_payload.target_profile_ref != binding.profile_ref
+                or transition.native_payload.target_profile_ref != link.profile_ref
+                or transition.target_binding_version != link.binding_version
+            )
+        ):
+            return False
+        if transition.status is HandoffTransitionStatus.CONVERGED:
+            session = uow.sessions.get_any(
+                transition.target_session_id, execution.workspace_id
+            )
+            return (
+                session is not None
+                and session.execution_id == execution.id
+                and session.adapter_session_id == f"agent-run:{link.run_id}"
+            )
+        operation = {
+            HandoffPhase.START_TARGET_SESSION: HandoffGateOperation.COORDINATOR_START_TARGET,
+            HandoffPhase.ACKNOWLEDGE_CONTEXT: HandoffGateOperation.COORDINATOR_ENABLE_TARGET_WRITER,
+        }.get(transition.phase)
+        if operation is None:
+            return False
+        if (
+            transition.phase is HandoffPhase.ACKNOWLEDGE_CONTEXT
+            and action != "source.read"
+        ):
+            return False
+        gate = HandoffOperationGate(uow).evaluate(
+            worker_item_id=execution.worker_item_id,
+            workspace_id=execution.workspace_id,
+            operation=operation,
+            transition_id=transition.id,
+            target_execution_id=execution.id,
+        )
+        if not gate.allowed or (
+            not transition.lease_owner
+            or transition.lease_expires_at is None
+            or transition.lease_expires_at <= self._clock()
+            or transition.source_workspace_freeze_facts is None
+        ):
+            return False
+        WorkspaceHandoffService._validate_native_cleanup(uow, transition)
+        return True
 
 
 @dataclass(frozen=True, slots=True)

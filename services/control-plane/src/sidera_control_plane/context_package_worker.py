@@ -915,7 +915,7 @@ def _safe_handoff_facts(bundle: HandoffContextBundle) -> Mapping[str, object]:
     def ids(values: Sequence[UUID]) -> tuple[str, ...]:
         return tuple(str(value) for value in values)
 
-    return {
+    facts: dict[str, object] = {
         "bundle_id": str(bundle.id),
         "bundle_hash": bundle.bundle_hash,
         "transition_id": str(bundle.handoff_transition_id),
@@ -947,6 +947,19 @@ def _safe_handoff_facts(bundle: HandoffContextBundle) -> Mapping[str, object]:
         "reason": bundle.handoff_reason,
         "instruction": bundle.handoff_instruction,
     }
+    if bundle.schema_version == 2:
+        if bundle.target_profile_ref is None or bundle.target_native_metadata is None:
+            raise ContextAssemblyError(
+                "context_consumer_stale", "native handoff bundle appointment is missing"
+            )
+        facts["target"] = {
+            "execution_id": str(bundle.target_execution_id),
+            "profile_ref": bundle.target_profile_ref.model_dump(mode="json"),
+            "binding_version": bundle.target_binding_version,
+            "native_metadata": dict(bundle.target_native_metadata),
+            "context_version": bundle.target_context_version,
+        }
+    return facts
 
 
 def _system_command(

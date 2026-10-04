@@ -896,6 +896,8 @@ def test_prepare_ttl_must_be_positive_and_bounded() -> None:
 def test_handler_exposes_the_handoff_command_surface() -> None:
     assert HandoffCommandHandler.command_types == frozenset(
         {
+            "PrepareProfileHandoff",
+            "ConfirmProfileHandoff",
             "PrepareWorkerHandoff",
             "CancelWorkerHandoff",
             "ConfirmWorkerHandoff",

@@ -158,6 +158,7 @@ from sidera_control_plane.domain.gateway import (
     GatewayOperation,
     GatewayOperationStatus,
     GatewayOperationType,
+    NativeInputIdentity,
     RuntimeModuleOperation,
     bind_context_acknowledgement,
     context_patch_operation_id,
@@ -1384,6 +1385,7 @@ class WorkerGateway:
                 ),
                 actions=(
                     "run.start",
+                    "run.input",
                     "run.read",
                     "run.stop",
                     "profile.read",
@@ -2089,8 +2091,15 @@ class WorkerGateway:
         workspace_id: UUID,
         transition_id: UUID,
         expected_transition_version: int,
-    ) -> HandoffTargetStartResult:
+    ) -> HandoffTargetStartResult | GatewayExecutionResult | NativeDeferredResult:
         """Start a transferred target Session while keeping its workspace read-only."""
+
+        with self._uow_factory() as uow:
+            saved = uow.handoff_transitions.get(transition_id, workspace_id)
+        if saved is not None and saved.handoff_schema_version == 2:
+            return self._start_native_handoff_target(
+                workspace_id, transition_id, expected_transition_version
+            )
 
         target: _HandoffTargetContext | None = None
         operation_id: UUID | None = None
@@ -2285,6 +2294,76 @@ class WorkerGateway:
                 "handoff target Session confirmation could not be persisted"
             ) from exc
 
+    def _start_native_handoff_target(
+        self, workspace_id, transition_id, expected_version
+    ):
+        with self._uow_factory() as uow:
+            transition = self._load_handoff_transition_for_operation(
+                uow,
+                workspace_id=workspace_id,
+                transition_id=transition_id,
+                expected_transition_version=expected_version,
+                operation=HandoffGateOperation.COORDINATOR_START_TARGET,
+                phase=HandoffPhase.START_TARGET_SESSION,
+            )
+            target = self._load_handoff_target_context_in_uow(
+                uow,
+                transition=transition,
+                workspace_id=workspace_id,
+                require_session=False,
+                require_acknowledgement=False,
+                allow_active_manifest=True,
+            )
+        keeper = self._lease_keeper(target.assignment)
+        keeper.start()
+        try:
+            result = self._handle_native(target.assignment)
+        finally:
+            keeper.stop()
+        if isinstance(result, NativeDeferredResult):
+            return result
+        with self._uow_factory() as uow:
+            current = self._load_handoff_transition_for_operation(
+                uow,
+                workspace_id=workspace_id,
+                transition_id=transition_id,
+                expected_transition_version=expected_version,
+                operation=HandoffGateOperation.COORDINATOR_START_TARGET,
+                phase=HandoffPhase.START_TARGET_SESSION,
+            )
+            if (
+                current.lease_owner != transition.lease_owner
+                or current.lease_expires_at is None
+                or current.lease_expires_at <= self._clock()
+            ):
+                raise GatewayRecoveryRequired(
+                    "native target claim changed during admission"
+                )
+            link = uow.execution_authorities.get_link(workspace_id, result.execution_id)
+            session = uow.sessions.get_any(result.session_id, workspace_id)
+            if (
+                link is None
+                or session is None
+                or current.native_payload is None
+                or session.execution_id != current.target_execution_id
+                or (
+                    link.profile_ref != current.native_payload.target_profile_ref
+                    or link.binding_version != current.target_binding_version
+                    or session.adapter_session_id != f"agent-run:{link.run_id}"
+                    or session.status is not ExecutionSessionStatus.ACTIVE
+                )
+            ):
+                raise GatewayRecoveryRequired("native target start evidence changed")
+            self._native_preparation_receipt(link)
+            previous = current.version
+            if current.target_session_id not in (None, session.id):
+                raise GatewayRecoveryRequired("native target Session changed")
+            if current.target_session_id is None:
+                current.target_session_id = session.id
+                current.version += 1
+                uow.handoff_transitions.save(current, previous)
+        return result
+
     def enable_handoff_target_writer(
         self,
         *,
@@ -2293,6 +2372,13 @@ class WorkerGateway:
         expected_transition_version: int,
     ) -> DeliveryResult:
         """Open the target writer once, after the target Session is durably bound."""
+
+        with self._uow_factory() as uow:
+            transition = uow.handoff_transitions.get(transition_id, workspace_id)
+        if transition is not None and transition.handoff_schema_version == 2:
+            return self._confirm_native_handoff_target(
+                workspace_id, transition_id, expected_transition_version
+            )
 
         target: _HandoffTargetContext | None = None
         operation_id: UUID | None = None
@@ -2400,7 +2486,9 @@ class WorkerGateway:
                 f"writer enable operation {operation_id} requires reconciliation"
             )
         if adapter is None or handle is None:
-            raise GatewayRecoveryRequired("handoff target writer adapter is unavailable")
+            raise GatewayRecoveryRequired(
+                "handoff target writer adapter is unavailable"
+            )
         try:
             guard_operation = self._begin_acceptance_worker_call(
                 operation_id=operation_id,
@@ -2455,9 +2543,7 @@ class WorkerGateway:
                     guard_operation,
                     outcome="unknown",
                 )
-                raise GatewayRecoveryRequired(
-                    "handoff target writer result is unknown"
-                )
+                raise GatewayRecoveryRequired("handoff target writer result is unknown")
             if delivery.outcome is not DeliveryOutcome.DELIVERED:
                 guard_observe_attempted = True
                 self._observe_acceptance_worker_call(
@@ -2526,6 +2612,182 @@ class WorkerGateway:
             raise GatewayRecoveryRequired(
                 f"handoff target writer result is unknown: {failure_code}"
             ) from exc
+
+    def _confirm_native_handoff_target(
+        self, workspace_id, transition_id, expected_version
+    ):
+        from sidera_control_plane.application.profile_handoff import (
+            native_handoff_confirmation_pins,
+            native_handoff_preparation,
+            validate_native_handoff_confirmation,
+        )
+
+        def load(uow):
+            transition = self._load_handoff_transition_for_operation(
+                uow,
+                workspace_id=workspace_id,
+                transition_id=transition_id,
+                expected_transition_version=expected_version,
+                operation=HandoffGateOperation.COORDINATOR_ENABLE_TARGET_WRITER,
+                phase=HandoffPhase.ACKNOWLEDGE_CONTEXT,
+            )
+            if (
+                transition.lease_owner is None
+                or transition.lease_expires_at is None
+                or transition.lease_expires_at <= self._clock()
+            ):
+                raise GatewayMessageError(
+                    "native target claim expired", code="handoff_claim_changed"
+                )
+            target = self._load_handoff_target_context_in_uow(
+                uow,
+                transition=transition,
+                workspace_id=workspace_id,
+                require_session=True,
+                require_acknowledgement=False,
+                allow_active_manifest=True,
+            )
+            link, receipt = native_handoff_preparation(
+                uow, transition, now=self._clock()
+            )
+            return transition, target, link, receipt
+
+        try:
+            with self._uow_factory() as uow:
+                transition, target, link, receipt = load(uow)
+                operation_id = handoff_step_operation_id(
+                    transition.id,
+                    HandoffPhase.ACKNOWLEDGE_CONTEXT,
+                    logical_attempt=transition.logical_attempt,
+                    action="enable_writer",
+                )
+                existing = uow.gateway_operations.get_by_operation_id(
+                    operation_id, workspace_id
+                )
+                if (
+                    existing is not None
+                    and existing.status is GatewayOperationStatus.SUCCEEDED
+                ):
+                    proof = validate_native_handoff_confirmation(
+                        uow, transition, now=self._clock()
+                    )
+                    return DeliveryResult(
+                        operation_id,
+                        DeliveryOutcome.DELIVERED,
+                        proof["started_sequence"],
+                        None,
+                        execution_session_id=transition.target_session_id,
+                    )
+            services = self._native_services
+            reader = self._native_source_reader
+            if services is None or reader is None:
+                raise GatewayMessageError(
+                    "native target ports unavailable", code="native_sources_unavailable"
+                )
+            for source in receipt.sources:
+                reader.validated_facts(link.authority_id, source.ref)
+            reader.require_execution(
+                link.authority_id,
+                workspace_id,
+                link.execution_id,
+                link.start_operation_id,
+            )
+            snapshot = services.execution.get_run(
+                workspace_id, link.run_id, grant_id=link.authority_id
+            )
+            page = services.execution.list_events(
+                workspace_id, link.run_id, 0, limit=100, grant_id=link.authority_id
+            )
+            if (
+                snapshot.run_id != link.run_id
+                or snapshot.workspace_id != workspace_id
+                or snapshot.profile_ref != link.profile_ref
+                or snapshot.effective_config.profile_ref != link.profile_ref
+                or snapshot.state.value not in {"running", "idle"}
+                or any(event.run_id != link.run_id for event in page.events)
+            ):
+                raise GatewayMessageError(
+                    "native target Run identity changed",
+                    code="native_handoff_start_invalid",
+                )
+            started = next(
+                (
+                    event
+                    for event in page.events
+                    if event.kind == "run.started"
+                    and event.operation_id == link.start_operation_id
+                ),
+                None,
+            )
+            if started is None or started.sequence > snapshot.last_event_sequence:
+                raise GatewayMessageError(
+                    "native target started observation missing",
+                    code="native_handoff_start_invalid",
+                )
+            for source in receipt.sources:
+                reader.validated_facts(link.authority_id, source.ref)
+            with self._uow_factory() as uow:
+                current, target, current_link, current_receipt = load(uow)
+                if (
+                    current.lease_owner != transition.lease_owner
+                    or current_link != link
+                    or current_receipt != receipt
+                    or target.session is None
+                    or started.sequence > target.session.last_sequence
+                ):
+                    raise GatewayMessageError(
+                        "native target facts changed during inspection",
+                        code="handoff_claim_changed",
+                    )
+                proof = {
+                    **native_handoff_confirmation_pins(link, receipt),
+                    "started_sequence": started.sequence,
+                }
+                state = self._begin_operation(
+                    uow,
+                    target.assignment,
+                    operation_id=operation_id,
+                    operation_type=GatewayOperationType.HANDOFF_ENABLE_WRITER,
+                    session_id=target.session.id,
+                )
+                if not state.completed:
+                    self._succeed_operation(
+                        uow,
+                        operation_id,
+                        target.assignment,
+                        json.dumps(proof, sort_keys=True, separators=(",", ":")),
+                        session_id=target.session.id,
+                    )
+                    uow.events.append_with_outbox(
+                        _gateway_event(
+                            receipt.command_id,
+                            workspace_id=workspace_id,
+                            aggregate_type="gateway_operation",
+                            aggregate_id=operation_id,
+                            aggregate_version=2,
+                            event_type="NativeHandoffContextConfirmed",
+                            payload={
+                                "execution_id": str(link.execution_id),
+                                "session_id": str(target.session.id),
+                                "run_id": str(link.run_id),
+                                "preparation_command_id": str(receipt.command_id),
+                                "started_sequence": started.sequence,
+                            },
+                        )
+                    )
+                validate_native_handoff_confirmation(uow, current, now=self._clock())
+                return DeliveryResult(
+                    operation_id,
+                    DeliveryOutcome.DELIVERED,
+                    started.sequence,
+                    None,
+                    execution_session_id=target.session.id,
+                )
+        except (AgentError, DomainError, ResultError) as exc:
+            raise GatewayMessageError(
+                "native target proof unavailable",
+                code=getattr(exc, "code", "native_handoff_confirmation_invalid"),
+            ) from None
 
     def _load_handoff_transition_for_operation(
         self,
@@ -2661,6 +2923,26 @@ class WorkerGateway:
             fencing_token=execution.last_fencing_token,
             operation=RuntimeModuleOperation.START,
         )
+        if transition.handoff_schema_version == 2:
+            from sidera_control_plane.application.workspace_handoff import (
+                WorkspaceHandoffService,
+            )
+
+            appointment = native_binding(uow, execution)
+            if (
+                appointment is None
+                or transition.native_payload is None
+                or (
+                    not appointment.runnable
+                    or appointment.profile_ref
+                    != transition.native_payload.target_profile_ref
+                    or appointment.version != transition.target_binding_version
+                )
+            ):
+                raise GatewayMessageError(
+                    "native target appointment changed", code="binding_not_runnable"
+                )
+            WorkspaceHandoffService._validate_native_cleanup(uow, transition)
         manifest = uow.workspaces.get_for_execution(
             target_execution_id,
             workspace_id,
@@ -5805,11 +6087,174 @@ class WorkerGateway:
             )
         return tuple(prepared)
 
+    def _native_input_identity(self, item):
+        with self._uow_factory() as uow:
+            repository = getattr(uow, "execution_authorities", None)
+            if repository is None:
+                return None
+            link = repository.get_link(item.workspace_id, item.execution_id)
+            if link is None:
+                return None
+            authority = uow.execution_authorities.get(
+                link.authority_id, workspace_id=item.workspace_id
+            )
+            session = uow.sessions.get_any(item.session_id, item.workspace_id)
+            if (
+                authority is None
+                or session is None
+                or link.run_id is None
+                or authority.execution_id != item.execution_id
+                or authority.binding_version != link.binding_version
+                or authority.profile_ref != link.profile_ref
+                or session.execution_id != item.execution_id
+                or session.adapter_session_id != f"agent-run:{link.run_id}"
+                or item.operation_id is None
+            ):
+                raise GatewayMessageError(
+                    "original native input pin changed",
+                    code="native_input_identity_mismatch",
+                )
+            return NativeInputIdentity(
+                item.workspace_id,
+                item.id,
+                item.execution_id,
+                item.session_id,
+                link.run_id,
+                item.operation_id,
+                link.authority_id,
+                link.binding_version,
+            )
+
+    def _native_input_adapter(self, item):
+        services = self._native_services
+        if services is None:
+            raise GatewayMessageError(
+                "native input services unavailable", code="native_services_unavailable"
+            )
+        return build_native_worker_adapter(
+            self._uow_factory,
+            services=services,
+            authorizer=self._native_authorizer(),
+            source_reader=self._native_source_reader,
+            workspace_id=item.workspace_id,
+            execution_id=item.execution_id,
+            clock=self._clock,
+            capability_snapshot=native_capabilities(),
+        )
+
+    def _send_native_input(self, item, identity):
+        query_only = False
+        with self._uow_factory() as uow:
+            operation = uow.gateway_operations.get_by_operation_id(
+                identity.operation_id, identity.workspace_id, for_update=True
+            )
+            if operation is not None:
+                query_only = True
+            else:
+                execution = uow.executions.get(item.execution_id, item.workspace_id)
+                authority = uow.execution_authorities.get(
+                    identity.authority_id, workspace_id=item.workspace_id
+                )
+                if execution is None or authority is None:
+                    raise GatewayMessageError("original native input pin unavailable")
+                operation = GatewayOperation.create(
+                    id=uuid5(
+                        NAMESPACE_URL, f"sidera.gateway.row:{identity.operation_id}"
+                    ),
+                    operation_id=identity.operation_id,
+                    workspace_id=item.workspace_id,
+                    task_id=execution.task_id,
+                    execution_id=item.execution_id,
+                    session_id=item.session_id,
+                    operation_type=GatewayOperationType.SEND_INPUT,
+                    module_instance_id=None,
+                    config_version=None,
+                    lease_id=authority.lease_id,
+                    fencing_token=authority.fencing_token,
+                    now=self._clock(),
+                )
+                operation.start(now=self._clock())
+                operation.result_ref = identity.result_ref()
+                uow.gateway_operations.add(operation)
+        if query_only:
+            return self.query_input(item)
+        try:
+            with self._uow_factory() as uow:
+                session = uow.sessions.get(item.session_id, item.workspace_id)
+                if session is None:
+                    raise GatewayMessageError(
+                        "original native input Session unavailable"
+                    )
+                handle = _session_handle(session)
+            delivery = self._native_input_adapter(item).send_input(
+                handle,
+                item.text,
+                item.attachment_refs,
+                operation_id=identity.operation_id,
+            )
+            return replace(delivery, native_identity=identity)
+        except AgentError as exc:
+            return DeliveryResult(
+                identity.operation_id,
+                DeliveryOutcome.BLOCKED,
+                None,
+                exc.code,
+                native_identity=identity,
+            )
+        except Exception:  # noqa: BLE001 - a lost admission ACK is query-only
+            return DeliveryResult(
+                identity.operation_id,
+                DeliveryOutcome.UNKNOWN,
+                None,
+                "native_input_admission_unconfirmed",
+                native_identity=identity,
+            )
+
+    def query_input(self, item: ExecutionInput) -> DeliveryResult:
+        operation_id = item.operation_id
+        if operation_id is None:
+            raise GatewayMessageError("original native input operation unavailable")
+        identity = None
+        try:
+            identity = self._native_input_identity(item)
+            if identity is None:
+                raise GatewayMessageError("original native input pin unavailable")
+            with self._uow_factory() as uow:
+                operation = uow.gateway_operations.get_by_operation_id(
+                    operation_id, item.workspace_id
+                )
+                if operation is None or (
+                    operation.execution_id != item.execution_id
+                    or operation.session_id != item.session_id
+                    or operation.operation_type is not GatewayOperationType.SEND_INPUT
+                    or NativeInputIdentity.from_result_ref(operation.result_ref)
+                    != identity
+                ):
+                    raise GatewayMessageError(
+                        "original native input operation unavailable"
+                    )
+            delivery = self._native_input_adapter(item).get_input(
+                identity.workspace_id, identity.run_id, identity.operation_id
+            )
+            return replace(delivery, native_identity=identity)
+        except Exception:  # noqa: BLE001 - no query error proves permission to resend
+            return DeliveryResult(
+                operation_id,
+                DeliveryOutcome.UNKNOWN,
+                None,
+                "native_input_query_unconfirmed",
+                native_identity=identity,
+            )
+
     def send_input(self, item: ExecutionInput) -> DeliveryResult:
         """Send one claimed input through the exact active Session."""
         operation_id = item.operation_id
         if item.status is not ExecutionInputStatus.DISPATCHING or operation_id is None:
             raise GatewayMessageError("input must be dispatching with an operation id")
+
+        identity = self._native_input_identity(item)
+        if identity is not None:
+            return self._send_native_input(item, identity)
 
         try:
             context = self._load_input_context(item)

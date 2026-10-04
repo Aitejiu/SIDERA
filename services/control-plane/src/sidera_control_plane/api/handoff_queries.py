@@ -7,14 +7,17 @@ from enum import StrEnum
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 from fastapi.encoders import jsonable_encoder
 
+from sidera_control_plane.api.dependencies import get_handoff_public_query_service
 from sidera_control_plane.api.schemas import (
     ActiveHandoffProjectionResponse,
     HandoffCandidateListResponse,
     HandoffProposalResponse,
     HandoffTransitionResponse,
+    NativeHandoffProposalResponse,
+    NativeHandoffTransitionResponse,
 )
 from sidera_control_plane.application.errors import NotFound
 from sidera_control_plane.application.handoff_candidates import (
@@ -32,11 +35,18 @@ from sidera_control_plane.application.handoff_recovery import (
     HandoffRecoveryService,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.profile_handoff import (
+    ProfileHandoffValidator,
+    native_proposal_projection,
+    native_transition_projection,
+)
+from sidera_control_plane.domain.agent_bindings import AssignmentDenied
 from sidera_control_plane.domain.errors import DomainError
 from sidera_control_plane.domain.handoffs import (
     HandoffCandidateList,
     HandoffProposal,
     HandoffTransition,
+    NativeHandoffProposalPayload,
 )
 from sidera_control_plane.domain.worker_item_projections import (
     ActiveHandoffProjection,
@@ -70,12 +80,16 @@ class HandoffPublicQueryService:
         active_handoff_service: ActiveHandoffQueryService,
         recovery_service: HandoffRecoveryService,
         runtime_resolver: object,
+        native_validator: ProfileHandoffValidator | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._candidate_service = candidate_service
         self._active_handoff_service = active_handoff_service
         self._recovery_service = recovery_service
         self._runtime_resolver = runtime_resolver
+        self._native_validator = native_validator
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def get_candidates(
         self,
@@ -112,17 +126,21 @@ class HandoffPublicQueryService:
         workspace_id: UUID,
         proposal_id: UUID,
     ) -> dict[str, object]:
-        now = datetime.now(UTC)
+        now = self._clock()
         reconciler = HandoffProposalReconciler(
             self._uow_factory,
             candidate_service=self._candidate_service,
             runtime_resolver=self._runtime_resolver,  # type: ignore[arg-type]
+            native_validator=self._native_validator,
         )
         reconciler.reconcile(proposal_id, workspace_id, now)
         with self._uow_factory() as uow:
             proposal = uow.handoff_proposals.get(proposal_id, workspace_id)
             if proposal is None:
                 raise NotFound("handoff proposal not found")
+            if isinstance(proposal.payload, NativeHandoffProposalPayload):
+                self._authorize_native(uow, proposal.payload)
+                return native_proposal_projection(proposal)
             return _proposal_document(uow, proposal)
 
     def get_transition(
@@ -134,7 +152,24 @@ class HandoffPublicQueryService:
             transition = uow.handoff_transitions.get(transition_id, workspace_id)
             if transition is None:
                 raise NotFound("handoff transition not found")
+            if transition.handoff_schema_version == 2:
+                self._authorize_native(uow, transition.native_payload)
+                link = (
+                    None
+                    if transition.target_execution_id is None
+                    else uow.execution_authorities.get_link(
+                        workspace_id, transition.target_execution_id
+                    )
+                )
+                return native_transition_projection(
+                    transition, target_run_id=None if link is None else link.run_id
+                )
             return self._transition_document(uow, transition)
+
+    def _authorize_native(self, uow, payload):
+        if self._native_validator is None:
+            raise AssignmentDenied("trusted native handoff query services required")
+        self._native_validator.authorize_payload(uow, payload)
 
     def get_worker_item_handoff(
         self,
@@ -147,6 +182,37 @@ class HandoffPublicQueryService:
         )
         if projection is None:
             raise NotFound("active handoff not found")
+        with self._uow_factory() as uow:
+            transition = uow.handoff_transitions.get(
+                projection.transition_id, workspace_id
+            )
+            if transition is None or (
+                transition.workspace_id,
+                transition.worker_item_id,
+                transition.proposal_id,
+                transition.source_execution_id,
+                transition.source_session_id,
+                transition.target_worker_id,
+                transition.target_execution_id,
+                transition.target_session_id,
+            ) != (
+                workspace_id,
+                worker_item_id,
+                projection.proposal_id,
+                projection.source_execution_id,
+                projection.source_session_id,
+                projection.target_worker_id,
+                projection.target_execution_id,
+                projection.target_session_id,
+            ):
+                raise NotFound("active handoff not found")
+            if transition.handoff_schema_version == 2:
+                payload = transition.native_payload
+                if payload is None:
+                    raise AssignmentDenied("native handoff proposal pins required")
+                self._authorize_native(uow, payload)
+                if payload.source_worker_id != projection.source_worker_id:
+                    raise NotFound("active handoff not found")
         return projection
 
     def _transition_document(
@@ -171,6 +237,8 @@ class HandoffPublicQueryService:
             payload.source_worker_id,
             transition.workspace_id,
         )
+        if transition.target_worker_id is None:
+            raise NotFound("handoff worker not found")
         target_worker = _require_worker(
             uow,
             transition.target_worker_id,
@@ -316,6 +384,8 @@ class HandoffPublicQueryService:
         self,
         transition: HandoffTransition,
     ) -> tuple[tuple[str, ...], tuple[str, ...], datetime | None]:
+        if transition.handoff_schema_version == 2:
+            return (), (), None
         if _value(transition.status) not in {"blocked", "blocked_unknown", "failed"}:
             return (), (), None
         now = datetime.now(UTC)
@@ -393,6 +463,8 @@ def _proposal_document(
     payload = proposal.payload
     worker_item = _require_worker_item(uow, payload.worker_item_id, payload.workspace_id)
     source_worker = _require_worker(uow, payload.source_worker_id, payload.workspace_id)
+    if payload.target_worker_id is None:
+        raise NotFound("handoff worker not found")
     target_worker = _require_worker(uow, payload.target_worker_id, payload.workspace_id)
     source_execution = uow.executions.get(payload.source_execution_id, payload.workspace_id)
     source_session = uow.sessions.get(payload.source_session_id, payload.workspace_id)
@@ -709,16 +781,7 @@ def _value(value: object) -> str:
     return value.value if isinstance(value, StrEnum) else str(value)
 
 
-def _get_handoff_service(request: Request) -> HandoffPublicQueryService:
-    # Import lazily so dependencies.py can type the service without a module cycle.
-    from sidera_control_plane.api.dependencies import (
-        get_handoff_public_query_service,
-    )
-
-    return get_handoff_public_query_service(
-        request.app.state.database,
-        request.app.state.settings,
-    )
+_get_handoff_service = get_handoff_public_query_service
 
 
 @router.get(
@@ -740,36 +803,40 @@ def get_handoff_candidates(
 
 @router.get(
     "/api/v1/workspaces/{workspace_id}/handoff-proposals/{proposal_id}",
-    response_model=HandoffProposalResponse,
+    response_model=HandoffProposalResponse | NativeHandoffProposalResponse,
     operation_id="get_handoff_proposal",
 )
 def get_handoff_proposal(
     workspace_id: UUID,
     proposal_id: UUID,
-    service: Annotated[
-        HandoffPublicQueryService, Depends(_get_handoff_service)
-    ],
-) -> HandoffProposalResponse:
-    return HandoffProposalResponse.model_validate(
-        jsonable_encoder(service.get_proposal(workspace_id, proposal_id))
+    service: Annotated[HandoffPublicQueryService, Depends(_get_handoff_service)],
+) -> HandoffProposalResponse | NativeHandoffProposalResponse:
+    document = jsonable_encoder(service.get_proposal(workspace_id, proposal_id))
+    model = (
+        NativeHandoffProposalResponse
+        if document.get("proposal_schema_version") == 2
+        else HandoffProposalResponse
     )
+    return model.model_validate(document)
 
 
 @router.get(
     "/api/v1/workspaces/{workspace_id}/handoff-transitions/{transition_id}",
-    response_model=HandoffTransitionResponse,
+    response_model=HandoffTransitionResponse | NativeHandoffTransitionResponse,
     operation_id="get_handoff_transition",
 )
 def get_handoff_transition(
     workspace_id: UUID,
     transition_id: UUID,
-    service: Annotated[
-        HandoffPublicQueryService, Depends(_get_handoff_service)
-    ],
-) -> HandoffTransitionResponse:
-    return HandoffTransitionResponse.model_validate(
-        jsonable_encoder(service.get_transition(workspace_id, transition_id))
+    service: Annotated[HandoffPublicQueryService, Depends(_get_handoff_service)],
+) -> HandoffTransitionResponse | NativeHandoffTransitionResponse:
+    document = jsonable_encoder(service.get_transition(workspace_id, transition_id))
+    model = (
+        NativeHandoffTransitionResponse
+        if document.get("handoff_schema_version") == 2
+        else HandoffTransitionResponse
     )
+    return model.model_validate(document)
 
 
 @router.get(

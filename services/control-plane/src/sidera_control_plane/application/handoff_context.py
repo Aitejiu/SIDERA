@@ -133,7 +133,7 @@ class HandoffContextService:
             transition.source_workspace_manifest_id
         ):
             raise HandoffContextError("handoff source manifest identity changed")
-        if (
+        if transition.handoff_schema_version != 2 and (
             freeze_facts.get("workspace_digest") != checkpoint.workspace_digest
         ):
             raise HandoffContextError("handoff source workspace digest changed")
@@ -145,8 +145,28 @@ class HandoffContextService:
             raise HandoffContextError("handoff checkpoint Session identity changed")
         if stop.source_session_id != transition.source_session_id:
             raise HandoffContextError("handoff stop Session identity changed")
-        if stop.accepted_sequence != checkpoint.accepted_sequence:
+        stop.assert_matches(checkpoint)
+        if (
+            transition.handoff_schema_version != 2
+            and stop.accepted_sequence != checkpoint.accepted_sequence
+        ):
             raise HandoffContextError("handoff stop sequence changed")
+        if transition.handoff_schema_version == 2:
+            from sidera_control_plane.application.workspace_handoff import (
+                WorkspaceHandoffService,
+            )
+
+            with self._uow_factory() as uow:
+                manifest = uow.workspaces.get(
+                    transition.source_workspace_manifest_id, transition.workspace_id
+                )
+                if manifest is None:
+                    raise HandoffContextError("native frozen source facts changed")
+                WorkspaceHandoffService._validate_exact_stop(transition, manifest)
+                if freeze_facts.get("workspace_digest") != workspace_manifest_digest(
+                    manifest
+                ):
+                    raise HandoffContextError("native frozen source facts changed")
         _validate_input_classification(transition, input_classification)
         return HandoffSourceFacts(
             checkpoint=checkpoint,
@@ -270,8 +290,19 @@ class HandoffContextService:
         )
         if worker_item is None:
             raise HandoffContextError("handoff WorkerItem was not found")
+        work_context = (
+            None
+            if current.handoff_schema_version != 2
+            else uow.work_contexts.get_by_root_task(
+                proposal.payload.root_task_id,
+                current.workspace_id,
+                for_update=True,
+            )
+        )
         context_revision = uow.work_contexts.get_revision(
-            source_package.work_context_revision_id,
+            source_package.work_context_revision_id
+            if work_context is None
+            else work_context.current_revision_id,
             current.workspace_id,
         )
         if context_revision is None:
@@ -290,6 +321,32 @@ class HandoffContextService:
             source_manifest=source_manifest,
             source_facts=source_facts,
         )
+        if current.handoff_schema_version == 2:
+            binding = uow.agent_bindings.get(
+                current.workspace_id,
+                "worker_item",
+                current.worker_item_id,
+                for_update=True,
+            )
+            head = uow.plans.get_head(
+                worker_item.root_task_id, current.workspace_id, for_update=True
+            )
+            if (
+                work_context is None
+                or binding is None
+                or head is None
+                or current.native_payload is None
+                or (
+                    work_context.id != current.native_payload.work_context_id
+                    or binding.profile_ref != current.native_payload.target_profile_ref
+                    or binding.version != current.target_binding_version
+                    or not binding.runnable
+                    or head.active_snapshot_id != target_request.plan_snapshot_id
+                    or head.active_generation != target_request.plan_generation
+                    or head.version != current.native_payload.observed_plan_head_version
+                )
+            ):
+                raise HandoffContextError("native target context appointment changed")
         bundle_id = uuid5(
             _HANDOFF_CONTEXT_NAMESPACE,
             f"sidera:handoff-context-bundle:{current.id}:{current.logical_attempt}",
@@ -673,7 +730,11 @@ class HandoffContextService:
             or manifest.execution_id != transition.source_execution_id
             or manifest.task_id != source_execution.task_id
             or workspace_manifest_digest(manifest)
-            != source_facts.checkpoint.workspace_digest
+            != (
+                source_facts.workspace_state.get("workspace_digest")
+                if transition.handoff_schema_version == 2
+                else source_facts.checkpoint.workspace_digest
+            )
         ):
             raise HandoffContextError("handoff source Workspace facts changed")
         state = source_facts.workspace_state
@@ -743,7 +804,10 @@ class HandoffContextService:
             target_request.proposal_revision_id,
         }:
             raise HandoffContextError("handoff WorkContext revision is stale")
-        if source_package.work_context_revision_id != context_revision.revision_id:
+        if (
+            transition.handoff_schema_version != 2
+            and source_package.work_context_revision_id != context_revision.revision_id
+        ):
             raise HandoffContextError("handoff source WorkContext revision changed")
         if source_facts.input_classification is None:
             raise HandoffContextError("handoff input classification is missing")
@@ -774,6 +838,8 @@ def _build_bundle(
     classification = source_facts.input_classification
     if classification is None:
         raise HandoffContextError("handoff input classification is missing")
+    if transition.target_context_version is None:
+        raise HandoffContextError("handoff target context version is missing")
     delivered = tuple(
         item.source_input_id
         for item in classification.dispositions
@@ -790,7 +856,7 @@ def _build_bundle(
     )
     return HandoffContextBundle.create(
         id=bundle_id,
-        schema_version=1,
+        schema_version=transition.handoff_schema_version,
         workspace_id=transition.workspace_id,
         worker_item_id=transition.worker_item_id,
         handoff_transition_id=transition.id,
@@ -805,7 +871,19 @@ def _build_bundle(
         source_worker_context_version=source_facts.source_worker_context_version,
         target_execution_id=target_execution.id,
         target_worker_id=transition.target_worker_id,
-        target_runtime_snapshot_hash=_hash_json(transition.target_runtime_snapshot),
+        target_runtime_snapshot_hash=None
+        if transition.handoff_schema_version == 2
+        else _hash_json(transition.target_runtime_snapshot),
+        target_profile_ref=None
+        if transition.native_payload is None
+        else transition.native_payload.target_profile_ref,
+        target_binding_version=transition.target_binding_version,
+        target_native_metadata=None
+        if transition.handoff_schema_version != 2
+        else {
+            "execution_mode": "native_profile",
+            "capability_requirements": sorted(target_execution.capability_requirements),
+        },
         target_context_version=transition.target_context_version,
         source_workspace_manifest_id=source_manifest.id,
         source_workspace_version=source_manifest.version,
@@ -856,6 +934,11 @@ def _checkpoint_from_transition(
             code="handoff_context_source_checkpoint_missing",
         )
     try:
+        if transition.handoff_schema_version == 2:
+            evidence = HandoffCheckpointEvidence.from_native_mapping(facts)
+            if evidence.accepted_sequence != transition.source_checkpoint_sequence:
+                raise HandoffContextError("handoff checkpoint sequence changed")
+            return evidence
         evidence = HandoffCheckpointEvidence(
             operation_id=UUID(str(facts["operation_id"])),
             transition_id=UUID(str(facts["transition_id"])),
@@ -890,6 +973,11 @@ def _stop_from_transition(transition: HandoffTransition) -> HandoffStopEvidence:
             code="handoff_context_source_stop_missing",
         )
     try:
+        if transition.handoff_schema_version == 2:
+            evidence = HandoffStopEvidence.from_native_mapping(facts)
+            if evidence.accepted_sequence != transition.source_stop_sequence:
+                raise HandoffContextError("handoff stop sequence changed")
+            return evidence
         evidence = HandoffStopEvidence(
             operation_id=UUID(str(facts["operation_id"])),
             source_session_id=UUID(str(facts["source_session_id"])),
