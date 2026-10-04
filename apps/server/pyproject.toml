@@ -1,0 +1,62 @@
+[project]
+name = "sidera-product"
+version = "0.1.0"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.16,<2",
+    "anyio>=4.8,<5",
+    "fastapi>=0.134,<1",
+    "httpx>=0.28,<1",
+    "psycopg[binary]>=3.2,<4",
+    "pydantic-settings>=2.10,<3",
+    "sqlalchemy>=2.0,<3",
+    "sidera-agents[postgres]==0.1.0",
+    "sidera-control-plane==0.1.0",
+    "sidera-control-plane-client==0.1.0",
+    "sidera-model-connections[postgres]==0.1.0",
+    "sidera-runtime-guard==0.1.0",
+    "uvicorn>=0.41,<1",
+]
+
+[project.scripts]
+sidera = "sidera_product.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=9,<10", "ruff>=0.12,<1", "pyright>=1.1.403,<2"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sidera_product"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"alembic.ini" = "sidera_product/alembic.ini"
+migrations = "sidera_product/migrations"
+
+[tool.uv.sources]
+sidera-agents = { path = "../../packages/agents", editable = true }
+sidera-control-plane = { path = "../../services/control-plane", editable = true }
+sidera-control-plane-client = { path = "../../packages/control-plane-client", editable = true }
+sidera-model-connections = { path = "../../packages/model-connections" }
+sidera-runtime-guard = { path = "../../packages/runtime-guard", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--import-mode=importlib"]
+pythonpath = ["."]
+markers = ["integration: requires the four explicit N17 targets"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP", "SIM", "BLE"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+include = ["src"]
+typeCheckingMode = "strict"
