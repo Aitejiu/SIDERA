@@ -141,3 +141,80 @@ def test_planning_settings_require_renewal_before_half_the_ttl() -> None:
             planning_lease_ttl_seconds=60,
             planning_lease_renew_interval_seconds=30,
         )
+
+
+def test_native_planning_builder_does_not_load_ambient_acceptance_guard(
+    monkeypatch, tmp_path
+):
+    import os
+
+    from sidera_control_plane import planning_worker
+
+    calls = []
+    monkeypatch.setenv("SIDERA_ACCEPTANCE_GUARD_REQUIRED", "1")
+    monkeypatch.setenv("SIDERA_ACCEPTANCE_MANIFEST", "/unused/private-old-manifest")
+    before = dict(os.environ)
+
+    def forbidden_guard():
+        calls.append("load_guard")
+        raise RuntimeError("old acceptance manifest must not be loaded")
+
+    monkeypatch.setattr(planning_worker, "load_acceptance_guard", forbidden_guard)
+    runtime = planning_worker.build_planning_worker(
+        Settings(
+            database_url="postgresql+psycopg://unused@/unused?host=/private/tmp/unused",
+            planning_temp_root=tmp_path / "planning",
+            knowledge_candidate_spool_dir=tmp_path / "spool",
+        ),
+        use_acceptance_guard=False,
+    )
+    try:
+        assert not calls
+        assert dict(os.environ) == before
+    finally:
+        runtime.catalog.close()
+        runtime.database.dispose()
+
+
+@pytest.mark.parametrize("failure_at", ("guard", "builders"))
+def test_planning_builder_failure_cleans_owned_resources(monkeypatch, failure_at):
+    from types import SimpleNamespace
+
+    from sidera_control_plane import planning_worker
+
+    calls = []
+    monkeypatch.setattr(
+        planning_worker,
+        "Database",
+        lambda url: SimpleNamespace(
+            dispose=lambda: calls.append("database_disposed"),
+        ),
+    )
+    monkeypatch.setattr(
+        planning_worker,
+        "KnowledgeHttpAdapter",
+        lambda **kwargs: SimpleNamespace(
+            close=lambda: calls.append("catalog_closed"),
+        ),
+    )
+
+    def fail():
+        calls.append(failure_at)
+        raise RuntimeError("controlled legacy construction failure")
+
+    monkeypatch.setattr(
+        planning_worker,
+        "load_acceptance_guard",
+        fail if failure_at == "guard" else lambda: None,
+    )
+    if failure_at == "builders":
+        monkeypatch.setattr(
+            planning_worker,
+            "build_planner_adapter_builders",
+            lambda *args, **kwargs: fail(),
+        )
+    with pytest.raises(RuntimeError, match="controlled legacy"):
+        planning_worker.build_planning_worker(
+            Settings(database_url="postgresql+psycopg://unused")
+        )
+    assert calls == [failure_at, "catalog_closed", "database_disposed"]

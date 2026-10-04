@@ -355,7 +355,7 @@ class NativeScenario:
                 protocol_state="ready",
                 auth_state="unconfirmed",
                 capabilities={
-                    "code": CapabilitySupport(
+                    "acp": CapabilitySupport(
                         status="supported", reason_code="fixture_only", constraints={}
                     )
                 },
@@ -377,18 +377,18 @@ class NativeScenario:
         self.execution = PublicNativeExecution(self)
         self.denied_worker_actions = set()
 
+        self.worker_scope_calls = []
         class WorkerScope:
             def require(scope, grant_id, action, target):
                 assert action != "assignment.write"
+                self.worker_scope_calls.append((grant_id, action, target))
                 if (
-                    action in self.denied_worker_actions
+                    grant_id != self.setup_grant
+                    or action in self.denied_worker_actions
                     or target.workspace_id != workspace_id
                     or target.principal_id != self.principal
                 ):
                     raise DomainError("worker scope denied")
-                with self.uow() as uow:
-                    if uow.execution_authorities.get(grant_id) is None:
-                        raise DomainError("worker grant unavailable")
 
         self.services = NativeWorkerServices(
             self.catalog,
@@ -980,6 +980,82 @@ def test_actual_scheduler_gateway_busy_retry_has_one_initial_native_input(
     assert_native_event_causes(s, admitted)
     s.gateway.sync_active_sessions(s.workspace_id)
     assert_native_event_causes(s, admitted)
+
+
+def test_worker_gateway_persists_original_host_grant_without_recursive_cp_permission(
+    native_scenario,
+):
+    from sidera_control_plane.application.execution_authority import (
+        ExecutionAuthorityReader,
+    )
+
+    s = native_scenario
+    s.assign()
+    assert s.schedule().assigned == 1
+    s.execution.next_status = "accepted"
+    s.start()
+    link = s.link()
+    with s.uow() as uow:
+        original = uow.execution_authorities.get(link.authority_id)
+    assert original.upstream_grant_id == s.setup_grant != original.id
+    assert s.execution.starts[0].grant_id == original.id
+    assert s.worker_scope_calls and {grant for grant, _, _ in s.worker_scope_calls} == {
+        s.setup_grant
+    }
+    reader = ExecutionAuthorityReader(
+        s.uow,
+        principal=lambda: s.principal,
+        authorizer=s.services.authorizer,
+        clock=s.cp.clock,
+    )
+    reader.require(original.id, "workspace.execute", original.execution_workspace)
+    reader.require(original.id, "source.read", original.sources[0])
+    with s.uow() as uow:
+        assert uow.execution_authorities.get(original.id) == original
+        assert (
+            uow.execution_authorities.get_link(s.workspace_id, link.execution_id)
+            == link
+        )
+
+
+def test_real_vocabulary_runtime_reaches_actual_assignment_scheduler_and_native_start(
+    native_scenario,
+):
+    from hashlib import sha256
+
+    from sidera_control_plane.application.agent_sources import canonical_source_text
+    from sidera_control_plane.application.context_requests import (
+        resolve_execution_context_authorization,
+    )
+
+    s = native_scenario
+    assert "code" not in s.runtimes.runtime.capabilities
+    assigned = s.assign()
+    assert assigned.data["binding"]["runnable"] is True
+    assert s.schedule().assigned == 1
+    s.start()
+    (request,) = s.execution.starts
+    assert request.required_capabilities == ()
+    with s.uow() as uow:
+        execution = uow.executions.get(s.link().execution_id, s.workspace_id)
+        authorization = resolve_execution_context_authorization(uow, execution)
+        plan = uow.plans.get(authorization.request.plan_snapshot_id, s.workspace_id)
+        role = next(
+            item
+            for item in plan.worker_item_plans
+            if item.worker_item_id == execution.worker_item_id
+        )
+        assert execution.capability_requirements == frozenset({"code"})
+        assert role.capability_requirements == ("code",)
+    facts = next(item for item in request.context if item.item_id == "facts")
+    body = s.gateway._native_source_reader.read(request.grant_id, facts.source_ref)
+    manifest = s.cp.context_package_for_execution(execution.id)
+    assert body.text == canonical_source_text(manifest.control_plane_fact_snapshot)
+    assert (
+        body.content_hash
+        == facts.content_hash
+        == "sha256:" + sha256(body.text.encode()).hexdigest()
+    )
 
 
 def test_busy_new_profile_reuses_directory_under_new_fence(native_scenario):
@@ -1747,6 +1823,112 @@ def test_confirmed_run_close_captures_physical_code_not_a_completion_message(
         assert head is None or head.current_acceptance_id is None
 
 
+def test_actual_native_completion_receipt_replays_saved_version_without_duplicate_release(
+    native_scenario, monkeypatch
+):
+    from pathlib import Path
+    from uuid import NAMESPACE_URL, uuid5
+
+    from sqlalchemy import select
+
+    from sidera_control_plane.domain.gateway import RuntimeModuleOperation
+    from sidera_control_plane.persistence.models import EventModel
+
+    s = native_scenario
+    s.assign()
+    assert s.schedule().assigned == 1
+    s.start()
+    link = s.link()
+    with s.uow() as uow:
+        authority = uow.execution_authorities.get(link.authority_id)
+        session = uow.sessions.get_active_for_execution(link.execution_id)
+    context = s.gateway._load_context_by_ids(
+        workspace_id=s.workspace_id,
+        execution_id=link.execution_id,
+        lease_id=authority.lease_id,
+        fencing_token=authority.fencing_token,
+        operation=RuntimeModuleOperation.OBSERVE,
+    )
+    directory = Path(s.execution.starts[0].workspace.directory)
+    (directory / "completion.py").write_text("VALUE = 16\n", encoding="utf-8")
+    completion_envelopes = []
+    handle = CommandService.handle
+
+    def observe(service, envelope):
+        if (
+            envelope.command_type == "ReportExecutionSucceeded"
+            and envelope.target_id == link.execution_id
+        ):
+            completion_envelopes.append(envelope)
+        return handle(service, envelope)
+
+    monkeypatch.setattr(CommandService, "handle", observe)
+    s.execution.emit(link.run_id, "run.completed", state="completed")
+    s.gateway.sync_active_sessions(s.workspace_id)
+    decision = s.gateway._load_completion_decision(context, session_id=session.id)
+    assert decision is not None and decision.outcome == "succeeded"
+    command_id = uuid5(
+        NAMESPACE_URL,
+        f"sidera.execution-completion:{link.execution_id}:{session.id}:{decision.sequence}:{decision.policy_version}:{decision.outcome}",
+    )
+    with s.uow() as uow:
+        saved = uow.commands.find_by_id(s.workspace_id, command_id)
+        assert saved is not None and saved.status == "applied"
+        assert len(completion_envelopes) == 1
+        assert saved.expected_version == completion_envelopes[0].expected_version == 4
+        completed = uow.executions.get(link.execution_id, s.workspace_id)
+        assert (
+            completed.status.value == "succeeded"
+            and completed.version > saved.expected_version
+        )
+        rows = tuple(
+            uow.session.scalars(
+                select(EventModel).where(EventModel.workspace_id == s.workspace_id)
+            )
+        )
+        event_ids = {event.id for event in rows}
+        counts = {
+            kind: sum(event.event_type == kind for event in rows)
+            for kind in (
+                "ExecutionSucceeded",
+                "LeaseReleased",
+                "WorkerCapacityReleased",
+                "ExecutionSessionClosed",
+            )
+        }
+        assert counts == {
+            "ExecutionSucceeded": 1,
+            "LeaseReleased": 1,
+            "WorkerCapacityReleased": 1,
+            "ExecutionSessionClosed": 1,
+        }
+    for _ in range(2):
+        assert (
+            s.gateway._report_execution_completion(
+                context, session_id=session.id, decision=decision
+            )
+            is True
+        )
+    assert len(completion_envelopes) == 3
+    assert all(envelope == completion_envelopes[0] for envelope in completion_envelopes)
+    with s.uow() as uow:
+        assert uow.commands.find_by_id(s.workspace_id, command_id) == saved
+        assert uow.executions.get(link.execution_id, s.workspace_id) == completed
+        assert {
+            event.id
+            for event in uow.session.scalars(
+                select(EventModel).where(EventModel.workspace_id == s.workspace_id)
+            )
+        } == event_ids
+        assert uow.workers.get(s.worker_id, s.workspace_id).current_load == 0
+        assert (
+            uow.leases.get(authority.lease_id, s.workspace_id).status.value
+            == "released"
+        )
+        assert uow.sessions.get_any(session.id, s.workspace_id).status.value == "closed"
+    assert len(s.execution.starts) == 1
+
+
 def test_multi_target_busy_retirement_defers_all_events_until_command_save(
     native_scenario,
 ):
@@ -2282,6 +2464,7 @@ def test_native_v3_refence_save_failure_keeps_canonical_cache_truthful_then_retr
 
 
 def test_native_terminal_capture_pin_blocks_input_before_cp_completion(native_scenario):
+    from sidera_control_plane.application.assignments import TrustedAssignmentIdentity
     from sidera_control_plane.application.execution_commands import (
         ExecutionInputCommandHandler,
     )
@@ -2292,7 +2475,10 @@ def test_native_terminal_capture_pin_blocks_input_before_cp_completion(native_sc
     assert s.schedule().assigned == 1
     result = s.start()
     link = s.link()
-    s.execution.emit(link.run_id, "run.completed", state="completed")
+    snapshot = s.execution.get_run(
+        s.workspace_id, link.run_id, grant_id=link.authority_id
+    )
+    assert snapshot.state == "running" and snapshot.input_open
     with s.uow() as uow:
         execution = uow.executions.get(link.execution_id, s.workspace_id)
         session = uow.sessions.get(result.session_id, s.workspace_id)
@@ -2301,6 +2487,7 @@ def test_native_terminal_capture_pin_blocks_input_before_cp_completion(native_sc
         )
         item = uow.worker_items.get(execution.worker_item_id, s.workspace_id)
         authority = uow.execution_authorities.get(link.authority_id)
+        assert execution.status.value == "running" and session.status.value == "active"
     s.capture.observe_terminal(
         workspace_id=s.workspace_id,
         execution_id=execution.id,
@@ -2326,14 +2513,21 @@ def test_native_terminal_capture_pin_blocks_input_before_cp_completion(native_sc
                 "session_id": str(session.id),
                 "session_version": session.version,
                 "worker_id": str(session.worker_id),
+                "execution_mode": "native_profile",
+                "binding_version": link.binding_version,
+                "run_id": str(link.run_id),
             },
         },
     )
+    handler = ExecutionInputCommandHandler(
+        s.cp.clock,
+        identity=TrustedAssignmentIdentity(s.principal, s.setup_grant),
+        native_services=s.services,
+    )
     with pytest.raises(ExecutionContextChanged) as denied:
-        CommandService(s.uow, (ExecutionInputCommandHandler(s.cp.clock),)).handle(
-            command
-        )
+        CommandService(s.uow, (handler,), preflight=handler.preflight).handle(command)
     assert "execution_finalizing" in denied.value.details["changed_fields"]
+    assert len(s.execution.starts) == 1
     with s.uow() as uow:
         assert (
             uow.execution_inputs.get_pending_for_session(session.id, s.workspace_id)

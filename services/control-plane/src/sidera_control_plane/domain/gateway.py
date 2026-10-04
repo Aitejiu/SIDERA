@@ -179,6 +179,43 @@ class GatewayOperation:
             raise ValidationError("failure_code is required")
         self._finish(GatewayOperationStatus.UNKNOWN, None, clean_code)
 
+    def resolve_stop(
+        self,
+        *,
+        now: datetime,
+        result_ref: str | None = None,
+        failure_code: str | None = None,
+    ) -> None:
+        if (
+            self.operation_type is not GatewayOperationType.STOP_SESSION
+            or self.status is not GatewayOperationStatus.UNKNOWN
+        ):
+            raise InvalidTransition(
+                "only an unknown Stop can resolve its original outcome"
+            )
+        if (
+            (result_ref is None) == (failure_code is None)
+            or (
+                result_ref is not None
+                and (not isinstance(result_ref, str) or not result_ref.strip())
+            )
+            or (
+                failure_code is not None
+                and (not isinstance(failure_code, str) or not failure_code.strip())
+            )
+        ):
+            raise ValidationError(
+                "Stop resolution requires exactly one non-empty terminal outcome"
+            )
+        self.status = (
+            GatewayOperationStatus.SUCCEEDED
+            if result_ref is not None
+            else GatewayOperationStatus.FAILED
+        )
+        self.result_ref = None if result_ref is None else result_ref.strip()
+        self.failure_code = None if failure_code is None else failure_code.strip()
+        self.version += 1
+
     def record_handoff_inspection(self, *, outcome: str) -> None:
         """Persist bounded provider inspection without resolving the operation."""
 

@@ -9,6 +9,9 @@ from sidera_agents.contracts import ProfileRef
 from sidera_agents.errors import AgentError
 from sidera_agents.ports import ExecutionAuthorizer
 
+from sidera_control_plane.application.agent_capabilities import (
+    runtime_capability_requirements,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.scheduling_blocks import SchedulingBlockService
 from sidera_control_plane.domain.agent_bindings import (
@@ -369,7 +372,7 @@ class AssignmentCommandHandler:
             reasons.append("protocol_" + runtime.protocol_state.value)
         if runtime.auth_state.value == "failed":
             reasons.append("authentication_" + runtime.auth_state.value)
-        for capability in sorted(requirements):
+        for capability in runtime_capability_requirements(requirements):
             support = runtime.capabilities.get(capability)
             if support is None:
                 reasons.append("required_capability_unavailable:" + capability)

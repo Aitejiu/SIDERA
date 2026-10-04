@@ -499,10 +499,6 @@ def run_native_case(
     from sidera_control_plane.application.context_materialization import (
         ContextMaterializer,
     )
-    from sidera_control_plane.application.execution_authority import (
-        NativeAuthorityReader,
-        PlanningAuthorityReader,
-    )
     from sidera_control_plane.application.planning_runner import (
         PlanningRunner,
         RegistryPlannerAdapterFactory,
@@ -522,16 +518,9 @@ def run_native_case(
         )
         assembly_error = saved.runs[-1].error_code
     assert assembled.ready == 1, assembly_error
-    reader = PlanningAuthorityReader(
-        uow_factory,
-        principal=lambda: identity.principal_id,
-        authorizer=scope,
-        clock=native_options.get("native_clock"),
-    )
-    facade = NativeAuthorityReader(uow_factory, planner=reader, worker=None)
     execution = execution_factory(runtimes.runtime.ref, body)
     services = NativeWorkerServices(
-        catalog, runtimes, execution, facade, identity.principal_id, identity.grant_id
+        catalog, runtimes, execution, scope, identity.principal_id, identity.grant_id
     )
     factory = RegistryPlannerAdapterFactory(
         {},
@@ -552,6 +541,94 @@ def run_native_case(
         **(runner_options or {}),
     ).run_once()
     return submitted, execution, result
+
+
+def test_native_planner_shared_host_authority_uses_exact_cp_reader(
+    native_case, workspace_id, uow_factory, tmp_path, monkeypatch
+):
+    from sidera_agents.errors import AgentError
+
+    from sidera_control_plane.application.agent_planner_adapter import (
+        AgentPlannerAdapter,
+    )
+    from sidera_control_plane.application.execution_authority import (
+        PlanningActionTarget,
+    )
+
+    policy, identity, scope, _, _, _, envelope = native_case
+    captured, reads = {}, []
+    original_init = AgentPlannerAdapter.__init__
+
+    def remember_adapter(self, **kwargs):
+        original_init(self, **kwargs)
+        captured["adapter"] = self
+        assert kwargs["services"].authorizer is scope
+
+    monkeypatch.setattr(AgentPlannerAdapter, "__init__", remember_adapter)
+
+    class ReadingExecution(PublicPlanningExecution):
+        def start(self, request):
+            adapter = captured["adapter"]
+            for item in request.context:
+                content = adapter._sources.read(request.grant_id, item.source_ref)
+                assert content.actual_version == item.version and content.text
+                reads.append(item.source_ref)
+            return super().start(request)
+
+    submitted, execution, outcome = run_native_case(
+        native_case,
+        uow_factory,
+        tmp_path,
+        native_proposal_body(envelope),
+        execution_factory=ReadingExecution,
+    )
+    assert outcome.succeeded == 1, tuple(item.code for item in outcome.outcomes)
+    assert len(execution.requests) == 1 and execution.cursors == [0]
+    with uow_factory() as uow:
+        request = uow.planning_requests.get(
+            UUID(submitted.data["planning_request_id"]), workspace_id
+        )
+        link = uow.planning_authorities.get_link(workspace_id, request.runs[0].id)
+        authority = uow.planning_authorities.get(link.authority_id)
+    assert link.closed and link.event_cursor == 5
+    assert authority.upstream_grant_id == identity.grant_id != authority.id
+    assert reads == [item.source_ref for item in execution.requests[0].context]
+    assert {
+        action
+        for action, target in scope.targets
+        if isinstance(target, PlanningActionTarget)
+    } >= {
+        "planning.prepare",
+        "profile.read",
+        "runtime.read",
+        "run.start",
+        "workspace.execute",
+        "source.read",
+    }
+    assert all(
+        (
+            target.planning_request_id,
+            target.planning_run_id,
+            target.profile_ref,
+            target.operation_id,
+        )
+        == (
+            request.id,
+            request.runs[0].id,
+            policy.planner_agent_ref,
+            link.start_operation_id,
+        )
+        for _, target in scope.targets
+        if isinstance(target, PlanningActionTarget)
+    )
+    from sidera_control_plane.domain.agent_bindings import AssignmentDenied
+
+    with pytest.raises(AssignmentDenied):
+        scope.require(authority.id, "profile.read", policy.planner_agent_ref)
+    for action in ("run.read", "run.stop"):
+        captured["adapter"]._require_original(link, action)
+        with pytest.raises(AgentError):
+            captured["adapter"]._run_authorizer.require(authority.id, action, uuid4())
 
 
 def native_proposal_body(envelope, *, unchanged_root=False):
@@ -947,7 +1024,12 @@ class OpenPlanningExecution(PublicPlanningExecution):
     closed_on_stop = False
 
     def event_values(self):
-        return (*super().event_values()[:-1], ("run.closing", {}))
+        return (
+            *super().event_values()[:-1],
+            ("run.closed", {"status": "stopped"})
+            if self.stops and self.closed_on_stop
+            else ("run.closing", {}),
+        )
 
     def get_run(self, workspace_id, run_id, *, grant_id):
         from sidera_agents.contracts import RunSnapshot
@@ -979,10 +1061,267 @@ class OpenPlanningExecution(PublicPlanningExecution):
         return StopReceipt(
             operation_id=request.operation_id,
             run_id=request.run_id,
-            status="accepted",
+            status="stopped" if self.closed_on_stop else "accepted",
             reason_code=None,
-            evidence_sequence=None,
+            evidence_sequence=len(self.event_values()) if self.closed_on_stop else None,
         )
+
+    def get_stop(self, workspace_id, run_id, operation_id, *, grant_id):
+        from sidera_agents.contracts import StopReceipt
+
+        original = self.requests[0]
+        assert (workspace_id, run_id, operation_id, grant_id) == (
+            original.profile_ref.workspace_id,
+            self.run_id,
+            original.operation_id,
+            original.grant_id,
+        )
+        return StopReceipt(
+            operation_id=operation_id,
+            run_id=run_id,
+            status="stopped" if self.stops and self.closed_on_stop else "unknown",
+            reason_code=None,
+            evidence_sequence=len(self.event_values())
+            if self.stops and self.closed_on_stop
+            else None,
+        )
+
+
+def test_native_pending_planner_stop_restarted_drain_queries_only_original(
+    native_case,
+    workspace_id,
+    uow_factory,
+    tmp_path,
+    monkeypatch,
+):
+    from sidera_control_plane.adapters.planning_workspace import (
+        PrivatePlanningWorkspaceProvider,
+    )
+    from sidera_control_plane.application.agent_worker_adapter import (
+        NativeWorkerServices,
+    )
+    from sidera_control_plane.application.context_materialization import (
+        ContextMaterializer,
+    )
+    from sidera_control_plane.application.planning_runner import (
+        PlanningRunner,
+        RegistryPlannerAdapterFactory,
+    )
+    from tests.integration.test_context_package_worker import EmptyCatalog
+
+    closing, queries = [False], []
+
+    class LostStop(OpenPlanningExecution):
+        closed_on_stop = True
+
+        def stop(self, request):
+            receipt = super().stop(request)
+            return type(receipt).model_validate(
+                {**receipt.model_dump(), "status": "unknown", "evidence_sequence": None}
+            )
+
+        def get_stop(self, workspace_id, run_id, operation_id, *, grant_id):
+            queries.append((workspace_id, run_id, operation_id, grant_id))
+            return super().get_stop(
+                workspace_id, run_id, operation_id, grant_id=grant_id
+            )
+
+    submitted, execution, result = run_native_case(
+        native_case,
+        uow_factory,
+        tmp_path,
+        native_proposal_body(native_case[-1]),
+        execution_factory=LostStop,
+        native_wait=lambda seconds: closing.__setitem__(0, True),
+        runner_options={"native_shutdown_check": lambda: closing[0]},
+    )
+    assert result.blocked == 1 and len(execution.stops) == len(execution.requests) == 1
+    with uow_factory() as uow:
+        request_value = uow.planning_requests.get(
+            UUID(submitted.data["planning_request_id"]), workspace_id
+        )
+        link = uow.planning_authorities.get_link(workspace_id, request_value.runs[0].id)
+        assert link.status == "cleanup_pending" and not link.closed
+        original_run = uow.planning_runs.get(link.planning_run_id, workspace_id)
+        authority = uow.planning_authorities.get(
+            link.authority_id, workspace_id=workspace_id
+        )
+        original_lease = uow.planning_leases.get(authority.lease_id, workspace_id)
+        assert (original_run.lease_id, original_run.fencing_token) == (None, 0)
+        assert (
+            original_run.workspace_id,
+            original_run.id,
+            original_run.operation_id,
+            original_run.profile_snapshot.planner_agent_ref,
+        ) == (
+            workspace_id,
+            link.planning_run_id,
+            link.start_operation_id,
+            link.profile_ref,
+        )
+        assert (
+            original_lease.workspace_id,
+            original_lease.id,
+            original_lease.planning_run_id,
+            original_lease.owner_id,
+            original_lease.fencing_token,
+            original_lease.status.value,
+        ) == (
+            workspace_id,
+            authority.lease_id,
+            authority.planning_run_id,
+            authority.owner_id,
+            authority.fencing_token,
+            "released",
+        )
+        original_business = (
+            request_value.status,
+            request_value.current_run_id,
+            request_value.version,
+        )
+    _policy, identity, scope, catalog, runtimes, _service, _envelope = native_case
+    scope.revoked = True
+    services = NativeWorkerServices(
+        catalog, runtimes, execution, scope, identity.principal_id, identity.grant_id
+    )
+    factory = RegistryPlannerAdapterFactory(
+        {},
+        native_services=services,
+        uow_factory=uow_factory,
+        planning_workspace_provider=PrivatePlanningWorkspaceProvider(
+            tmp_path / "scratch"
+        ),
+        planning_context_materializer=ContextMaterializer(EmptyCatalog()),
+        planning_authorizer=scope,
+    )
+    restarted = PlanningRunner(
+        uow_factory=uow_factory, adapter_factory=factory, owner_id="native-planner"
+    )
+
+    def forbidden_input(*args, **kwargs):
+        pytest.fail("Original Stop cleanup assembled replacement Planner input")
+
+    monkeypatch.setattr(restarted, "_assemble_input", forbidden_input)
+    assert restarted.drain_original_run(link) is True
+    assert queries == [
+        (workspace_id, link.run_id, link.start_operation_id, link.authority_id)
+    ]
+    assert len(execution.stops) == len(execution.requests) == 1
+    with uow_factory() as uow:
+        current = uow.planning_authorities.get_link(workspace_id, link.planning_run_id)
+        request_value = uow.planning_requests.get(request_value.id, workspace_id)
+        assert current.closed and current.event_cursor == len(execution.event_values())
+        assert (
+            request_value.status,
+            request_value.current_run_id,
+            request_value.version,
+        ) == original_business
+        assert uow.planning_runs.get(original_run.id, workspace_id) == original_run
+        assert (
+            uow.planning_leases.get(original_lease.id, workspace_id) == original_lease
+        )
+        assert uow.planning_records.list_proposals(request_value.id, workspace_id) == ()
+
+
+def test_native_shutdown_keeps_actual_planning_lease_live_through_blocked_original_stop(
+    native_case,
+    workspace_id,
+    uow_factory,
+    tmp_path,
+    monkeypatch,
+):
+    import threading
+
+    from sidera_control_plane.application.planning_runner import PlanningLeaseKeeper
+
+    closing, held, release, renewed, completed = (threading.Event() for _ in range(5))
+    calls, outcome, errors = [], [], []
+    original_renew = PlanningLeaseKeeper.renew_once
+
+    def renew(keeper):
+        result = original_renew(keeper)
+        if result and held.is_set():
+            renewed.set()
+        return result
+
+    monkeypatch.setattr(PlanningLeaseKeeper, "renew_once", renew)
+
+    class HeldStopExecution(OpenPlanningExecution):
+        closed_on_stop = True
+
+        def stop(self, request):
+            calls.append(request)
+            held.set()
+            assert release.wait(5), "Controlled original Stop was not released"
+            return super().stop(request)
+
+    def wait(seconds):
+        assert seconds > 0
+        closing.set()
+
+    def run():
+        try:
+            outcome.append(
+                run_native_case(
+                    native_case,
+                    uow_factory,
+                    tmp_path,
+                    native_proposal_body(native_case[-1]),
+                    execution_factory=HeldStopExecution,
+                    native_wait=wait,
+                    runner_options={
+                        "native_shutdown_check": closing.is_set,
+                        "lease_renew_interval_seconds": 0.01,
+                    },
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - Collected thread failures are asserted after join.
+            errors.append(exc)
+        finally:
+            completed.set()
+
+    owned = threading.Thread(target=run, name="test-owned-planning-call")
+    owned.start()
+    try:
+        if not held.wait(2):
+            assert not errors, repr(errors)
+            pytest.fail("Shutdown did not reach the original public Stop")
+        assert renewed.wait(2), (
+            "Existing PlanningLeaseKeeper stopped while public Stop was held"
+        )
+        with uow_factory() as uow:
+            run_row = uow.session.scalars(select(PlanningRunModel)).one()
+            run_value = uow.planning_runs.get(run_row.id, workspace_id)
+            lease = uow.planning_leases.get_active_for_run(run_row.id, workspace_id)
+            link = uow.planning_authorities.get_link(workspace_id, run_row.id)
+            assert run_value.status.value == "running"
+            assert lease.status.value == "active" and lease.version > 1
+            assert link.status == "cleanup_pending" and not link.closed
+        assert not completed.is_set() and len(calls) == 1
+    finally:
+        release.set()
+        owned.join(timeout=5)
+    assert not owned.is_alive() and not errors
+    submitted, execution, result = outcome[0]
+    assert len(execution.requests) == len(execution.stops) == 1
+    assert result.failed == 1 and result.outcomes[0].code == "native_cancelled"
+    with uow_factory() as uow:
+        request_value = uow.planning_requests.get(
+            UUID(submitted.data["planning_request_id"]), workspace_id
+        )
+        link = uow.planning_authorities.get_link(workspace_id, request_value.runs[0].id)
+        assert link.closed and link.event_cursor == len(execution.event_values())
+        assert (calls[0].run_id, calls[0].operation_id) == (
+            link.run_id,
+            link.start_operation_id,
+        )
+        assert (
+            request_value.status.value != "cancelled" and len(request_value.runs) == 1
+        )
+        assert uow.planning_records.list_proposals(request_value.id, workspace_id) == ()
+    assert not any(
+        thread.name.startswith("planning-lease-") for thread in threading.enumerate()
+    )
 
 
 def test_native_busy_wait_retains_one_claim_and_renews_keeper(
@@ -1103,7 +1442,7 @@ def test_native_unknown_admission_uses_only_original_lookup_and_blocks_manual_re
         outcome.blocked == 1 and outcome.outcomes[0].code == "native_admission_unknown"
     )
     assert (
-        len(execution.requests) == 1 and len(execution.lookups) == 2 and len(waits) == 3
+        len(execution.requests) == 1 and len(execution.lookups) == 3 and len(waits) == 3
     )
     _policy, _identity, _scope, _catalog, _runtimes, service, envelope = native_case
     with uow_factory() as uow:
@@ -1113,6 +1452,10 @@ def test_native_unknown_admission_uses_only_original_lookup_and_blocks_manual_re
         run = request.runs[-1]
         link = uow.planning_authorities.get_link(workspace_id, run.id)
         assert link.status == "unknown" and not link.closed
+        assert (
+            execution.lookups
+            == [(workspace_id, link.start_operation_id, link.authority_id)] * 3
+        )
         assert run.usage.input_tokens is None and run.usage.cost_microunits is None
         from pathlib import Path
 

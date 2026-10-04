@@ -1,6 +1,8 @@
 import importlib
 import importlib.util
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from dataclasses import replace
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -15,6 +17,261 @@ def native_adapter():
         "N12 generic native adapter is missing"
     )
     return importlib.import_module(name)
+
+
+@pytest.fixture
+def native_start_case():
+    from sidera_agents.contracts import (
+        EventPage,
+        ExecutionWorkspace,
+        RunStart,
+        StartReceipt,
+    )
+
+    from sidera_control_plane.domain.agent_bindings import AgentExecutionLink
+
+    now = datetime.now(UTC)
+    workspace_id, execution_id, grant_id, run_id = (uuid4() for _ in range(4))
+    profile = ProfileRef(workspace_id=workspace_id, profile_id=uuid4(), revision=1)
+    request = RunStart(
+        operation_id=uuid4(),
+        profile_ref=profile,
+        grant_id=grant_id,
+        policy="bounded",
+        instructions=(),
+        text="explicit test work",
+        context=(),
+        tools=(),
+        workspace=ExecutionWorkspace(
+            directory="/test-owned", writable=True, artifact_directory=None
+        ),
+        required_capabilities=(),
+    )
+    state = SimpleNamespace(
+        link=AgentExecutionLink(
+            workspace_id,
+            execution_id,
+            request.operation_id,
+            profile,
+            None,
+            0,
+            "pending",
+            grant_id,
+            1,
+        ),
+        changes=[],
+        starts=[],
+        queries=[],
+        permit=[],
+        denied=None,
+        start_error=False,
+        persistence_error=False,
+    )
+    authority = SimpleNamespace(
+        execution_id=execution_id, profile_ref=profile, binding_version=1
+    )
+
+    def begin_start(link, *, request_sha256, now):
+        state.changes.append("starting")
+        state.link = replace(
+            link, status="starting", request_sha256=request_sha256, start_receipt=None
+        )
+        return state.link
+
+    def record_start(link, receipt, *, now):
+        if state.persistence_error:
+            raise RuntimeError("controlled receipt persistence failure")
+        state.changes.append(receipt.status.value)
+        state.link = replace(
+            link,
+            start_receipt=receipt,
+            run_id=receipt.run_id,
+            status="running" if receipt.status.value == "accepted" else "unknown",
+        )
+        return state.link
+
+    repository = SimpleNamespace(
+        get_link=lambda *args: state.link,
+        get=lambda *args, **kwargs: authority,
+        begin_start=begin_start,
+        record_start=record_start,
+    )
+    uow = SimpleNamespace(
+        execution_authorities=repository,
+        executions=SimpleNamespace(
+            get=lambda *args: SimpleNamespace(
+                purpose="code",
+                worker_item_id=None,
+                workspace_id=workspace_id,
+                task_id=uuid4(),
+            )
+        ),
+        agent_bindings=SimpleNamespace(
+            get=lambda *args: SimpleNamespace(profile_ref=profile, version=1)
+        ),
+    )
+    receipt = StartReceipt(
+        operation_id=request.operation_id,
+        status="accepted",
+        run_id=run_id,
+        reason_code=None,
+    )
+
+    class Execution:
+        def start(self, supplied):
+            assert state.permit == ["enter"]
+            assert supplied == request and state.link.status == "starting"
+            state.starts.append(supplied)
+            if state.start_error:
+                raise TimeoutError("controlled lost native ACK")
+            return receipt
+
+        def get_start(self, workspace, operation_id, *, grant_id):
+            state.queries.append((workspace, operation_id, grant_id))
+            return StartLookup(found=True, receipt=receipt)
+
+        def list_events(self, workspace, supplied_run, after_sequence, *, grant_id):
+            assert (workspace, supplied_run, after_sequence, grant_id) == (
+                workspace_id,
+                run_id,
+                0,
+                request.grant_id,
+            )
+            return EventPage(
+                events=(
+                    RunEvent(
+                        run_id=run_id,
+                        sequence=1,
+                        kind="run.started",
+                        occurred_at=now,
+                        operation_id=request.operation_id,
+                        response_id=None,
+                        data={},
+                    ),
+                ),
+                next_sequence=1,
+                has_more=False,
+            )
+
+    @contextmanager
+    def permit():
+        state.permit.append("enter")
+        if state.denied is not None:
+            raise AgentError(state.denied, "New native admission denied.")
+        try:
+            yield
+        finally:
+            state.permit.append("exit")
+
+    def adapter():
+        return native_adapter().AgentWorkerAdapter(
+            lambda: nullcontext(uow),
+            execution=Execution(),
+            input_builder=SimpleNamespace(build=lambda *args: request),
+            authorizer=SimpleNamespace(require=lambda *args: None),
+            workspace_id=workspace_id,
+            execution_id=execution_id,
+            clock=lambda: now,
+            owner_check=lambda: True,
+            start_admission=permit,
+        )
+
+    def busy():
+        state.link = replace(
+            state.link,
+            status="waiting_capacity",
+            request_sha256=native_adapter().request_fingerprint(request),
+            start_receipt=StartReceipt(
+                operation_id=request.operation_id,
+                status="busy",
+                run_id=None,
+                reason_code=None,
+            ),
+        )
+
+    return SimpleNamespace(
+        state=state,
+        request=request,
+        now=now,
+        uow=uow,
+        adapter=adapter,
+        busy=busy,
+        permit=permit,
+        spec=SimpleNamespace(workspace_id=workspace_id, execution_id=execution_id),
+    )
+
+
+@pytest.mark.parametrize("busy", (False, True))
+@pytest.mark.parametrize("code", ("permission_denied", "control_plane_closed"))
+def test_worker_start_admission_denies_before_starting_without_uncertainty(
+    native_start_case, busy, code
+):
+    s = native_start_case
+    if busy:
+        s.busy()
+    original = s.state.link
+    s.state.denied = code
+    with pytest.raises(AgentError) as denied:
+        s.adapter().start_session(s.spec, None, operation_id=s.request.operation_id)
+    assert denied.value.code == code
+    assert s.state.link == original and not s.state.changes and not s.state.starts
+    assert not s.state.queries and s.state.permit == ["enter"]
+
+
+@pytest.mark.parametrize("failure", (None, "lost_ack", "persistence"))
+def test_worker_start_admission_tracks_native_call_and_exits_after_ack_failure(
+    native_start_case, failure
+):
+    s = native_start_case
+    s.state.start_error = failure == "lost_ack"
+    s.state.persistence_error = failure == "persistence"
+    if failure is None:
+        result = s.adapter().start_session(
+            s.spec, None, operation_id=s.request.operation_id
+        )
+        assert result.adapter_session_id == "agent-run:" + str(s.state.link.run_id)
+    else:
+        with pytest.raises(native_adapter().NativeStartDeferred):
+            s.adapter().start_session(s.spec, None, operation_id=s.request.operation_id)
+    assert len(s.state.starts) == 1 and not s.state.queries
+    assert s.state.permit == ["enter", "exit"]
+    assert (
+        s.state.link.status
+        == {None: "running", "lost_ack": "unknown", "persistence": "starting"}[failure]
+    )
+
+
+def test_worker_original_unknown_query_never_enters_new_start_admission(
+    native_start_case,
+):
+    s = native_start_case
+    s.state.link = replace(s.state.link, status="unknown")
+    s.state.denied = "control_plane_closed"
+    result = s.adapter().start_session(
+        s.spec, None, operation_id=s.request.operation_id
+    )
+    assert result.adapter_session_id == "agent-run:" + str(s.state.link.run_id)
+    assert not s.state.permit and not s.state.starts
+    assert s.state.queries == [
+        (s.request.profile_ref.workspace_id, s.request.operation_id, s.request.grant_id)
+    ]
+
+
+def test_worker_busy_retry_keeps_original_intention_and_enters_start_admission(
+    native_start_case,
+):
+    s = native_start_case
+    s.busy()
+    original = s.state.link
+    result = s.adapter().start_session(
+        s.spec, None, operation_id=s.request.operation_id
+    )
+    assert result.adapter_session_id == "agent-run:" + str(s.state.link.run_id)
+    assert s.state.starts == [s.request] and not s.state.queries
+    assert s.state.permit == ["enter", "exit"]
+    assert s.state.link.start_operation_id == original.start_operation_id
+    assert s.state.link.authority_id == original.authority_id
+    assert s.state.link.request_sha256 == original.request_sha256
 
 
 def test_response_completion_does_not_become_execution_completion():
@@ -502,3 +759,319 @@ def test_no_native_link_preserves_exact_legacy_capture_identity():
         workspace_id=uuid4(),
         execution_id=UUID("00000000-0000-0000-0000-000000000002"),
     ) == UUID("cb1f011e-3d66-5181-b775-78e85b2c6234")
+
+
+@pytest.fixture
+def ordinary_stop():
+    from datetime import UTC, datetime
+
+    from sidera_agents.contracts import (
+        EffectiveConfig,
+        RunSnapshot,
+        RuntimeRef,
+        StopReceipt,
+    )
+
+    from sidera_control_plane.domain.agent_bindings import AgentExecutionLink
+    from sidera_control_plane.domain.execution import ExecutionSession
+    from sidera_control_plane.domain.gateway import (
+        AdapterSessionHandle,
+        GatewayOperation,
+        GatewayOperationType,
+        gateway_operation_id,
+    )
+    from sidera_control_plane.domain.modules import ExecutionBinding
+
+    module = native_adapter()
+    now = datetime(2026, 10, 4, tzinfo=UTC)
+    workspace_id, execution_id, run_id = uuid4(), uuid4(), uuid4()
+    grant, lease_id, worker_id, adapter_id = uuid4(), uuid4(), uuid4(), uuid4()
+    profile = ProfileRef(workspace_id=workspace_id, profile_id=uuid4(), revision=1)
+    link = AgentExecutionLink(
+        workspace_id, execution_id, uuid4(), profile, run_id, 1, "running", grant, 2
+    )
+    session = ExecutionSession.start(
+        session_id=uuid5(NAMESPACE_URL, f"sidera.native.session:{run_id}"),
+        workspace_id=workspace_id,
+        execution_id=execution_id,
+        worker_id=worker_id,
+        adapter_session_id=f"agent-run:{run_id}",
+        now=now,
+        adapter_module_id=adapter_id,
+        adapter_config_version=3,
+    )
+    binding = ExecutionBinding(
+        uuid4(),
+        workspace_id,
+        execution_id,
+        worker_id,
+        adapter_id,
+        uuid4(),
+        3,
+        1,
+        module.native_capabilities(),
+        lease_id,
+        7,
+        1,
+    )
+    operation_id = gateway_operation_id(execution_id, GatewayOperationType.STOP_SESSION)
+    operation = GatewayOperation.create(
+        id=uuid4(),
+        operation_id=operation_id,
+        workspace_id=workspace_id,
+        task_id=uuid4(),
+        execution_id=execution_id,
+        session_id=session.id,
+        operation_type=GatewayOperationType.STOP_SESSION,
+        module_instance_id=adapter_id,
+        config_version=3,
+        lease_id=lease_id,
+        fencing_token=7,
+        now=now,
+    )
+    operation.start(now=now)
+    authority = SimpleNamespace(
+        id=grant,
+        workspace_id=workspace_id,
+        execution_id=execution_id,
+        profile_ref=profile,
+        binding_version=2,
+        lease_id=lease_id,
+        fencing_token=7,
+        revoked=True,
+    )
+    receipt = StopReceipt(
+        operation_id=operation_id,
+        run_id=run_id,
+        status="stopped",
+        reason_code=None,
+        evidence_sequence=2,
+    )
+    snapshot = RunSnapshot(
+        run_id=run_id,
+        workspace_id=workspace_id,
+        profile_ref=profile,
+        policy="bounded",
+        state="stopped",
+        input_open=False,
+        active_response_id=None,
+        last_event_sequence=2,
+        capabilities={},
+        reason_code=None,
+        effective_config=EffectiveConfig(
+            profile_ref=profile,
+            config_hash="fixture",
+            runtime_ref=RuntimeRef(workspace_id=workspace_id, runtime_id=uuid4()),
+            actual_runtime_version="1",
+            selected_model=None,
+            observed_model=None,
+            inherited_fields=(),
+            applied_fields=(),
+            resource_refs=(),
+            context_receipts=(),
+        ),
+    )
+    state = SimpleNamespace(
+        link=link,
+        authority=authority,
+        session=session,
+        binding=binding,
+        operation=operation,
+        receipt=receipt,
+        snapshot=snapshot,
+        calls=[],
+        owner=True,
+        query_error=None,
+    )
+    uow = SimpleNamespace(
+        execution_authorities=SimpleNamespace(
+            get_link=lambda *args: state.link,
+            get=lambda *args, **kwargs: state.authority,
+        ),
+        sessions=SimpleNamespace(get_any=lambda *args, **kwargs: state.session),
+        bindings=SimpleNamespace(
+            get_for_execution=lambda *args, **kwargs: state.binding
+        ),
+        gateway_operations=SimpleNamespace(
+            get_by_operation_id=lambda operation_id, workspace_id, *, for_update=False: (
+                state.operation
+            )
+        ),
+    )
+
+    class PublicExecution:
+        def stop(self, request):
+            state.calls.append(("stop", request))
+            return state.receipt
+
+        def get_stop(self, workspace, run, operation, *, grant_id):
+            state.calls.append(("get_stop", workspace, run, operation, grant_id))
+            if state.query_error is not None:
+                raise state.query_error
+            return state.receipt
+
+        def get_run(self, workspace, run, *, grant_id):
+            state.calls.append(("get_run", workspace, run, grant_id))
+            return state.snapshot
+
+    state.adapter = module.AgentWorkerAdapter(
+        lambda: nullcontext(uow),
+        execution=PublicExecution(),
+        input_builder=None,
+        authorizer=SimpleNamespace(
+            require=lambda *args: state.calls.append(("require", *args))
+        ),
+        workspace_id=workspace_id,
+        execution_id=execution_id,
+        owner_check=lambda: state.owner,
+    )
+    state.handle = AdapterSessionHandle(
+        session.id,
+        session.adapter_session_id,
+        "agent-run-reference",
+        module.native_capabilities(),
+        1,
+        now,
+    )
+    return state
+
+
+def test_ordinary_native_stop_queries_only_the_saved_original(ordinary_stop):
+    s = ordinary_stop
+    result = s.adapter.get_stop(s.handle, operation_id=s.operation.operation_id)
+    assert result.outcome.value == "delivered" and result.accepted_sequence == 2
+    assert s.calls == [
+        ("require", s.link.authority_id, "run.read", s.link.workspace_id),
+        (
+            "get_stop",
+            s.link.workspace_id,
+            s.link.run_id,
+            s.operation.operation_id,
+            s.link.authority_id,
+        ),
+        ("require", s.link.authority_id, "run.read", s.link.workspace_id),
+        ("get_run", s.link.workspace_id, s.link.run_id, s.link.authority_id),
+    ]
+
+
+@pytest.mark.parametrize("kind", ("stop", "query"))
+@pytest.mark.parametrize(
+    "bad",
+    (
+        "running",
+        "input_open",
+        "active_response",
+        "old_watermark",
+        "wrong_run",
+        "wrong_profile",
+        "wrong_workspace",
+        "receipt_identity",
+        "malformed_receipt",
+    ),
+)
+def test_native_stop_requires_exact_positive_closed_proof(ordinary_stop, kind, bad):
+    from sidera_agents.contracts import RunSnapshot
+
+    s = ordinary_stop
+    changes = {
+        "running": {"state": "running"},
+        "input_open": {"input_open": True},
+        "active_response": {"active_response_id": uuid4()},
+        "old_watermark": {"last_event_sequence": 1},
+        "wrong_run": {"run_id": uuid4()},
+        "wrong_profile": {
+            "profile_ref": s.link.profile_ref.model_copy(update={"revision": 2})
+        },
+        "wrong_workspace": {"workspace_id": uuid4()},
+    }
+    if bad == "receipt_identity":
+        s.receipt = s.receipt.model_copy(update={"operation_id": uuid4()})
+    elif bad == "malformed_receipt":
+        s.receipt = {"status": "stopped", "private": "credential"}
+    else:
+        s.snapshot = RunSnapshot.model_validate(
+            {**s.snapshot.model_dump(), **changes[bad]}
+        )
+    method = s.adapter.stop_session if kind == "stop" else s.adapter.get_stop
+    result = method(s.handle, operation_id=s.operation.operation_id)
+    assert result.outcome.value == "unknown" and result.accepted_sequence is None
+    assert "credential" not in repr(result)
+
+
+@pytest.mark.parametrize("status", ("accepted", "unknown", "failed"))
+def test_native_stop_query_does_not_promote_pending_or_failed_receipts(
+    ordinary_stop, status
+):
+    from sidera_agents.contracts import StopReceipt
+
+    s = ordinary_stop
+    s.receipt = StopReceipt.model_validate(
+        {**s.receipt.model_dump(), "status": status, "evidence_sequence": None}
+    )
+    result = s.adapter.get_stop(s.handle, operation_id=s.operation.operation_id)
+    assert result.outcome.value == ("failed" if status == "failed" else "unknown")
+    assert result.accepted_sequence is None
+    assert not any(call[0] in {"stop", "get_run"} for call in s.calls)
+
+
+@pytest.mark.parametrize("bad", ("missing", "timeout", "read_failure"))
+def test_native_stop_query_failures_are_safe_unconfirmed_reads(ordinary_stop, bad):
+    s = ordinary_stop
+    s.query_error = {
+        "missing": AgentError("not_found", "PRIVATE credential"),
+        "timeout": TimeoutError("PRIVATE credential"),
+        "read_failure": RuntimeError("PRIVATE credential"),
+    }[bad]
+    result = s.adapter.get_stop(s.handle, operation_id=s.operation.operation_id)
+    assert result.outcome.value == "unknown" and result.accepted_sequence is None
+    assert "PRIVATE" not in repr(result)
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "operation_id",
+        "workspace_id",
+        "execution_id",
+        "session_id",
+        "lease_id",
+        "fencing_token",
+        "module_instance_id",
+        "config_version",
+        "operation_type",
+    ),
+)
+def test_native_stop_query_rejects_changed_saved_operation_before_public_call(
+    ordinary_stop, field
+):
+    from sidera_control_plane.domain.gateway import GatewayOperationType
+
+    s = ordinary_stop
+    setattr(
+        s.operation,
+        field,
+        {
+            "fencing_token": 8,
+            "config_version": 4,
+            "operation_type": GatewayOperationType.START_SESSION,
+        }.get(field, uuid4()),
+    )
+    with pytest.raises(AgentError) as denied:
+        s.adapter.get_stop(s.handle, operation_id=s.operation.operation_id)
+    assert denied.value.code == "permission_denied" and not s.calls
+
+
+def test_native_stop_query_owner_loss_after_lookup_cannot_confirm(ordinary_stop):
+    s = ordinary_stop
+    original = s.adapter._execution.get_stop
+
+    def lose_owner(*args, **kwargs):
+        receipt = original(*args, **kwargs)
+        s.owner = False
+        return receipt
+
+    s.adapter._execution.get_stop = lose_owner
+    with pytest.raises(AgentError) as denied:
+        s.adapter.get_stop(s.handle, operation_id=s.operation.operation_id)
+    assert denied.value.code == "gateway_owner_lost"
+    assert not any(call[0] == "get_run" for call in s.calls)

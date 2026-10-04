@@ -6,6 +6,9 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from sidera_agents.contracts import RunInput, RunPolicy, RunStart
 from sidera_agents.errors import AgentError
 
+from sidera_control_plane.application.agent_capabilities import (
+    runtime_capability_requirements,
+)
 from sidera_control_plane.application.agent_sources import canonical_source_text
 from sidera_control_plane.application.context_requests import (
     resolve_execution_context_authorization,
@@ -202,11 +205,9 @@ class TaskExecutionInputBuilder:
             )
             if role is None or subtask is None or role.subtask_key != subtask.key:
                 _fail("binding_not_runnable")
-            requirements = tuple(
-                sorted(
-                    set(execution.capability_requirements)
-                    | set(role.capability_requirements)
-                )
+            requirements = runtime_capability_requirements(
+                set(execution.capability_requirements)
+                | set(role.capability_requirements)
             )
             objective = subtask.goal_summary
         if not authority.sources:

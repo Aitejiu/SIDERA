@@ -237,6 +237,56 @@ def test_capture_replay_returns_original_result_and_inspect_does_not_read_worktr
     )
 
 
+def test_cold_capture_enumerates_saved_refs_and_replays_original_after_worktree_removed(
+    git_case, tmp_path
+):
+    worker = tmp_path / "removed-worker"
+    branch = "sidera/cold-result-worker"
+    git(
+        git_case.repository,
+        "worktree",
+        "add",
+        "-b",
+        branch,
+        str(worker),
+        git_case.input_commit,
+    )
+    git_case.manifest.checkouts = (
+        replace(git_case.manifest.checkouts[0], branch=branch),
+    )
+    (worker / "original.py").write_text("original = True\n")
+    first = _capture(git_case)
+    git(git_case.repository, "worktree", "remove", "--force", str(worker))
+    assert not worker.exists()
+    calls = []
+
+    def refs():
+        calls.append("refs")
+        return ("repo://fixture", "repo://fixture")
+
+    def resolve(ref):
+        assert ref == "repo://fixture"
+        calls.append("resolve")
+        return git_case.repository
+
+    cold = GitResultStore(resolve, repository_refs=refs)
+    assert not calls
+    assert cold.inspect_capture(first.operation_id) == first
+    assert (
+        cold.capture(
+            manifest=git_case.manifest,
+            input_commit=git_case.input_commit,
+            operation_id=first.operation_id,
+            writable_paths=(".",),
+        )
+        == first
+    )
+    assert calls == ["refs", "resolve", "refs"]
+    assert (
+        git_case.read_commit(first.result_commit, "original.py") == b"original = True\n"
+    )
+
+
 def test_capture_persists_result_and_metadata_refs(git_case: GitResultCase) -> None:
     captured = _capture(git_case)
     metadata_ref = captured.receipt_ref

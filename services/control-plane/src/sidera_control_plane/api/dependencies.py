@@ -393,6 +393,10 @@ def get_assignment_authorizer() -> ExecutionAuthorizer | None:
     return None
 
 
+def get_native_command_preflight(request: Request):
+    return getattr(request.state, "control_plane_command_preflight", None)
+
+
 def get_assignment_agent_catalog() -> AgentCatalog | None:
     return None
 
@@ -470,6 +474,9 @@ def get_command_service(
     native_services: Annotated[
         NativeWorkerServices | None, Depends(get_native_worker_services)
     ] = None,
+    native_command_preflight: Annotated[
+        Callable | None, Depends(get_native_command_preflight)
+    ] = None,
 ) -> CommandService:
     assignments = AssignmentCommandHandler(
         catalog=agent_catalog,
@@ -533,6 +540,8 @@ def get_command_service(
     )
 
     def preflight(uow, envelope):
+        if native_command_preflight is not None:
+            native_command_preflight(envelope)
         assignments.preflight(uow, envelope)
         planning.preflight(uow, envelope)
         inputs.preflight(uow, envelope)

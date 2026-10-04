@@ -12,6 +12,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from sidera_control_plane.application.agent_worker_adapter import require_gateway_owner
 from sidera_control_plane.application.notification_delivery import (
     NotificationDeliveryService,
 )
@@ -347,12 +348,22 @@ class NotificationWorkerRuntime:
     database: Database
 
 
-def build_notification_worker(settings: Settings) -> NotificationWorkerRuntime:
+def build_notification_worker(
+    settings: Settings,
+    *,
+    owner_check: Callable[[], bool] | None = None,
+) -> NotificationWorkerRuntime:
     database = Database(settings.database_url)
-    uow_factory: Callable[[], SqlAlchemyUnitOfWork] = lambda: SqlAlchemyUnitOfWork(
-        database,
-        projection_change_retention_seconds=settings.projection_change_retention_seconds,
-    )
+
+    def uow_factory() -> SqlAlchemyUnitOfWork:
+        require_gateway_owner(owner_check)
+        return SqlAlchemyUnitOfWork(
+            database,
+            projection_change_retention_seconds=settings.projection_change_retention_seconds,
+            before_commit=None
+            if owner_check is None
+            else lambda: require_gateway_owner(owner_check),
+        )
     owner_id = f"notification-worker:{settings.local_actor_id}"
     v1_reconciler = NotificationReconciler(
         uow_factory,

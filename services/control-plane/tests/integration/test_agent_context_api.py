@@ -4,7 +4,7 @@ import json
 from dataclasses import replace
 from datetime import timedelta
 from hashlib import sha256
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -92,9 +92,36 @@ def plain(value):
 
 
 class SourceScenario:
-    def __init__(self, database, workspace_id, tmp_path):
+    def __init__(self, database, workspace_id, tmp_path, *, requirements=None):
         self.cp = ResultInputScenario(database, workspace_id, tmp_path)
-        self.cp.confirm_plan()
+        if requirements is None:
+            self.cp.confirm_plan()
+        else:
+            from tests.integration import result_input_scenario
+
+            original_proposal, original_profile = (
+                result_input_scenario._proposal_mapping,
+                result_input_scenario.profile,
+            )
+
+            def proposal(**kwargs):
+                raw = original_proposal(**kwargs)
+                for section in ("worker_items", "execution_intents"):
+                    for item in raw[section]:
+                        item["capability_requirements"] = list(requirements)
+                return raw
+
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(result_input_scenario, "_proposal_mapping", proposal)
+                patch.setattr(
+                    result_input_scenario,
+                    "profile",
+                    lambda *args: replace(
+                        original_profile(*args),
+                        allowed_capabilities=tuple(requirements),
+                    ),
+                )
+                self.cp.confirm_plan()
         self.cp._ensure_source_executions()
         self.workspace_id, self.principal = workspace_id, "operator"
         self.uow = self.cp.uow_factory
@@ -133,7 +160,7 @@ class SourceScenario:
                 protocol_state="ready",
                 auth_state="unconfirmed",
                 capabilities={
-                    "code": CapabilitySupport(
+                    "acp": CapabilitySupport(
                         status="supported", reason_code="fixture", constraints={}
                     )
                 },
@@ -379,6 +406,7 @@ class SourceScenario:
                 else source_refs(refs)
                 if callable(source_refs)
                 else source_refs,
+                upstream_grant_id=self.setup_grant,
             )
             uow.execution_authorities.add(authority)
             uow.flush()
@@ -395,7 +423,7 @@ class SourceScenario:
             )
             uow.execution_authorities.add_link(link)
         scope = AssignmentScope(
-            self.workspace_id, self.principal, grant_id, actions=authority.actions
+            self.workspace_id, self.principal, self.setup_grant, actions=authority.actions
         )
         authorizer = ExecutionAuthorityReader(
             self.uow,
@@ -471,6 +499,51 @@ class SourceScenario:
 @pytest.fixture
 def source_scenario(database, workspace_id, tmp_path):
     return SourceScenario(database, workspace_id, tmp_path)
+
+
+@pytest.mark.parametrize("native_requirement", (False, True))
+def test_native_builder_projects_request_but_retains_raw_immutable_task_facts(
+    database, workspace_id, tmp_path, native_requirement
+):
+    requirements = (
+        ("code", "python", "mcp_http") if native_requirement else ("code", "python")
+    )
+    s = SourceScenario(database, workspace_id, tmp_path, requirements=requirements)
+    if native_requirement:
+        s.runtimes.runtime = s.runtimes.runtime.model_copy(
+            update={
+                "capabilities": {
+                    **s.runtimes.runtime.capabilities,
+                    "mcp_http": CapabilitySupport(
+                        status="supported", reason_code="controlled", constraints={}
+                    ),
+                }
+            }
+        )
+    prepared = s.prepare("a")
+    reader, request = s.build(prepared)
+    assert request.required_capabilities == (
+        ("mcp_http",) if native_requirement else ()
+    )
+    assert prepared["execution"].capability_requirements == frozenset(requirements)
+    facts = reader.read(
+        prepared["authority"].id,
+        next(item.source_ref for item in request.context if item.item_id == "facts"),
+    )
+    assert facts.text == prepared["bodies"]["facts"]
+    assert facts.content_hash == "sha256:" + sha256(facts.text.encode()).hexdigest()
+    with s.uow() as uow:
+        plan = uow.plans.get(UUID(json.loads(facts.text)["plan"]["id"]), s.workspace_id)
+        role = next(
+            item
+            for item in plan.worker_item_plans
+            if item.worker_item_id == prepared["execution"].worker_item_id
+        )
+        assert role.capability_requirements == requirements
+        assert (
+            uow.execution_authorities.get_link(s.workspace_id, prepared["execution"].id)
+            == prepared["link"]
+        )
 
 
 def test_new_execution_selects_revised_task_facts_but_keeps_profile_pin(
@@ -662,6 +735,60 @@ def test_current_authority_gates_sources_and_build(source_scenario, state):
         )
 
 
+@pytest.mark.parametrize("state", ("missing", "revoked", "unknown"))
+def test_saved_worker_upstream_denial_keeps_original_history_without_fallback(
+    source_scenario, state, monkeypatch
+):
+    from sqlalchemy import update
+
+    from sidera_control_plane.persistence.models import ExecutionAuthorityModel
+
+    s = source_scenario
+    prepared = s.prepare("a")
+    authority, original = prepared["authority"], prepared["link"]
+    assert authority.upstream_grant_id == s.setup_grant != authority.id
+    if state == "revoked":
+        prepared["scope"].revoked = True
+    else:
+        with s.uow() as uow:
+            row = uow.session.get(ExecutionAuthorityModel, authority.id)
+            policy = dict(row.policy)
+            if state == "missing":
+                policy.pop("upstream_grant_id")
+            else:
+                policy["upstream_grant_id"] = str(uuid4())
+            uow.session.execute(
+                update(ExecutionAuthorityModel)
+                .where(ExecutionAuthorityModel.id == authority.id)
+                .values(policy=policy)
+            )
+    reader, builder = s.services(prepared)
+    monkeypatch.setattr(
+        reader._materializer,
+        "validate_facts",
+        lambda *args, **kwargs: pytest.fail("Denied upstream reached source body IO"),
+    )
+    with pytest.raises(AgentError):
+        reader.read(authority.id, prepared["refs"][0])
+    with pytest.raises(AgentError):
+        builder.build(prepared["execution"].id, prepared["binding"], authority.id)
+    prepared["authorizer"].require(authority.id, "run.read", s.workspace_id)
+    prepared["authorizer"].require(authority.id, "run.stop", s.workspace_id)
+    with s.uow() as uow:
+        loaded = uow.execution_authorities.get(authority.id)
+        assert loaded.upstream_grant_id == (
+            None
+            if state == "missing"
+            else authority.upstream_grant_id
+            if state == "revoked"
+            else UUID(policy["upstream_grant_id"])
+        )
+        assert (
+            uow.execution_authorities.get_link(s.workspace_id, original.execution_id)
+            == original
+        )
+
+
 @pytest.mark.parametrize("state", ["revoked", "corrupt"])
 def test_package_state_is_checked_before_source_body_io(source_scenario, state):
     s = source_scenario
@@ -834,12 +961,29 @@ def test_expired_source_fails_without_replacing_original_operation(source_scenar
 
 
 @pytest.mark.parametrize(
-    "state", ["failed_auth", "missing_capability", "wrong_runtime"]
+    "state", ["failed_auth", "missing_capability", "unsupported_capability", "unconfirmed_capability", "wrong_runtime"]
 )
 def test_runtime_pin_and_mandatory_capabilities_remain_strict(
-    source_scenario, monkeypatch, state
+    database, workspace_id, tmp_path, monkeypatch, state
 ):
-    s = source_scenario
+    genuine_requirement = state.endswith("_capability")
+    s = SourceScenario(
+        database,
+        workspace_id,
+        tmp_path,
+        requirements=("code", "mcp_http") if genuine_requirement else None,
+    )
+    if genuine_requirement:
+        s.runtimes.runtime = s.runtimes.runtime.model_copy(
+            update={
+                "capabilities": {
+                    **s.runtimes.runtime.capabilities,
+                    "mcp_http": CapabilitySupport(
+                        status="supported", reason_code="controlled", constraints={}
+                    ),
+                }
+            }
+        )
     prepared = s.prepare("a")
     if state == "failed_auth":
         s.runtimes.runtime = RuntimeSnapshot.model_validate(
@@ -847,13 +991,30 @@ def test_runtime_pin_and_mandatory_capabilities_remain_strict(
         )
     elif state == "missing_capability":
         s.runtimes.runtime = s.runtimes.runtime.model_copy(update={"capabilities": {}})
+    elif genuine_requirement:
+        s.runtimes.runtime = s.runtimes.runtime.model_copy(
+            update={
+                "capabilities": {
+                    **s.runtimes.runtime.capabilities,
+                    "mcp_http": CapabilitySupport(
+                        status=state.split("_")[0],
+                        reason_code="controlled",
+                        constraints={},
+                    ),
+                }
+            }
+        )
     else:
         wrong = s.runtimes.runtime.model_copy(
             update={"ref": RuntimeRef(workspace_id=s.workspace_id, runtime_id=uuid4())}
         )
         monkeypatch.setattr(s.runtimes, "get_runtime", lambda *a, **k: wrong)
-    with pytest.raises(AgentError):
+    with pytest.raises(AgentError) as denied:
         s.build(prepared)
+    if genuine_requirement:
+        assert denied.value.code == "required_capability_unavailable"
+    with s.uow() as uow:
+        assert uow.execution_authorities.get_link(s.workspace_id, prepared["execution"].id) == prepared["link"]
 
 
 def context_app(s, prepared, monkeypatch, *, identity=True):

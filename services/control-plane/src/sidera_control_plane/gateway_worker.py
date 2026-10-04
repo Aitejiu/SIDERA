@@ -10,7 +10,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from sidera_control_plane.acceptance_guard import load_acceptance_guard
-from sidera_control_plane.adapters.git_results import GitResultStore
+from sidera_control_plane.adapters.git_results import GitResultStore, RepositoryResolver
 from sidera_control_plane.adapters.git_workspace import (
     GitWorktreeWorkspaceManager,
     opaque_repository_ref,
@@ -71,6 +71,7 @@ class GatewayRuntime:
     native_reconciler: AgentRunReconciler | None = None
     native_workspace_id: UUID | None = None
     _closed: bool = False
+    native_source_reader: TaskContextSourceReader | None = None
 
     def close(self) -> None:
         """Release the shared runtime resources exactly once."""
@@ -110,6 +111,10 @@ def build_gateway(
     *,
     native_services: NativeWorkerServices | None = None,
     owner_check: Callable[[], bool] | None = None,
+    use_acceptance_guard: bool = True,
+    assignment_claim_check: Callable[[], bool] | None = None,
+    repository_resolver: RepositoryResolver | None = None,
+    repository_refs: Callable[[], Sequence[str]] | None = None,
 ) -> GatewayRuntime:
     database = Database(settings.database_url)
     catalog = KnowledgeHttpAdapter(
@@ -119,7 +124,7 @@ def build_gateway(
         materialization_timeout_seconds=settings.knowledge_materialization_timeout_seconds,
     )
     try:
-        acceptance_guard = load_acceptance_guard()
+        acceptance_guard = load_acceptance_guard() if use_acceptance_guard else None
         before_commit = (
             None if owner_check is None else lambda: require_gateway_owner(owner_check)
         )
@@ -150,7 +155,20 @@ def build_gateway(
             artifact_content_store,
         )
         code_result_capture_service = None
-        if settings.result_repository_path is not None and (
+        if repository_resolver is not None and (
+            settings.result_inputs_enabled or settings.result_integration_enabled
+        ):
+            code_result_capture_service = CodeResultCaptureService(
+                uow_factory,
+                GitResultStore(
+                    repository_resolver,
+                    git_executable=settings.git_executable,
+                    repository_refs=repository_refs,
+                ),
+                artifact_content_store=artifact_content_store,
+                clock=lambda: datetime.now(UTC),
+            )
+        elif settings.result_repository_path is not None and (
             settings.result_inputs_enabled or settings.result_integration_enabled
         ):
             result_repository = settings.result_repository_path.expanduser().resolve(
@@ -175,26 +193,27 @@ def build_gateway(
         active_session_sync_workspace_id = _resolve_active_session_sync_workspace(
             settings
         )
+        native_source_reader = (
+            TaskContextSourceReader(
+                uow_factory,
+                authorizer=ExecutionAuthorityReader(
+                    uow_factory,
+                    principal=lambda: native_services.principal_id,
+                    authorizer=native_services.authorizer,
+                ),
+                catalog=catalog,
+                result_input_content=artifact_content_service,
+            )
+            if native_services is not None
+            else None
+        )
         worker_gateway = WorkerGateway(
             uow_factory,
             adapter_factories=adapter_factories,
             workspace_factories=workspace_factories,
             spec_factory=ConfiguredExecutionSpecFactory(),
             native_services=native_services,
-            native_source_reader=(
-                TaskContextSourceReader(
-                    uow_factory,
-                    authorizer=ExecutionAuthorityReader(
-                        uow_factory,
-                        principal=lambda: native_services.principal_id,
-                        authorizer=native_services.authorizer,
-                    ),
-                    catalog=catalog,
-                    result_input_content=artifact_content_service,
-                )
-                if native_services is not None
-                else None
-            ),
+            native_source_reader=native_source_reader,
             artifact_content_store=artifact_content_store,
             context_materializer=ContextMaterializer(
                 catalog,
@@ -250,6 +269,7 @@ def build_gateway(
             ),
             start_concurrency=settings.gateway_owner_start_concurrency,
             owner_check=owner_check,
+            assignment_claim_check=assignment_claim_check,
         )
     except BaseException:
         catalog.close()
@@ -265,6 +285,7 @@ def build_gateway(
         before_commit=before_commit,
         native_reconciler=native_reconciler,
         native_workspace_id=active_session_sync_workspace_id,
+        native_source_reader=native_source_reader,
     )
 
 

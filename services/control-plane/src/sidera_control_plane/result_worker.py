@@ -11,6 +11,7 @@ from pathlib import Path
 from uuid import UUID
 
 from sidera_control_plane.adapters.git_results import GitResultStore, RepositoryResolver
+from sidera_control_plane.application.agent_worker_adapter import require_gateway_owner
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.result_apply import (
     ResultApplyOutcome,
@@ -227,16 +228,25 @@ def build_result_worker(
     settings: Settings,
     *,
     repository_resolver: RepositoryResolver | None = None,
+    repository_refs: Callable[[], Sequence[str]] | None = None,
+    owner_check: Callable[[], bool] | None = None,
 ) -> ResultWorkerRuntime:
     database = Database(settings.database_url)
-    uow_factory = lambda: SqlAlchemyUnitOfWork(
-        database,
-        projection_change_retention_seconds=settings.projection_change_retention_seconds,
-    )
+
+    def uow_factory() -> SqlAlchemyUnitOfWork:
+        require_gateway_owner(owner_check)
+        return SqlAlchemyUnitOfWork(
+            database,
+            projection_change_retention_seconds=settings.projection_change_retention_seconds,
+            before_commit=None
+            if owner_check is None
+            else lambda: require_gateway_owner(owner_check),
+        )
     owner_id = f"result-worker:{settings.local_actor_id}"
     code_store = GitResultStore(
         repository_resolver or {},
         git_executable=settings.git_executable,
+        repository_refs=repository_refs,
     )
     apply_service = ResultApplyService(
         uow_factory,

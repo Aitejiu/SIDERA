@@ -426,6 +426,7 @@ class PlanningRunner:
         candidate_submission_service: KnowledgeCandidateSubmissionService | None = None,
         acceptance_guard: RuntimeBudgetGuard | None = None,
         owner_check: Callable[[], bool] | None = None,
+        native_shutdown_check: Callable[[], bool] | None = None,
     ) -> None:
         if not owner_id.strip():
             raise ValueError("owner_id is required")
@@ -442,6 +443,7 @@ class PlanningRunner:
         self._adapter_factory = adapter_factory
         self._owner_id = owner_id
         self._owner_check = owner_check
+        self._native_shutdown_check = native_shutdown_check
         self._lease_ttl_seconds = lease_ttl_seconds
         self._lease_renew_interval_seconds = lease_renew_interval_seconds
         self._max_diagnostic_bytes = max_diagnostic_bytes
@@ -739,6 +741,10 @@ class PlanningRunner:
         )
 
         require_gateway_owner(self._owner_check)
+        if expected.status == "cleanup_pending" or (
+            self._native_shutdown_check is not None and self._native_shutdown_check()
+        ):
+            return None
         now = self._clock()
         with self._uow_factory() as uow:
             authority = uow.planning_authorities.get(
@@ -859,6 +865,72 @@ class PlanningRunner:
             return None if result is None else self._persist_result(item, result)
         finally:
             keeper.stop()
+
+    def drain_original_run(self, expected: PlanningAgentLink) -> bool:
+        from sidera_control_plane.application.agent_planner_adapter import (
+            AgentPlannerAdapter,
+        )
+        from sidera_control_plane.application.agent_worker_adapter import (
+            require_gateway_owner,
+        )
+
+        require_gateway_owner(self._owner_check)
+        with self._uow_factory() as uow:
+            authority = uow.planning_authorities.get(
+                expected.authority_id, workspace_id=expected.workspace_id
+            )
+            run = uow.planning_runs.get(expected.planning_run_id, expected.workspace_id)
+            if (
+                authority is None
+                or run is None
+                or (
+                    run.planning_request_id,
+                    run.operation_id,
+                    run.profile_snapshot.execution_mode,
+                    run.profile_snapshot.planner_agent_ref,
+                )
+                != (
+                    authority.planning_request_id,
+                    expected.start_operation_id,
+                    "native_profile",
+                    expected.profile_ref,
+                )
+            ):
+                return False
+            lease = uow.planning_leases.get(authority.lease_id, expected.workspace_id)
+            if (
+                lease is None
+                or (
+                    lease.workspace_id,
+                    lease.id,
+                    lease.planning_run_id,
+                    lease.owner_id,
+                    lease.fencing_token,
+                    run.workspace_id,
+                    run.id,
+                )
+                != (
+                    expected.workspace_id,
+                    authority.lease_id,
+                    authority.planning_run_id,
+                    authority.owner_id,
+                    authority.fencing_token,
+                    expected.workspace_id,
+                    expected.planning_run_id,
+                )
+                or lease.planning_run_id != run.id
+                or lease.status
+                not in (PlanningRunLeaseStatus.ACTIVE, PlanningRunLeaseStatus.RELEASED)
+                or (
+                    lease.status is PlanningRunLeaseStatus.ACTIVE
+                    and lease.expires_at <= self._clock()
+                )
+            ):
+                return False
+        adapter = self._adapter_factory.create(None, None, run.profile_snapshot)
+        if not isinstance(adapter, AgentPlannerAdapter):
+            return False
+        return adapter.drain_original_run(expected)
 
     @staticmethod
     def _assemble_input(item: _ClaimedRun, now: datetime, context_materialization=None):
@@ -1022,7 +1094,15 @@ class PlanningRunner:
                     started_at=now,
                     deadline_at=deadline,
                     cancel_requested=keeper.cancel_requested,
-                    cancel_check=(lambda: keeper.cancel_requested)
+                    cancel_check=(
+                        lambda: (
+                            keeper.cancel_requested
+                            or (
+                                self._native_shutdown_check is not None
+                                and self._native_shutdown_check()
+                            )
+                        )
+                    )
                     if item.profile_snapshot.execution_mode == "native_profile"
                     else None,
                     owner_id=self._owner_id
@@ -1051,7 +1131,14 @@ class PlanningRunner:
             keeper.stop()
 
         if item.profile_snapshot.execution_mode == "native_profile":
-            if keeper.health_error is not None or keeper.cancel_requested:
+            if (
+                keeper.health_error is not None
+                or keeper.cancel_requested
+                or (
+                    self._native_shutdown_check is not None
+                    and self._native_shutdown_check()
+                )
+            ):
                 result = adapter.classify_failure(
                     planner_input,
                     "planning_lease_unavailable"

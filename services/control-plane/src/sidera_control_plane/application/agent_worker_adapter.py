@@ -2,7 +2,8 @@
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -28,11 +29,15 @@ from sidera_agents.contracts import (
     ResourceKind,
     ResourceRef,
     RunEvent,
+    RunSnapshot,
     RunStart,
+    RunState,
     RunStop,
     RuntimeRef,
     SourceRef,
     StartReceipt,
+    StopReceipt,
+    StopStatus,
     ToolBinding,
 )
 from sidera_agents.errors import AgentError
@@ -48,6 +53,8 @@ from sidera_control_plane.domain.gateway import (
     AdapterSessionHandle,
     DeliveryOutcome,
     DeliveryResult,
+    GatewayOperationType,
+    gateway_operation_id,
 )
 from sidera_control_plane.domain.inputs import input_operation_id
 from sidera_control_plane.domain.modules import (
@@ -131,6 +138,7 @@ class NativeWorkerServices:
     principal_id: str
     catalog_grant_id: UUID
     observations: AgentObservations | None = None
+    start_admission: Callable[[], AbstractContextManager[None]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +148,43 @@ class NativeAuthorityPins:
     resources: tuple[ResourceRef, ...]
     tools: tuple[ToolBinding, ...]
     actions: tuple[str, ...]
+
+
+def build_native_worker_adapter(
+    uow_factory,
+    *,
+    services: NativeWorkerServices,
+    authorizer,
+    source_reader,
+    workspace_id,
+    execution_id,
+    capability_snapshot,
+    clock,
+    owner_check=None,
+):
+    from sidera_control_plane.application.agent_execution import (
+        TaskExecutionInputBuilder,
+    )
+
+    builder = TaskExecutionInputBuilder(
+        uow_factory,
+        authorizer=authorizer,
+        source_reader=source_reader,
+        catalog=services.catalog,
+        runtimes=services.runtimes,
+    )
+    return AgentWorkerAdapter(
+        uow_factory,
+        execution=services.execution,
+        input_builder=builder,
+        authorizer=authorizer,
+        workspace_id=workspace_id,
+        execution_id=execution_id,
+        clock=clock,
+        capability_snapshot=capability_snapshot,
+        owner_check=owner_check,
+        start_admission=services.start_admission,
+    )
 
 
 def native_authority_pins(
@@ -410,6 +455,7 @@ class AgentWorkerAdapter:
         clock=None,
         capability_snapshot=None,
         owner_check=None,
+        start_admission=None,
     ):
         self._uow_factory, self._execution = uow_factory, execution
         self._builder, self._authorizer = input_builder, authorizer
@@ -417,6 +463,7 @@ class AgentWorkerAdapter:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._capabilities = capability_snapshot or native_capabilities()
         self._owner_check = owner_check
+        self._start_admission = start_admission
 
     def probe(self, config):
         return self._capabilities
@@ -512,45 +559,46 @@ class AgentWorkerAdapter:
                 sha = request_fingerprint(request)
             else:
                 sha = link.request_sha256
-            with self._uow_factory() as uow:
-                link = uow.execution_authorities.begin_start(
-                    link, request_sha256=sha, now=self._clock()
-                )
-            if link.start_receipt is None:
-                request = self._builder.build(
-                    self._execution_id, binding, link.authority_id
-                )
-                if (
-                    request_fingerprint(request) != sha
-                    or request.operation_id != operation_id
-                ):
-                    raise AgentError(
-                        "native_request_changed",
-                        "Native start request no longer matches its saved fingerprint.",
-                    )
-            require_gateway_owner(self._owner_check)
-            try:
-                receipt = self._execution.start(request)
-            except Exception:  # noqa: BLE001 - an unconfirmed external admission is query-only
-                receipt = StartReceipt(
-                    operation_id=operation_id,
-                    status="unknown",
-                    run_id=None,
-                    reason_code="native_start_unconfirmed",
-                )
-            require_gateway_owner(self._owner_check)
-            try:
+            with (self._start_admission or nullcontext)():
                 with self._uow_factory() as uow:
-                    link = uow.execution_authorities.record_start(
-                        link, receipt, now=self._clock()
+                    link = uow.execution_authorities.begin_start(
+                        link, request_sha256=sha, now=self._clock()
                     )
-            except AgentError as exc:
-                if exc.code == "gateway_owner_lost":
-                    raise
-                raise NativeStartDeferred(self._canonical()) from None
-            except Exception:  # noqa: BLE001 - a lost persistence ACK cannot authorize replay
-                # The saved starting intention remains query-only after a lost ACK.
-                raise NativeStartDeferred(self._canonical()) from None
+                if link.start_receipt is None:
+                    request = self._builder.build(
+                        self._execution_id, binding, link.authority_id
+                    )
+                    if (
+                        request_fingerprint(request) != sha
+                        or request.operation_id != operation_id
+                    ):
+                        raise AgentError(
+                            "native_request_changed",
+                            "Native start request no longer matches its saved fingerprint.",
+                        )
+                require_gateway_owner(self._owner_check)
+                try:
+                    receipt = self._execution.start(request)
+                except Exception:  # noqa: BLE001 - an unconfirmed external admission is query-only
+                    receipt = StartReceipt(
+                        operation_id=operation_id,
+                        status="unknown",
+                        run_id=None,
+                        reason_code="native_start_unconfirmed",
+                    )
+                require_gateway_owner(self._owner_check)
+                try:
+                    with self._uow_factory() as uow:
+                        link = uow.execution_authorities.record_start(
+                            link, receipt, now=self._clock()
+                        )
+                except AgentError as exc:
+                    if exc.code == "gateway_owner_lost":
+                        raise
+                    raise NativeStartDeferred(self._canonical()) from None
+                except Exception:  # noqa: BLE001 - a lost persistence ACK cannot authorize replay
+                    # The saved starting intention remains query-only after a lost ACK.
+                    raise NativeStartDeferred(self._canonical()) from None
         elif link.run_id is None:
             try:
                 lookup = self.get_start(link.workspace_id, link.start_operation_id)
@@ -590,7 +638,7 @@ class AgentWorkerAdapter:
         link = self._canonical()
         self._check_handle(link, handle)
         with self._uow_factory() as uow:
-            session = uow.sessions.get(handle.execution_session_id, link.workspace_id)
+            session = uow.sessions.get_any(handle.execution_session_id, link.workspace_id)
             if session is None or session.execution_id != link.execution_id:
                 raise AgentError(
                     "permission_denied", "Original native Session is unavailable."
@@ -617,28 +665,149 @@ class AgentWorkerAdapter:
 
     def stop_session(self, handle, *, operation_id):
         require_gateway_owner(self._owner_check)
-        link = self._canonical()
-        self._check_handle(link, handle)
+        link = self._stop_link(handle, operation_id)
         self._authorizer.require(link.authority_id, "run.stop", link.workspace_id)
         require_gateway_owner(self._owner_check)
-        receipt = self._execution.stop(
-            RunStop(
-                workspace_id=link.workspace_id,
-                run_id=link.run_id,
-                operation_id=operation_id,
-                grant_id=link.authority_id,
+        try:
+            receipt = self._execution.stop(
+                RunStop(
+                    workspace_id=link.workspace_id,
+                    run_id=link.run_id,
+                    operation_id=operation_id,
+                    grant_id=link.authority_id,
+                )
             )
-        )
-        if receipt.run_id != link.run_id or receipt.operation_id != operation_id:
-            raise AgentError("configuration_mismatch", "Native stop identity changed.")
-        delivered = (
-            receipt.status.value == "stopped" and receipt.evidence_sequence is not None
-        )
+        except Exception:  # noqa: BLE001 - A lost write reply never proves native death.
+            require_gateway_owner(self._owner_check)
+            return self._unconfirmed_stop(handle, operation_id)
+        require_gateway_owner(self._owner_check)
+        return self._stop_result(link, handle, operation_id, receipt)
+
+    def get_stop(self, handle, *, operation_id):
+        require_gateway_owner(self._owner_check)
+        link = self._stop_link(handle, operation_id)
+        self._authorizer.require(link.authority_id, "run.read", link.workspace_id)
+        require_gateway_owner(self._owner_check)
+        try:
+            receipt = self._execution.get_stop(
+                link.workspace_id, link.run_id, operation_id, grant_id=link.authority_id
+            )
+        except Exception:  # noqa: BLE001 - A missing original query is unconfirmed.
+            require_gateway_owner(self._owner_check)
+            return self._unconfirmed_stop(handle, operation_id)
+        require_gateway_owner(self._owner_check)
+        return self._stop_result(link, handle, operation_id, receipt)
+
+    def _stop_link(self, handle, operation_id):
+        link = self._canonical()
+        self._check_handle(link, handle)
+        with self._uow_factory() as uow:
+            authority = uow.execution_authorities.get(
+                link.authority_id, workspace_id=link.workspace_id
+            )
+            session = uow.sessions.get_any(
+                handle.execution_session_id, link.workspace_id
+            )
+            binding = uow.bindings.get_for_execution(
+                link.execution_id, link.workspace_id
+            )
+            operation = uow.gateway_operations.get_by_operation_id(
+                operation_id, link.workspace_id
+            )
+            if (
+                authority is None
+                or authority.id != link.authority_id
+                or authority.workspace_id != link.workspace_id
+                or session is None
+                or session.workspace_id != link.workspace_id
+                or session.execution_id != link.execution_id
+                or session.adapter_session_id != handle.adapter_session_id
+                or binding is None
+                or binding.workspace_id != link.workspace_id
+                or binding.execution_id != link.execution_id
+                or binding.worker_id != session.worker_id
+                or binding.lease_id != authority.lease_id
+                or binding.fencing_token != authority.fencing_token
+                or operation is None
+                or operation.operation_id != operation_id
+                or operation_id
+                != gateway_operation_id(
+                    link.execution_id, GatewayOperationType.STOP_SESSION
+                )
+                or operation.operation_type is not GatewayOperationType.STOP_SESSION
+                or operation.workspace_id != link.workspace_id
+                or operation.execution_id != link.execution_id
+                or operation.session_id != session.id
+                or operation.lease_id != authority.lease_id
+                or operation.fencing_token != authority.fencing_token
+                or operation.module_instance_id != binding.adapter_module_id
+                or operation.config_version != binding.adapter_config_version
+                or session.adapter_module_id != binding.adapter_module_id
+                or session.adapter_config_version != binding.adapter_config_version
+            ):
+                raise AgentError(
+                    "permission_denied", "Original native Stop is unavailable."
+                )
+        return link
+
+    @staticmethod
+    def _unconfirmed_stop(handle, operation_id):
         return DeliveryResult(
             operation_id,
-            "delivered" if delivered else "unknown",
-            receipt.evidence_sequence if delivered else None,
-            receipt.reason_code,
+            DeliveryOutcome.UNKNOWN,
+            None,
+            "native_stop_unconfirmed",
+            handle.execution_session_id,
+        )
+
+    def _stop_result(self, link, handle, operation_id, receipt):
+        if not isinstance(receipt, StopReceipt):
+            return self._unconfirmed_stop(handle, operation_id)
+        try:
+            receipt = StopReceipt.model_validate(receipt.model_dump())
+        except ValidationError:
+            return self._unconfirmed_stop(handle, operation_id)
+        if receipt.run_id != link.run_id or receipt.operation_id != operation_id:
+            return self._unconfirmed_stop(handle, operation_id)
+        if receipt.status is StopStatus.FAILED:
+            return DeliveryResult(
+                operation_id,
+                DeliveryOutcome.FAILED,
+                None,
+                "native_stop_failed",
+                handle.execution_session_id,
+            )
+        if (
+            receipt.status is not StopStatus.STOPPED
+            or type(receipt.evidence_sequence) is not int
+            or receipt.evidence_sequence < 1
+        ):
+            return self._unconfirmed_stop(handle, operation_id)
+        self._authorizer.require(link.authority_id, "run.read", link.workspace_id)
+        require_gateway_owner(self._owner_check)
+        try:
+            snapshot = self._execution.get_run(
+                link.workspace_id, link.run_id, grant_id=link.authority_id
+            )
+            if not isinstance(snapshot, RunSnapshot):
+                return self._unconfirmed_stop(handle, operation_id)
+            snapshot = RunSnapshot.model_validate(snapshot.model_dump())
+        except Exception:  # noqa: BLE001 - Read failure cannot confirm a closed Run.
+            require_gateway_owner(self._owner_check)
+            return self._unconfirmed_stop(handle, operation_id)
+        require_gateway_owner(self._owner_check)
+        if (
+            snapshot.run_id != link.run_id
+            or snapshot.workspace_id != link.workspace_id
+            or snapshot.profile_ref != link.profile_ref
+            or snapshot.state is not RunState.STOPPED
+            or snapshot.input_open
+            or snapshot.active_response_id is not None
+            or snapshot.last_event_sequence < receipt.evidence_sequence
+        ):
+            return self._unconfirmed_stop(handle, operation_id)
+        return DeliveryResult(
+            operation_id, DeliveryOutcome.DELIVERED, receipt.evidence_sequence, None,
             handle.execution_session_id,
         )
 

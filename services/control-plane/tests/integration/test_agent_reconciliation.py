@@ -25,6 +25,104 @@ pytestmark = pytest.mark.integration
 native_planning_case = test_agent_planning.native_case
 
 
+def test_owner_wide_native_repository_and_observer_preserve_two_original_workspaces(
+    database, workspace_id, tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from sidera_control_plane.application.agent_worker_adapter import (
+        NativeWorkerServices,
+    )
+    from sidera_control_plane.persistence.models import WorkspaceModel
+    from tests.support.native_agents import PublicAgentCatalog
+
+    other_workspace = uuid4()
+    with database.session() as session:
+        session.add(
+            WorkspaceModel(
+                id=other_workspace,
+                name="Owned second scope",
+                status="active",
+                version=1,
+            )
+        )
+        session.commit()
+    first_path, second_path = tmp_path / "first", tmp_path / "second"
+    first_path.mkdir()
+    second_path.mkdir()
+    cases = (
+        NativeScenario(database, workspace_id, first_path),
+        NativeScenario(database, other_workspace, second_path),
+    )
+    for s in cases:
+        s.assign()
+        assert s.schedule().assigned == 1
+        s.start()
+    links = tuple(s.link() for s in cases)
+    with cases[0].uow() as uow:
+        ordered = uow.execution_authorities.list_reconciliation_links(None, limit=200)
+        assert {(link.workspace_id, link.execution_id) for link in ordered} == {
+            (link.workspace_id, link.execution_id) for link in links
+        }
+        page = uow.execution_authorities.list_reconciliation_links(None, limit=1)
+        next_page = uow.execution_authorities.list_reconciliation_links(
+            None, limit=1, after_execution_id=page[-1].execution_id
+        )
+        assert (
+            len(page) == len(next_page) == 1
+            and page[0].execution_id != next_page[0].execution_id
+        )
+        assert uow.execution_authorities.list_reconciliation_links(
+            workspace_id, limit=200
+        ) == (links[0],)
+    by_workspace = {s.workspace_id: s for s in cases}
+
+    def native_call(method):
+        def call(workspace, *args, **kwargs):
+            assert isinstance(workspace, UUID)
+            return getattr(by_workspace[workspace].execution, method)(
+                workspace, *args, **kwargs
+            )
+
+        return call
+
+    def require_original(grant_id, action, target):
+        assert target.workspace_id in by_workspace and target.principal_id == "operator"
+        with cases[0].uow() as uow:
+            authority = uow.execution_authorities.get(grant_id)
+            assert (
+                authority is not None and authority.workspace_id == target.workspace_id
+            )
+
+    services = NativeWorkerServices(
+        PublicAgentCatalog(tuple(s.profile for s in cases)),
+        SimpleNamespace(
+            get_runtime=lambda ref, **kwargs: by_workspace[
+                ref.workspace_id
+            ].runtimes.get_runtime(ref, **kwargs)
+        ),
+        SimpleNamespace(
+            **{
+                method: native_call(method)
+                for method in ("get_run", "get_start", "list_events")
+            }
+        ),
+        SimpleNamespace(require=require_original),
+        "operator",
+        cases[0].setup_grant,
+    )
+    with restarted_gateway(cases[0], monkeypatch, native_services=services) as runtime:
+        # The existing family observer uses each saved link's exact concrete scope.
+        service = runtime.native_reconciler
+        result = service.run_once(None, limit=2)
+        assert result.examined == 2
+        assert result.recovery_required == 0
+        assert all(read[1] == workspace_id for read in cases[0].execution.reads)
+        assert all(read[1] == other_workspace for read in cases[1].execution.reads)
+    assert all(len(s.execution.starts) == 1 for s in cases)
+    assert all(s.link().event_cursor == 1 for s in cases)
+
+
 class SimulatedProcessExit(BaseException):
     pass
 
@@ -125,10 +223,6 @@ def restart_planning(
     from sidera_control_plane.application.context_materialization import (
         ContextMaterializer,
     )
-    from sidera_control_plane.application.execution_authority import (
-        NativeAuthorityReader,
-        PlanningAuthorityReader,
-    )
     from sidera_control_plane.application.planning_runner import (
         PlanningRunner,
         RegistryPlannerAdapterFactory,
@@ -137,17 +231,11 @@ def restart_planning(
 
     _, identity, scope, catalog, runtimes, _, _ = case
     public = old_runner._adapter_factory._native_options["services"].execution
-    reader = PlanningAuthorityReader(
-        uow_factory,
-        principal=lambda: identity.principal_id,
-        authorizer=scope,
-        clock=clock,
-    )
     services = NativeWorkerServices(
         catalog,
         runtimes,
         public,
-        NativeAuthorityReader(uow_factory, planner=reader, worker=None),
+        scope,
         identity.principal_id,
         identity.grant_id,
     )
@@ -786,9 +874,10 @@ def test_changed_original_link_rejects_stale_page(native_case):
 
 
 @contextmanager
-def restarted_gateway(s, monkeypatch, *, owner_check=None, renew_interval=None):
+def restarted_gateway(s, monkeypatch, *, owner_check=None, renew_interval=None, native_services=None):
     from sidera_control_plane import gateway_worker
     from sidera_control_plane.application import (
+        agent_reconciliation,
         agent_sources,
         context_materialization,
         execution_authority,
@@ -804,6 +893,7 @@ def restarted_gateway(s, monkeypatch, *, owner_check=None, renew_interval=None):
     monkeypatch.setattr(execution_authority, "datetime", FrozenDateTime)
     monkeypatch.setattr(agent_sources, "datetime", FrozenDateTime)
     monkeypatch.setattr(context_materialization, "datetime", FrozenDateTime)
+    monkeypatch.setattr(agent_reconciliation, "datetime", FrozenDateTime)
     runtime = gateway_worker.build_gateway(
         Settings(
             database_url=str(s.cp.database.engine.url),
@@ -820,7 +910,7 @@ def restarted_gateway(s, monkeypatch, *, owner_check=None, renew_interval=None):
                 else {}
             ),
         ),
-        native_services=s.services,
+        native_services=s.services if native_services is None else native_services,
         **({"owner_check": owner_check} if owner_check is not None else {}),
     )
     assert runtime.worker_gateway is not s.gateway

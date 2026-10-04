@@ -36,13 +36,13 @@ def test_gateway_factory_routes_local_verification_without_constructing_opencode
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from sidera_control_plane.composition import worker_adapters
+    from sidera_control_plane.adapters import opencode_acp
 
     def fail_if_constructed(*args: object, **kwargs: object) -> None:
         raise AssertionError("OpenCode must not be constructed for verification")
 
     monkeypatch.setattr(
-        worker_adapters, "OpenCodeACPAdapter", fail_if_constructed
+        opencode_acp, "OpenCodeACPAdapter", fail_if_constructed
     )
     settings = SimpleNamespace(
         workspace_root=tmp_path,

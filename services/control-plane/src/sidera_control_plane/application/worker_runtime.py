@@ -10,10 +10,17 @@ from uuid import UUID
 
 from sidera_agents.errors import AgentError
 
+from sidera_control_plane.application.agent_capabilities import (
+    runtime_capability_requirements,
+)
 from sidera_control_plane.application.agent_worker_adapter import (
     NativeWorkerServices,
     native_binding,
     native_capabilities,
+)
+from sidera_control_plane.application.context_requests import (
+    ExecutionContextAuthorizationError,
+    resolve_execution_context_authorization,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.execution import Execution
@@ -131,6 +138,9 @@ class WorkerRuntimeResolver:
             )
         if isinstance(resolved, SchedulingIssue):
             return resolved
+        issue = self._native_workspace_issue(uow, worker, execution, resolved)
+        if issue is not None:
+            return issue
         services = self._native_services
         try:
             profile = services.catalog.get_profile(
@@ -163,7 +173,7 @@ class WorkerRuntimeResolver:
                 worker,
                 reason="native_runtime_unavailable",
             )
-        for capability in execution.capability_requirements:
+        for capability in runtime_capability_requirements(execution.capability_requirements):
             support = runtime.capabilities.get(capability)
             if support is None or support.status.value != "supported":
                 return _issue(
@@ -182,6 +192,72 @@ class WorkerRuntimeResolver:
                 "binding_version": binding.version,
             },
         )
+
+    def _native_workspace_issue(self, uow, worker, execution, resolved):
+        from sidera_control_plane.domain.native_setup import (
+            NATIVE_SETUP_POLICY_KEY,
+        )
+
+        if getattr(uow, "execution_requests", None) is None:
+            return None
+        try:
+            authority = resolve_execution_context_authorization(uow, execution)
+        except ExecutionContextAuthorizationError:
+            return _issue(
+                SchedulingBlockReason.RUNTIME_CONFIGURATION_INVALID,
+                worker,
+                reason="native_context_invalid",
+            )
+        if authority is None or authority.request.planning_request_id is None:
+            return None
+        request = authority.request
+        planning = uow.planning_requests.get(
+            request.planning_request_id, execution.workspace_id
+        )
+        policy = (
+            None
+            if planning is None
+            else uow.planning_profiles.get(
+                planning.planning_profile_id,
+                execution.workspace_id,
+                version=planning.planning_profile_version,
+            )
+        )
+        if policy is None:
+            return _issue(
+                SchedulingBlockReason.RUNTIME_CONFIGURATION_INVALID,
+                worker,
+                reason="native_context_invalid",
+            )
+        if (
+            policy.profile_key != NATIVE_SETUP_POLICY_KEY
+            or policy.execution_mode != "native_profile"
+        ):
+            return None
+        plan = uow.plans.get(request.plan_snapshot_id, execution.workspace_id)
+        if (
+            plan is None
+            or plan.id != request.plan_snapshot_id
+            or plan.root_task_id != request.root_task_id
+            or plan.generation != request.plan_generation
+            or plan.integration_spec is None
+        ):
+            return _issue(
+                SchedulingBlockReason.RUNTIME_CONFIGURATION_INVALID,
+                worker,
+                reason="native_context_invalid",
+            )
+        binding = plan.integration_spec.verification_binding
+        if (
+            resolved.workspace_module_instance_id,
+            resolved.workspace_module_config_version,
+        ) != (binding.workspace_module_ref, binding.workspace_config_version):
+            return _issue(
+                SchedulingBlockReason.RUNTIME_CONFIGURATION_INVALID,
+                worker,
+                reason="native_workspace_mismatch",
+            )
+        return None
 
     def inspect_candidates(
         self,

@@ -20,6 +20,7 @@ PROJECTS = {
 REQUIREMENTS = {
     "agents-core": "sidera-agents==0.1.0",
     "control-plane-core": "sidera-control-plane==0.1.0",
+    "control-plane-agents": "sidera-control-plane==0.1.0",
     "public-client": "sidera-control-plane-client==0.1.0",
     "gateway-core": "sidera-main-agent-gateway==0.1.0",
     "bridge-client": "sidera-akashic-task-bridge==0.1.0",
@@ -29,6 +30,12 @@ COMBINATION_PROJECTS = {
     "agents-core": ("sidera-agents",),
     "control-plane-core": (
         "sidera-control-plane",
+        "sidera-agents",
+        "sidera-runtime-guard",
+    ),
+    "control-plane-agents": (
+        "sidera-control-plane",
+        "sidera-agents",
         "sidera-runtime-guard",
     ),
     "public-client": ("sidera-control-plane-client",),
@@ -76,6 +83,13 @@ ABSENT_MODULES = {
         "sidera_main_agent_gateway",
         "sidera_control_plane_client",
     ),
+    "control-plane-agents": (
+        "akashic_sdk",
+        "sidera_task_bridge",
+        "sidera_main_agent_gateway",
+        "sidera_product",
+        "sidera_control_plane_client",
+    ),
     "public-client": (
         "sidera_control_plane",
         "sqlalchemy",
@@ -117,6 +131,13 @@ ABSENT_DISTRIBUTIONS = {
         "akashic-agent-sdk",
         "sidera-akashic-task-bridge",
         "sidera-main-agent-gateway",
+        "sidera-control-plane-client",
+    ),
+    "control-plane-agents": (
+        "akashic-agent-sdk",
+        "sidera-akashic-task-bridge",
+        "sidera-main-agent-gateway",
+        "sidera-product",
         "sidera-control-plane-client",
     ),
     "public-client": (
@@ -221,7 +242,8 @@ from pathlib import Path
 
 PROJECTS = {
     "agents-core": ("sidera-agents",),
-    "control-plane-core": ("sidera-control-plane", "sidera-runtime-guard"),
+    "control-plane-core": ("sidera-control-plane", "sidera-agents", "sidera-runtime-guard"),
+    "control-plane-agents": ("sidera-control-plane", "sidera-agents", "sidera-runtime-guard"),
     "public-client": ("sidera-control-plane-client",),
     "gateway-core": ("sidera-main-agent-gateway", "sidera-runtime-guard"),
     "bridge-client": ("sidera-akashic-task-bridge", "sidera-control-plane-client"),
@@ -241,6 +263,10 @@ ABSENT_MODULES = {
     "control-plane-core": (
         "akashic_sdk", "sidera_task_bridge", "sidera_main_agent_gateway",
         "sidera_control_plane_client",
+    ),
+    "control-plane-agents": (
+        "akashic_sdk", "sidera_task_bridge", "sidera_main_agent_gateway",
+        "sidera_product", "sidera_control_plane_client",
     ),
     "public-client": (
         "sidera_control_plane", "sqlalchemy", "alembic", "psycopg",
@@ -263,6 +289,10 @@ ABSENT_DISTRIBUTIONS = {
     ),
     "control-plane-core": (
         "akashic-agent-sdk", "sidera-akashic-task-bridge",
+        "sidera-main-agent-gateway", "sidera-control-plane-client",
+    ),
+    "control-plane-agents": (
+        "akashic-agent-sdk", "sidera-akashic-task-bridge", "sidera-product",
         "sidera-main-agent-gateway", "sidera-control-plane-client",
     ),
     "public-client": (
@@ -363,6 +393,65 @@ def _probe_control_plane_core():
         "/api/v1/commands",
     } <= paths.keys():
         raise ProbeFailure("probe_failed")
+
+def _probe_control_plane_agents():
+    from fastapi.testclient import TestClient
+    from sidera_control_plane.composition.native_runtime import create_control_plane_runtime
+    from sidera_control_plane.config import Settings
+
+    forbidden = (
+        "sidera_agents.postgres", "sidera_agents.harnesses.opencode",
+        "sidera_agents.harnesses.acp_transport", "sidera_agents.harnesses.opencode_config",
+        "sidera_agents.harnesses.opencode_descriptor",
+        "sidera_control_plane.adapters.opencode_acp", "sidera_control_plane.adapters.opencode_planner",
+        "sidera_control_plane.adapters.dsh_acp", "sidera_control_plane.adapters.acp_process",
+    )
+    if any(module == prefix or module.startswith(prefix + ".") for module in sys.modules for prefix in forbidden):
+        raise ProbeFailure("dependency_boundary_failed")
+    for distribution, modules in (
+        ("sidera-control-plane", ("sidera_control_plane", "sidera_control_plane.composition.native_runtime")),
+        ("sidera-agents", ("sidera_agents", "sidera_agents.api", "sidera_agents.contracts", "sidera_agents.ports")),
+    ):
+        installed = Path(metadata.distribution(distribution).locate_file("")).resolve()
+        if not installed.is_relative_to(Path(sys.prefix).resolve()):
+            raise ProbeFailure("dependency_boundary_failed")
+        for name in modules:
+            origin = getattr(importlib.import_module(name), "__file__", None)
+            if not origin or not Path(origin).resolve().is_relative_to(installed):
+                raise ProbeFailure("dependency_boundary_failed")
+    package = Path(str(files("sidera_control_plane"))).resolve()
+    installed = Path(metadata.distribution("sidera-control-plane").locate_file("")).resolve()
+    if not package.is_relative_to(installed):
+        raise ProbeFailure("dependency_boundary_failed")
+    config = ConfigParser(defaults={"here": str(package)})
+    config.read_string((package / "alembic.ini").read_text(encoding="utf-8"))
+    migrations = Path(config.get("alembic", "script_location")).resolve()
+    if not migrations.is_relative_to(package) or not (migrations / "env.py").is_file() or not tuple((migrations / "versions").glob("*.py")):
+        raise ProbeFailure("dependency_boundary_failed")
+    class UnusedPublicPorts:
+        def __getattr__(self, name):
+            raise ProbeFailure("probe_failed")
+    ports = UnusedPublicPorts()
+    runtime = create_control_plane_runtime(
+        Settings(database_url="postgresql+psycopg://unused@/unused?host=/private/tmp/unused"),
+        ports, ports, ports, ports,
+    )
+    try:
+        reader = runtime.context_source_reader
+        if reader is ports or reader is not runtime.context_source_reader:
+            raise ProbeFailure("probe_failed")
+        if not all(callable(getattr(runtime, name)) for name in ("start_background", "close", "migrate", "readiness", "configure_workspace")):
+            raise ProbeFailure("probe_failed")
+        with TestClient(runtime.app) as client:
+            if client.get("/healthz").status_code != 200:
+                raise ProbeFailure("probe_failed")
+            if client.get("/api/v1/tasks").status_code != 401:
+                raise ProbeFailure("probe_failed")
+    finally:
+        if runtime.close(grace_seconds=0) is not True:
+            raise ProbeFailure("probe_failed")
+    if any(module == prefix or module.startswith(prefix + ".") for module in sys.modules for prefix in forbidden):
+        raise ProbeFailure("dependency_boundary_failed")
 
 async def _probe_public_client():
     import httpx
@@ -531,6 +620,8 @@ def _run_probe():
             _probe_agents_core()
         elif name == "control-plane-core":
             _probe_control_plane_core()
+        elif name == "control-plane-agents":
+            _probe_control_plane_agents()
         elif name == "public-client":
             asyncio.run(_probe_public_client())
         elif name == "gateway-core":
@@ -643,7 +734,7 @@ def install_argv(name: str, output_root: Path) -> list[str]:
     if name == "agents-core":
         result.append("--offline")
     result.append(REQUIREMENTS[name])
-    if name in {"control-plane-core", "gateway-core"}:
+    if name in {"control-plane-core", "control-plane-agents", "gateway-core"}:
         result.append("httpx>=0.28,<1")
     return result
 

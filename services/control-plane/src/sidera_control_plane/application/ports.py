@@ -247,6 +247,11 @@ class PlanRepositoryPort(Protocol):
     def list_roots_with_snapshots(self, workspace_id: UUID) -> tuple[UUID, ...]:
         raise NotImplementedError
 
+    def list_root_scopes_with_snapshots(
+        self, *, after: tuple[UUID, UUID] | None = None, limit: int = 100
+    ) -> tuple[tuple[UUID, UUID], ...]:
+        raise NotImplementedError
+
 
 class PlanTransitionRepositoryPort(Protocol):
     def add(self, transition: PlanTransition) -> None:
@@ -2560,7 +2565,7 @@ class AgentBindingRepositoryPort(Protocol):
 class ExecutionAuthorityRepositoryPort(Protocol):
     def list_reconciliation_links(
         self,
-        workspace_id: UUID,
+        workspace_id: UUID | None,
         *,
         limit: int = 100,
         after_execution_id: UUID | None = None,
@@ -2591,6 +2596,16 @@ class ExecutionAuthorityRepositoryPort(Protocol):
         raise NotImplementedError
 
     def retirement_proof(self, workspace_id: UUID, execution_id: UUID):
+        raise NotImplementedError
+
+    def lock_unadmitted_original(
+        self, expected: AgentExecutionLink, *, principal_id: str
+    ):
+        raise NotImplementedError
+
+    def cancel_unadmitted_original(
+        self, expected: AgentExecutionLink, *, principal_id: str
+    ) -> AgentExecutionLink:
         raise NotImplementedError
 
     def begin_start(self, expected, *, request_sha256: str, now: datetime):
@@ -2658,7 +2673,7 @@ class ExecutionAuthorityRepositoryPort(Protocol):
 class PlanningAuthorityRepositoryPort(Protocol):
     def list_reconciliation_links(
         self,
-        workspace_id: UUID,
+        workspace_id: UUID | None,
         *,
         limit: int = 100,
         after_planning_run_id: UUID | None = None,

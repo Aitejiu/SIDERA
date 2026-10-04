@@ -11,6 +11,7 @@ from sidera_control_plane.adapters.git_workspace import (
     WorkspaceProviderError,
 )
 from sidera_control_plane.domain.errors import DomainError
+from sidera_control_plane.domain.handoff_evidence import HandoffWorkspaceTargetSpec
 from sidera_control_plane.domain.workspace import (
     BranchPolicy,
     CheckoutMode,
@@ -129,6 +130,176 @@ def test_native_directory_is_provider_verified_not_an_opaque_uri(
     _git(root / str(spec.execution_id), "checkout", "-b", "wrong-branch")
     with pytest.raises(WorkspaceProviderError):
         directory(manifest)
+
+
+@pytest.fixture
+def prepared_git_workspace(tmp_path):
+    repository, revision = _repository(tmp_path)
+    root = tmp_path / "workspaces"
+    root.mkdir()
+    spec = _spec(repository, revision)
+    manager = GitWorktreeWorkspaceManager(root)
+    manifest = manager.prepare(spec, operation_id=uuid4())
+    manifest.mark_preparing()
+    manifest.mark_ready()
+    return manager, spec, manifest, root
+
+
+@pytest.mark.parametrize("lifecycle", ("ready", "active", "frozen", "retained"))
+@pytest.mark.parametrize("content", ("dirty", "committed"))
+def test_cold_native_directory_recovers_original_without_prepare_or_git_writes(
+    prepared_git_workspace,
+    monkeypatch,
+    lifecycle,
+    content,
+):
+    warm, spec, manifest, root = prepared_git_workspace
+    if lifecycle != "ready":
+        manifest.mark_active()
+    if lifecycle in {"frozen", "retained"}:
+        warm.freeze(manifest, operation_id=uuid4())
+    if lifecycle == "retained":
+        warm.retain(manifest, operation_id=uuid4())
+    location = root / str(spec.execution_id)
+    (location / "README.md").write_text("real Worker contents\n")
+    if content == "committed":
+        _git(location, "add", "README.md")
+        _git(location, "commit", "-m", "Worker materialization")
+    before = (
+        _git(location, "rev-parse", "HEAD"),
+        _git(location, "status", "--porcelain"),
+        (location / "README.md").read_bytes(),
+    )
+    cold = GitWorktreeWorkspaceManager(root)
+    calls, run_git = [], cold._run_git
+
+    def read_git(args, **kwargs):
+        calls.append(tuple(args))
+        return run_git(args, **kwargs)
+
+    monkeypatch.setattr(cold, "_run_git", read_git)
+    monkeypatch.setattr(
+        cold,
+        "prepare",
+        lambda *args, **kwargs: pytest.fail("Cold resolution prepared a replacement"),
+    )
+    assert cold.physical_directory(replace(manifest)) == location.resolve()
+    assert cold.inspect_manifest(replace(manifest)) == manifest
+    assert calls and all(
+        command[0] == "rev-parse" or command == ("branch", "--show-current")
+        for command in calls
+    )
+    assert (
+        _git(location, "rev-parse", "HEAD"),
+        _git(location, "status", "--porcelain"),
+        (location / "README.md").read_bytes(),
+    ) == before
+
+
+@pytest.mark.parametrize(
+    "changed",
+    (
+        "repository",
+        "nonopaque_repository",
+        "branch",
+        "location_path",
+        "location_query",
+        "location_fragment",
+        "location_noncanonical",
+        "missing",
+        "symlink",
+        "escape",
+        "lifecycle",
+        "wrong_git_branch",
+        "detached",
+        "checkouts",
+    ),
+)
+def test_cold_native_directory_rejects_unverified_identity_without_remembering(
+    prepared_git_workspace,
+    changed,
+    tmp_path,
+):
+    _, spec, original, root = prepared_git_workspace
+    manifest = replace(original)
+    location = root / str(spec.execution_id)
+    checkout = manifest.checkouts[0]
+    if changed == "repository":
+        manifest.checkouts = (
+            replace(checkout, repository_ref="git-repository://" + "a" * 64),
+        )
+    elif changed == "nonopaque_repository":
+        manifest.checkouts = (
+            replace(checkout, repository_ref=str(tmp_path / "repository")),
+        )
+    elif changed == "branch":
+        manifest.checkouts = (replace(checkout, branch="main"),)
+    elif changed.startswith("location_"):
+        manifest.location_ref += {
+            "location_path": "/extra",
+            "location_query": "?extra=1",
+            "location_fragment": "#extra",
+            "location_noncanonical": "",
+        }[changed]
+        if changed == "location_noncanonical":
+            manifest.location_ref = "git-worktree://" + spec.execution_id.hex
+    elif changed == "missing":
+        missing = uuid4()
+        manifest.location_ref = f"git-worktree://{missing}"
+        manifest.checkouts = (replace(checkout, branch=f"sidera/execution/{missing}"),)
+    elif changed in {"symlink", "escape"}:
+        moved = root / "moved" if changed == "symlink" else tmp_path / "outside-root"
+        location.rename(moved)
+        location.symlink_to(moved, target_is_directory=True)
+    elif changed == "lifecycle":
+        manifest.lifecycle = WorkspaceLifecycle.CLEANING
+    elif changed == "wrong_git_branch":
+        _git(location, "checkout", "-b", "wrong-branch")
+    elif changed == "detached":
+        _git(location, "checkout", "--detach", "HEAD")
+    elif changed == "checkouts":
+        manifest.checkouts = (checkout, checkout)
+    cold = GitWorktreeWorkspaceManager(root)
+    with pytest.raises(WorkspaceProviderError):
+        cold.physical_directory(manifest)
+    with pytest.raises(WorkspaceProviderError, match="identity is unavailable"):
+        cold.inspect_manifest(manifest)
+
+
+def test_cold_native_directory_uses_actual_transferred_original_location(
+    prepared_git_workspace,
+):
+    warm, spec, source, root = prepared_git_workspace
+    source.mark_active()
+    warm.freeze(source, operation_id=uuid4())
+    target = HandoffWorkspaceTargetSpec(
+        workspace_id=source.workspace_id,
+        task_id=source.task_id,
+        target_execution_id=uuid4(),
+        target_worker_id=uuid4(),
+        adapter_module_ref=spec.adapter_module_ref,
+        adapter_config_version=1,
+        workspace_module_ref=spec.workspace_module_ref,
+        workspace_config_version=1,
+        repositories=(
+            {
+                "repository_ref": source.checkouts[0].repository_ref,
+                "revision": source.checkouts[0].base_revision,
+                "branch": source.checkouts[0].branch,
+                "current_head": source.checkouts[0].current_head,
+            },
+        ),
+        anticipated_fencing_token=2,
+    )
+    transferred = warm.transfer_handoff(
+        source, target, transition_id=uuid4(), logical_attempt=1, operation_id=uuid4()
+    )
+    cold = GitWorktreeWorkspaceManager(root)
+    assert (
+        cold.physical_directory(transferred)
+        == (root / str(source.execution_id)).resolve()
+    )
+    assert not (root / str(target.target_execution_id)).exists()
 
 
 def test_native_refence_requires_retired_busy_evidence(tmp_path: Path) -> None:

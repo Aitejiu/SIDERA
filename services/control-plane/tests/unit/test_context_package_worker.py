@@ -436,6 +436,7 @@ def test_worker_adds_only_bounded_handoff_facts_to_execution_package() -> None:
     )
     bundle = SimpleNamespace(
         id=bundle_id,
+        schema_version=1,
         bundle_hash=bundle_hash,
         workspace_id=WORKSPACE_ID,
         worker_item_id=worker_item_id,
@@ -497,7 +498,10 @@ def test_worker_adds_only_bounded_handoff_facts_to_execution_package() -> None:
     assert isinstance(handoff, dict)
     assert handoff["bundle_id"] == str(bundle_id)
     assert handoff["source"]["last_accepted_sequence"] == 7
+    assert handoff["target"]["worker_id"] == str(bundle.target_worker_id)
     assert handoff["target"]["runtime_hash"] == "1" * 64
+    assert "profile_ref" not in handoff["target"]
+    assert "agent_profile_ref" not in handoff["target"]
     assert "trace" not in str(handoff).lower()
     assert "snapshot" not in str(handoff).lower()
 

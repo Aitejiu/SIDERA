@@ -3,6 +3,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException
 
 from sidera_control_plane.application.artifact_content import (
     ArtifactRangeNotSatisfiable,
@@ -18,6 +19,35 @@ from sidera_control_plane.domain.errors import (
     DomainError,
     ValidationError,
 )
+
+
+def native_http_error_response(exc: HTTPException) -> JSONResponse:
+    messages = {
+        "authentication_required": "authentication required",
+        "permission_denied": "permission denied",
+        "validation_error": "request validation failed",
+        "control_plane_closed": "control plane is closed",
+    }
+    code = exc.detail.get("code") if isinstance(exc.detail, dict) else None
+    if not isinstance(code, str) or code not in messages:
+        code = {
+            401: "authentication_required",
+            403: "permission_denied",
+            422: "validation_error",
+            503: "service_unavailable",
+        }.get(exc.status_code, "request_rejected")
+    message = messages.get(
+        code, "service unavailable" if exc.status_code == 503 else "request rejected"
+    )
+    return _error_response(exc.status_code, code, message, {})
+
+
+def install_native_http_error_handler(app: FastAPI) -> None:
+    @app.exception_handler(HTTPException)
+    async def handle_native_http_error(
+        _request: Request, exc: HTTPException
+    ) -> JSONResponse:
+        return native_http_error_response(exc)
 
 
 def install_error_handlers(app: FastAPI) -> None:

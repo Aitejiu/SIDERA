@@ -5,7 +5,7 @@ import json
 import logging
 import signal
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from threading import Event
@@ -18,6 +18,7 @@ from sidera_control_plane.adapters.knowledge_http import (
     KnowledgeAdapterError,
     KnowledgeHttpAdapter,
 )
+from sidera_control_plane.application.agent_worker_adapter import require_gateway_owner
 from sidera_control_plane.application.code_result_delivery import resolve_code_inputs
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.context_assembly import (
@@ -1025,6 +1026,7 @@ def build_context_package_worker(
     settings: Settings,
     *,
     owner_id: str | None = None,
+    owner_check: Callable[[], bool] | None = None,
 ) -> ContextPackageWorkerRuntime:
     database = Database(settings.database_url)
     catalog = KnowledgeHttpAdapter(
@@ -1033,12 +1035,20 @@ def build_context_package_worker(
         metadata_timeout_seconds=settings.knowledge_metadata_timeout_seconds,
         materialization_timeout_seconds=settings.knowledge_materialization_timeout_seconds,
     )
+
+    def uow_factory() -> SqlAlchemyUnitOfWork:
+        require_gateway_owner(owner_check)
+        return SqlAlchemyUnitOfWork(
+            database,
+            projection_change_retention_seconds=settings.projection_change_retention_seconds,
+            before_commit=None
+            if owner_check is None
+            else lambda: require_gateway_owner(owner_check),
+        )
+
     try:
         worker = ContextPackageWorker(
-            uow_factory=lambda: SqlAlchemyUnitOfWork(
-                database,
-                projection_change_retention_seconds=settings.projection_change_retention_seconds,
-            ),
+            uow_factory=uow_factory,
             catalog=catalog,
             owner_id=owner_id or f"context-worker:{settings.local_actor_id}",
             lease_seconds=settings.context_assembly_lease_seconds,

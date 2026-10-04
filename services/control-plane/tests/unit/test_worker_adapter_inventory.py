@@ -64,8 +64,22 @@ def test_inventory_and_factories_share_one_registration_source(
     assert gateway_worker.registered_worker_adapter_types() == tuple(
         item.adapter_type for item in registrations
     )
-    assert tuple(factories) == gateway_worker.registered_worker_adapter_types()
+    assert tuple(factories) == tuple(
+        item.adapter_type for item in registrations if item.adapter_type != "agent-run"
+    )
+    assert "agent-run" not in factories
+    from sidera_control_plane.composition.worker_adapters import (
+        build_native_worker_adapter,
+    )
+
+    assert callable(build_native_worker_adapter)
+    from sidera_control_plane.application.agent_worker_adapter import (
+        build_native_worker_adapter as application_builder,
+    )
+
+    assert build_native_worker_adapter is application_builder
     assert {item.adapter_type for item in registrations} == {
+        "agent-run",
         "fake",
         "opencode",
         "opencode-acp",
@@ -74,6 +88,7 @@ def test_inventory_and_factories_share_one_registration_source(
         "dsh-acp",
     }
     assert tuple(item.adapter_type for item in registrations) == (
+        "agent-run",
         "fake",
         "opencode",
         "opencode-acp",
@@ -83,6 +98,14 @@ def test_inventory_and_factories_share_one_registration_source(
     )
     assert all(item.factory_key for item in registrations)
     registration_by_type = {item.adapter_type: item for item in registrations}
+    native = registration_by_type["agent-run"]
+    assert native.factory_key == "agent-run"
+    assert native.implementation == "AgentWorkerAdapter"
+    assert native.capability_versions == (
+        "native-run:v1",
+        "context-sources:v1",
+        "code-result:v1",
+    )
     assert "turn-completion:v1" in registration_by_type["opencode"].capability_versions
     assert "turn-completion:v1" in registration_by_type["opencode-acp"].capability_versions
     assert "turn-completion:v1" not in registration_by_type["dsh-acp"].capability_versions
@@ -145,10 +168,8 @@ def test_worker_factory_keeps_its_compatibility_signature() -> None:
 def test_reading_inventory_does_not_construct_or_start_an_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from sidera_control_plane.composition import worker_adapters
-
     monkeypatch.setattr(
-        worker_adapters,
+        opencode_acp,
         "OpenCodeACPAdapter",
         lambda **_: pytest.fail("inventory must not construct OpenCode"),
     )

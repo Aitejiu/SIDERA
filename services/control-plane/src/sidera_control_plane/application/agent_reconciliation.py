@@ -79,12 +79,12 @@ class AgentRunReconciler:
             authorizer=services.authorizer,
             clock=self._clock,
         )
-        self._scan_after: dict[tuple[UUID, str], UUID] = {}
-        self._planner_first: dict[UUID, bool] = {}
+        self._scan_after: dict[tuple[UUID | None, str], UUID] = {}
+        self._planner_first: dict[UUID | None, bool] = {}
 
-    def run_once(self, workspace_id: UUID, limit: int = 100) -> ReconcileSummary:
+    def run_once(self, workspace_id: UUID | None, limit: int = 100) -> ReconcileSummary:
         if (
-            type(workspace_id) is not UUID
+            (workspace_id is not None and type(workspace_id) is not UUID)
             or type(limit) is not int
             or not 1 <= limit <= 200
         ):
@@ -169,6 +169,23 @@ class AgentRunReconciler:
                 if self._planning_runner is None:
                     raise AssignmentDenied("planning reconciliation owner unavailable")
                 self._require_planning_original(planning_link)
+                if planning_link.status == "cleanup_pending":
+                    complete = self._planning_runner.drain_original_run(planning_link)
+                    if not complete:
+                        self._observe_planning_original(planning_link)
+                    outcomes.append(
+                        ReconcileOutcome(
+                            planning_link.planning_run_id,
+                            planning_link.start_operation_id,
+                            planning_link.run_id,
+                            "native_planning_cleanup_complete"
+                            if complete
+                            else "native_planning_recovery_required",
+                            observed=int(complete),
+                            recovery_required=not complete,
+                        )
+                    )
+                    continue
                 result = self._planning_runner.reconcile_original_run(planning_link)
                 applied = result is not None and result.status != "stale"
                 if not applied:
@@ -338,6 +355,16 @@ class AgentRunReconciler:
         if self._gateway is None:
             raise AssignmentDenied("Worker observation owner unavailable")
         authority = self._require_original(link)
+        if link.known_unadmitted:
+            return self._outcome(
+                link,
+                "native_admission_pending"
+                if link.status == "pending"
+                else "native_capacity_wait"
+                if link.not_admitted
+                else "native_admission_rejected",
+                recovery_required=link.status == "failed",
+            )
         if link.run_id is None:
             lookup = self._services.execution.get_start(
                 link.workspace_id, link.start_operation_id, grant_id=link.authority_id

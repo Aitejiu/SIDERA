@@ -277,7 +277,31 @@ def test_identity_persists_run_pid_start_time_and_argument_hash(tmp_path: Path) 
 
 def test_full_process_spec_uses_only_the_fixed_loopback_component_list(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    from sidera_control_plane.demo import supervisor
+
+    roots = [
+        supervisor._CONTROL_PLANE_ROOT,
+        supervisor._KNOWLEDGE_ROOT,
+        supervisor._GATEWAY_ROOT,
+    ]
+    selected = []
+
+    def interpreter(project_root):
+        assert project_root in roots
+        selected.append(project_root)
+        return sys.executable
+
+    monkeypatch.setattr(supervisor, "_python_executable", interpreter)
+    node_selections = []
+
+    def node_executable(command):
+        assert command == "node"
+        node_selections.append(command)
+        return str(tmp_path / "node")
+
+    monkeypatch.setattr(supervisor.shutil, "which", node_executable)
     manifest = manifest_for(tmp_path)
     manifest.run_root.mkdir(parents=True)
     create_demo_tokens(manifest.run_root)
@@ -286,6 +310,8 @@ def test_full_process_spec_uses_only_the_fixed_loopback_component_list(
         manifest,
         inherited_env={"PATH": "/usr/bin", "DEEPSEEK_API_KEY": "must-not-leak"},
     )
+    assert selected == roots
+    assert node_selections == ["node"]
 
     assert [spec.name for spec in specs] == [
         "control-plane",
@@ -320,7 +346,31 @@ def test_full_process_spec_uses_only_the_fixed_loopback_component_list(
 
 def test_restore_demo_specs_exclude_all_writers_and_provider_processes(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    from sidera_control_plane.demo import supervisor
+
+    roots = [
+        supervisor._CONTROL_PLANE_ROOT,
+        supervisor._KNOWLEDGE_ROOT,
+        supervisor._GATEWAY_ROOT,
+    ]
+    selected = []
+
+    def interpreter(project_root):
+        assert project_root in roots
+        selected.append(project_root)
+        return sys.executable
+
+    monkeypatch.setattr(supervisor, "_python_executable", interpreter)
+    node_selections = []
+
+    def node_executable(command):
+        assert command == "node"
+        node_selections.append(command)
+        return str(tmp_path / "node")
+
+    monkeypatch.setattr(supervisor.shutil, "which", node_executable)
     manifest = manifest_for(tmp_path).model_copy(
         update={"restore_mode": "read_only"}
     )
@@ -328,6 +378,8 @@ def test_restore_demo_specs_exclude_all_writers_and_provider_processes(
     create_demo_tokens(manifest.run_root)
 
     specs = build_demo_process_specs(manifest, inherited_env={"PATH": "/usr/bin"})
+    assert selected == roots
+    assert node_selections == ["node"]
 
     assert [spec.name for spec in specs] == [
         "control-plane",

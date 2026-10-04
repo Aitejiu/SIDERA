@@ -1,3 +1,4 @@
+from dataclasses import asdict
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -161,6 +162,99 @@ def test_context_patch_is_a_gateway_operation_and_not_allowed_when_disabled() ->
         ModuleLifecycle.DISABLED,
         RuntimeModuleOperation.PATCH,
     )
+
+
+def unknown_stop_operation() -> GatewayOperation:
+    operation = GatewayOperation.create(
+        id=uuid4(),
+        operation_id=uuid4(),
+        workspace_id=uuid4(),
+        task_id=uuid4(),
+        execution_id=uuid4(),
+        session_id=uuid4(),
+        operation_type=GatewayOperationType.STOP_SESSION,
+        module_instance_id=uuid4(),
+        config_version=2,
+        lease_id=uuid4(),
+        fencing_token=3,
+        now=NOW,
+    )
+    operation.start(now=NOW)
+    operation.mark_unknown(failure_code="response_lost", now=NOW)
+    return operation
+
+
+@pytest.mark.parametrize("success", (True, False))
+def test_original_unknown_stop_resolves_without_retry(success: bool) -> None:
+    operation = unknown_stop_operation()
+    before = asdict(operation)
+    operation.resolve_stop(
+        now=NOW,
+        result_ref="session://original" if success else None,
+        failure_code=None if success else "native_stop_failed",
+    )
+    assert asdict(operation) == {
+        **before,
+        "status": GatewayOperationStatus.SUCCEEDED
+        if success
+        else GatewayOperationStatus.FAILED,
+        "result_ref": "session://original" if success else None,
+        "failure_code": None if success else "native_stop_failed",
+        "version": before["version"] + 1,
+    }
+
+
+@pytest.mark.parametrize(
+    ("result_ref", "failure_code"),
+    (
+        (None, None),
+        ("ok", "failed"),
+        ("", None),
+        (" \t", None),
+        (None, ""),
+        (None, " \t"),
+        (" ", "failed"),
+        ("ok", " "),
+    ),
+)
+def test_original_unknown_stop_rejects_ambiguous_or_empty_outcome(
+    result_ref, failure_code
+) -> None:
+    operation = unknown_stop_operation()
+    before = asdict(operation)
+    with pytest.raises(ValidationError):
+        operation.resolve_stop(
+            now=NOW, result_ref=result_ref, failure_code=failure_code
+        )
+    assert asdict(operation) == before
+
+
+@pytest.mark.parametrize(
+    "status",
+    tuple(s for s in GatewayOperationStatus if s is not GatewayOperationStatus.UNKNOWN),
+)
+def test_original_stop_resolution_does_not_broaden_other_statuses(status) -> None:
+    operation = unknown_stop_operation()
+    operation.status = status
+    before = asdict(operation)
+    with pytest.raises(InvalidTransition):
+        operation.resolve_stop(now=NOW, result_ref="session://original")
+    assert asdict(operation) == before
+
+
+@pytest.mark.parametrize(
+    "kind",
+    tuple(
+        t for t in GatewayOperationType if t is not GatewayOperationType.STOP_SESSION
+    ),
+)
+def test_original_stop_resolution_does_not_broaden_other_operations(kind) -> None:
+    operation = unknown_stop_operation()
+    operation.operation_type = kind
+    before = asdict(operation)
+    with pytest.raises(InvalidTransition):
+        operation.resolve_stop(now=NOW, result_ref="session://original")
+    assert asdict(operation) == before
 
 
 def test_evidence_claim_is_candidate_only() -> None:

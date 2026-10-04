@@ -1,10 +1,12 @@
 import hashlib
+import re
 import subprocess
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from subprocess import CompletedProcess
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from sidera_control_plane.application.result_ports import CodeInputReceipt
@@ -162,9 +164,8 @@ class GitWorktreeWorkspaceManager:
 
     def physical_directory(self, manifest: ExecutionWorkspaceManifest) -> Path:
         stored = self._manifests_by_id.get(manifest.id)
-        if stored is None:
-            raise WorkspaceProviderError("prepared workspace identity is unavailable")
-        _require_manifest_identity(stored, manifest)
+        if stored is not None:
+            _require_manifest_identity(stored, manifest)
         if manifest.lifecycle not in {
             WorkspaceLifecycle.READY,
             WorkspaceLifecycle.ACTIVE,
@@ -172,19 +173,41 @@ class GitWorktreeWorkspaceManager:
             WorkspaceLifecycle.RETAINED,
         }:
             raise WorkspaceProviderError("prepared workspace lifecycle is unavailable")
-        location = self._physical_location_by_manifest_id.get(manifest.id)
+        checkout = self._require_checkout(manifest)
+        if stored is None:
+            if not re.fullmatch(
+                r"git-repository://[0-9a-f]{64}", checkout.repository_ref
+            ):
+                raise WorkspaceProviderError("prepared workspace repository is invalid")
+            try:
+                location_id = UUID(urlsplit(manifest.location_ref).netloc)
+            except ValueError:
+                raise WorkspaceProviderError(
+                    "prepared workspace location is invalid"
+                ) from None
+            if (
+                manifest.location_ref != f"git-worktree://{location_id}"
+                or checkout.branch != f"sidera/execution/{location_id}"
+            ):
+                raise WorkspaceProviderError(
+                    "prepared workspace location identity changed"
+                )
+            location = self._workspace_root / str(location_id)
+        else:
+            location = self._physical_location_by_manifest_id.get(manifest.id)
         if location is None or location.is_symlink() or not location.is_dir():
             raise WorkspaceProviderError("prepared workspace directory is unavailable")
         location = location.resolve()
         if self._workspace_root not in location.parents:
             raise WorkspaceProviderError("prepared workspace directory escapes root")
-        checkout = self._require_checkout(manifest)
         repository = self._resolve_repository_for_manifest(manifest, location)
         if self._opaque_repository_ref(repository) != checkout.repository_ref:
             raise WorkspaceProviderError("prepared workspace repository changed")
         self._verify_worktree(
             location, repository=repository, expected_branch=checkout.branch
         )
+        if stored is None:
+            self._remember_manifest(manifest, physical_location=location)
         return location
 
     def refence_not_admitted(

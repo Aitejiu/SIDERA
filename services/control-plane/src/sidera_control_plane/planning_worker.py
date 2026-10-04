@@ -15,11 +15,13 @@ from sidera_agents.ports import ExecutionAuthorizer
 from sidera_control_plane.acceptance_guard import load_acceptance_guard
 from sidera_control_plane.adapters.knowledge_http import KnowledgeHttpAdapter
 from sidera_control_plane.application.agent_reconciliation import AgentRunReconciler
+from sidera_control_plane.application.agent_sources import PlanningContextSourceReader
 from sidera_control_plane.application.agent_worker_adapter import (
     NativeWorkerServices,
     require_gateway_owner,
 )
 from sidera_control_plane.application.context_materialization import ContextMaterializer
+from sidera_control_plane.application.execution_authority import PlanningAuthorityReader
 from sidera_control_plane.application.knowledge_candidate_submission import (
     FileCandidateProposalSpool,
     KnowledgeCandidateSubmissionService,
@@ -99,6 +101,7 @@ class PlanningWorkerRuntime:
     catalog: KnowledgeHttpAdapter
     runner: PlanningRunner | None = None
     native_reconciler: AgentRunReconciler | None = None
+    native_source_reader: PlanningContextSourceReader | None = None
 
 
 def build_planning_worker(
@@ -111,6 +114,8 @@ def build_planning_worker(
     native_wait: Callable[[float], None] | None = None,
     native_poll_interval_seconds: float = 1.0,
     owner_check: Callable[[], bool] | None = None,
+    use_acceptance_guard: bool = True,
+    native_shutdown_check: Callable[[], bool] | None = None,
 ) -> PlanningWorkerRuntime:
     database = Database(settings.database_url)
     catalog = KnowledgeHttpAdapter(
@@ -119,12 +124,12 @@ def build_planning_worker(
         metadata_timeout_seconds=settings.knowledge_metadata_timeout_seconds,
         materialization_timeout_seconds=settings.knowledge_materialization_timeout_seconds,
     )
-    acceptance_guard = load_acceptance_guard()
-    builders = build_planner_adapter_builders(
-        settings,
-        acceptance_guard=acceptance_guard,
-    )
     try:
+        acceptance_guard = load_acceptance_guard() if use_acceptance_guard else None
+        builders = build_planner_adapter_builders(
+            settings,
+            acceptance_guard=acceptance_guard,
+        )
         candidate_submission_service = KnowledgeCandidateSubmissionService(
             FileCandidateProposalSpool(
                 settings.knowledge_candidate_spool_dir,
@@ -140,6 +145,21 @@ def build_planning_worker(
         )
         materializer = ContextMaterializer(catalog)
         run_clock = native_clock or (lambda: datetime.now(UTC))
+        native_source_reader = (
+            None
+            if native_services is None
+            else PlanningContextSourceReader(
+                uow_factory,
+                authorizer=PlanningAuthorityReader(
+                    uow_factory,
+                    principal=lambda: native_services.principal_id,
+                    authorizer=planning_authorizer,
+                    clock=run_clock,
+                ),
+                materializer=materializer,
+                clock=run_clock,
+            )
+        )
         factory = RegistryPlannerAdapterFactory(
             builders,
             temp_root=settings.planning_temp_root,
@@ -167,6 +187,7 @@ def build_planning_worker(
             candidate_submission_service=candidate_submission_service,
             acceptance_guard=acceptance_guard,
             owner_check=owner_check,
+            native_shutdown_check=native_shutdown_check,
         )
         reconciler = PlanningReconciler(
             uow_factory=uow_factory,
@@ -198,6 +219,7 @@ def build_planning_worker(
             catalog=catalog,
             runner=runner,
             native_reconciler=native_reconciler,
+            native_source_reader=native_source_reader,
         )
     except BaseException:
         catalog.close()

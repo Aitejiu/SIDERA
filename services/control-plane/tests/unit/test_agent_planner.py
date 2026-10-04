@@ -1,13 +1,576 @@
 import json
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.planning import PlanningUsage
+from tests.unit.test_agent_worker_adapter import native_start_case  # noqa: F401
 from tests.unit.test_opencode_planner import _planner_input
+
+
+@pytest.fixture
+def planner_drain_case(request):
+    from datetime import timedelta
+
+    from sidera_agents.contracts import (
+        EffectiveConfig,
+        EventPage,
+        RunEvent,
+        RunSnapshot,
+        RuntimeRef,
+        StartLookup,
+        StartReceipt,
+        StopReceipt,
+    )
+
+    from sidera_control_plane.application.agent_planner_adapter import (
+        AgentPlannerAdapter,
+    )
+    from sidera_control_plane.application.agent_worker_adapter import (
+        request_fingerprint,
+    )
+    from sidera_control_plane.domain.planning_authority import (
+        PlanningAgentLink,
+        PlanningAuthority,
+    )
+
+    s = request.getfixturevalue("native_start_case")
+    start = s.request
+    run_id, response_id, planning_run_id, planning_request_id = (
+        uuid4() for _ in range(4)
+    )
+    runtime = RuntimeRef(
+        workspace_id=start.profile_ref.workspace_id, runtime_id=uuid4()
+    )
+    authority = PlanningAuthority(
+        start.grant_id,
+        start.profile_ref.workspace_id,
+        planning_request_id,
+        planning_run_id,
+        uuid4(),
+        1,
+        start.operation_id,
+        "operator",
+        uuid4(),
+        start.profile_ref,
+        runtime,
+        uuid4(),
+        "planner",
+        1,
+        start.workspace,
+        ("run.read", "run.stop"),
+    )
+    receipt = StartReceipt(
+        operation_id=start.operation_id,
+        status="accepted",
+        run_id=run_id,
+        reason_code=None,
+    )
+    state = SimpleNamespace(
+        link=PlanningAgentLink(
+            authority.workspace_id,
+            planning_run_id,
+            authority.id,
+            start.operation_id,
+            start.profile_ref,
+            start,
+            request_fingerprint(start),
+            "running",
+            run_id,
+            receipt,
+        ),
+        owner=True,
+        fail_save=False,
+        fail_commit=False,
+        fail_observation=False,
+        stops=[],
+        queries=[],
+        cursors=[],
+        starts=[],
+        receipt=StopReceipt(
+            operation_id=start.operation_id,
+            run_id=run_id,
+            status="stopped",
+            reason_code=None,
+            evidence_sequence=7,
+        ),
+        snapshot=RunSnapshot(
+            run_id=run_id,
+            workspace_id=authority.workspace_id,
+            profile_ref=start.profile_ref,
+            policy="bounded",
+            state="stopped",
+            input_open=False,
+            active_response_id=None,
+            effective_config=EffectiveConfig(
+                profile_ref=start.profile_ref,
+                config_hash="test-pin",
+                runtime_ref=runtime,
+                actual_runtime_version="test-1",
+                selected_model=None,
+                observed_model=None,
+                inherited_fields=(),
+                applied_fields=(),
+                resource_refs=(),
+                context_receipts=(),
+            ),
+            last_event_sequence=7,
+            capabilities={},
+            reason_code=None,
+        ),
+    )
+    state.events = tuple(
+        RunEvent(
+            run_id=run_id,
+            sequence=i,
+            kind="response.started"
+            if i == 1
+            else "run.closed"
+            if i == 7
+            else "progress.updated",
+            occurred_at=s.now,
+            operation_id=start.operation_id,
+            response_id=response_id if i < 7 else None,
+            data={"status": "stopped"} if i == 7 else {},
+        )
+        for i in range(1, 8)
+    )
+
+    def save(link, **changes):
+        assert link == state.link
+        if state.fail_save:
+            raise RuntimeError("controlled original CAS failure")
+        state.link = replace(link, **changes)
+        return state.link
+
+    def observation(link, *, event_cursor, response_id, closed):
+        result = save(
+            link,
+            event_cursor=event_cursor,
+            response_id=response_id,
+            status="closed" if closed else link.status,
+            closed=closed,
+        )
+        if state.fail_observation:
+            raise RuntimeError("controlled original cursor save failure")
+        return result
+
+    saved_run = SimpleNamespace(
+        planning_request_id=planning_request_id,
+        operation_id=start.operation_id,
+        profile_snapshot=SimpleNamespace(
+            profile_id=authority.planning_profile_id,
+            profile_version=1,
+            planner_agent_ref=start.profile_ref,
+            execution_mode="native_profile",
+        ),
+    )
+    lease = SimpleNamespace(
+        id=authority.lease_id,
+        workspace_id=authority.workspace_id,
+        planning_run_id=planning_run_id,
+        owner_id=authority.owner_id,
+        fencing_token=1,
+        status=SimpleNamespace(value="active"),
+        expires_at=s.now + timedelta(minutes=1),
+    )
+    uow = SimpleNamespace(
+        planning_authorities=SimpleNamespace(
+            get=lambda *args, **kwargs: authority,
+            get_link=lambda *args, **kwargs: state.link,
+            save_link=save,
+            save_original_observation=observation,
+        ),
+        planning_runs=SimpleNamespace(get=lambda *args: saved_run),
+        planning_requests=SimpleNamespace(
+            get=lambda *args: SimpleNamespace(id=planning_request_id)
+        ),
+        planning_leases=SimpleNamespace(get=lambda *args: lease),
+    )
+
+    @contextmanager
+    def owned_uow():
+        original = state.link
+        try:
+            yield uow
+            if state.fail_commit or not state.owner:
+                raise RuntimeError("controlled owned commit failure")
+        except Exception:
+            state.link = original
+            raise
+
+    def stop(request):
+        assert state.link.status == "cleanup_pending", (
+            "Stop preceded its durable one-way latch"
+        )
+        assert (
+            request.workspace_id,
+            request.run_id,
+            request.operation_id,
+            request.grant_id,
+        ) == (
+            authority.workspace_id,
+            run_id,
+            start.operation_id,
+            authority.id,
+        )
+        state.stops.append(request)
+        return state.receipt
+
+    def query(workspace, supplied_run, operation, *, grant_id):
+        assert (workspace, supplied_run, operation, grant_id) == (
+            authority.workspace_id,
+            run_id,
+            start.operation_id,
+            authority.id,
+        )
+        state.queries.append(operation)
+        return state.receipt
+
+    def events(workspace, supplied_run, after_sequence, limit=100, *, grant_id):
+        assert (workspace, supplied_run, grant_id) == (
+            authority.workspace_id,
+            run_id,
+            authority.id,
+        )
+        state.cursors.append(after_sequence)
+        visible = tuple(
+            event for event in state.events if event.sequence > after_sequence
+        )[:limit]
+        return EventPage(
+            events=visible,
+            next_sequence=visible[-1].sequence if visible else after_sequence,
+            has_more=False,
+        )
+
+    def no_admission():
+        pytest.fail("Original Planner drain entered a new-start permit")
+
+    adapter = AgentPlannerAdapter(
+        services=SimpleNamespace(
+            principal_id="operator",
+            start_admission=no_admission,
+            execution=SimpleNamespace(
+                start=lambda value: state.starts.append(value),
+                stop=stop,
+                get_stop=query,
+                get_run=lambda *args, **kwargs: state.snapshot,
+                list_events=events,
+                get_start=lambda *args, **kwargs: StartLookup(
+                    found=True, receipt=receipt
+                ),
+            ),
+        ),
+        uow_factory=owned_uow,
+        workspace_provider=None,
+        materializer=None,
+        authorizer=None,
+        owner_check=lambda: state.owner,
+        clock=lambda: s.now,
+    )
+    return SimpleNamespace(
+        adapter=adapter,
+        state=state,
+        authority=authority,
+        response_id=response_id,
+        lease=lease,
+    )
+
+
+def test_planner_halt_unknown_stop_does_not_close_stopped_snapshot_without_cursor(
+    planner_drain_case,
+):
+    s = planner_drain_case
+    s.state.receipt = type(s.state.receipt).model_validate(
+        {**s.state.receipt.model_dump(), "status": "unknown", "evidence_sequence": None}
+    )
+    result = s.adapter._halt(
+        None, s.state.link, "native_cancelled", PlanningUsage.unknown()
+    )
+    assert result.code == "native_cleanup_pending" and result.unknown_outcome is True
+    assert s.state.link.status == "cleanup_pending" and not s.state.link.closed
+    assert (
+        s.state.link.event_cursor == 0
+        and len(s.state.stops) == 1
+        and not s.state.starts
+    )
+
+
+def test_planner_drain_stop_once_queries_original_and_consumes_real_cursor(
+    planner_drain_case,
+):
+    s = planner_drain_case
+    stopped = s.state.receipt
+    s.state.receipt = type(stopped).model_validate(
+        {**stopped.model_dump(), "status": "accepted", "evidence_sequence": None}
+    )
+    assert s.adapter.drain_original_run(s.state.link) is False
+    assert not s.state.link.closed and len(s.state.stops) == 1
+    s.state.receipt = stopped
+    assert s.adapter.drain_original_run(s.state.link) is True
+    assert s.state.queries == [s.authority.operation_id] and len(s.state.stops) == 1
+    assert s.state.link.closed and s.state.link.event_cursor == 7
+    assert s.state.link.response_id == s.response_id and s.state.cursors == [0]
+    assert s.adapter.drain_original_run(s.state.link) is True and not s.state.starts
+
+
+@pytest.mark.parametrize(
+    "wrong",
+    (
+        "failed",
+        "unknown",
+        "missing_evidence",
+        "run",
+        "operation",
+        "input",
+        "response",
+        "snapshot_runtime",
+        "watermark",
+        "gap",
+    ),
+)
+def test_planner_drain_unconfirmed_original_proof_never_closes(
+    planner_drain_case, wrong
+):
+    s = planner_drain_case
+    if wrong in {"failed", "unknown"}:
+        s.state.receipt = type(s.state.receipt).model_validate(
+            {**s.state.receipt.model_dump(), "status": wrong}
+        )
+    elif wrong == "missing_evidence":
+        s.state.receipt = s.state.receipt.model_copy(update={"evidence_sequence": None})
+    elif wrong in {"run", "operation"}:
+        s.state.receipt = s.state.receipt.model_copy(
+            update={"run_id" if wrong == "run" else "operation_id": uuid4()}
+        )
+    elif wrong == "input":
+        s.state.snapshot = s.state.snapshot.model_copy(update={"input_open": True})
+    elif wrong == "response":
+        s.state.snapshot = s.state.snapshot.model_copy(
+            update={"active_response_id": uuid4()}
+        )
+    elif wrong == "snapshot_runtime":
+        config = s.state.snapshot.effective_config.model_copy(
+            update={
+                "runtime_ref": s.authority.runtime_ref.model_copy(
+                    update={"runtime_id": uuid4()}
+                )
+            }
+        )
+        s.state.snapshot = s.state.snapshot.model_copy(
+            update={"effective_config": config}
+        )
+    elif wrong == "watermark":
+        s.state.snapshot = s.state.snapshot.model_copy(
+            update={"last_event_sequence": 8}
+        )
+    else:
+        s.state.events = s.state.events[1:]
+    assert s.adapter.drain_original_run(s.state.link) is False
+    assert s.state.link.status == (
+        "running" if wrong == "snapshot_runtime" else "cleanup_pending"
+    )
+    assert not s.state.link.closed and not s.state.starts
+    assert len(s.state.stops) == (0 if wrong == "snapshot_runtime" else 1)
+
+
+@pytest.mark.parametrize("failure", ("save", "commit", "owner"))
+def test_planner_drain_failed_latch_never_sends_stop(planner_drain_case, failure):
+    from sidera_agents.errors import AgentError
+
+    s = planner_drain_case
+    original = s.state.link
+    s.state.fail_save = failure == "save"
+    s.state.fail_commit = failure == "commit"
+    s.state.owner = failure != "owner"
+    if failure == "owner":
+        with pytest.raises(AgentError, match="owner"):
+            s.adapter.drain_original_run(original)
+    else:
+        assert s.adapter.drain_original_run(original) is False
+    assert s.state.link == original and not s.state.stops and not s.state.starts
+
+
+def test_planner_drain_uses_saved_state_not_supplied_fake_closed_fact(
+    planner_drain_case,
+):
+    s = planner_drain_case
+    supplied = replace(s.state.link, status="closed", closed=True)
+    assert s.adapter.drain_original_run(supplied) is True
+    assert (
+        s.state.link.closed
+        and s.state.link.event_cursor == 7
+        and len(s.state.stops) == 1
+    )
+
+
+def test_planner_drain_cursor_failure_rolls_back_and_next_tick_queries_original(
+    planner_drain_case,
+):
+    s = planner_drain_case
+    s.state.fail_observation = True
+    assert s.adapter.drain_original_run(s.state.link) is False
+    assert not s.state.link.closed and s.state.link.event_cursor == 0
+    assert s.state.link.status == "cleanup_pending" and len(s.state.stops) == 1
+    s.state.fail_observation = False
+    assert s.adapter.drain_original_run(s.state.link) is True
+    assert (
+        len(s.state.stops) == len(s.state.queries) == 1
+        and s.state.link.event_cursor == 7
+    )
+
+
+def test_planner_drain_original_unknown_start_queries_and_never_restarts(
+    planner_drain_case,
+):
+    s = planner_drain_case
+    s.state.link = replace(
+        s.state.link, status="unknown", run_id=None, start_receipt=None
+    )
+    assert s.adapter.drain_original_run(s.state.link) is True
+    assert not s.state.starts and len(s.state.stops) == 1 and s.state.link.closed
+
+
+def test_planner_drain_natural_completion_scans_without_stop(planner_drain_case):
+    s = planner_drain_case
+    s.state.snapshot = type(s.state.snapshot).model_validate(
+        {**s.state.snapshot.model_dump(), "state": "completed"}
+    )
+    s.state.events = (
+        *s.state.events[:-1],
+        s.state.events[-1].model_copy(update={"data": {"status": "completed"}}),
+    )
+    assert s.adapter.drain_original_run(s.state.link) is True
+    assert not s.state.stops and not s.state.queries
+    assert s.state.link.closed and s.state.link.event_cursor == 7
+
+
+def test_planner_drain_expired_original_uses_historical_read_and_stop_only(
+    planner_drain_case,
+):
+    from datetime import timedelta
+
+    s = planner_drain_case
+    s.lease.expires_at -= timedelta(days=1)
+    s.lease.status = SimpleNamespace(value="expired")
+    assert s.adapter.drain_original_run(s.state.link) is True
+    assert (
+        len(s.state.stops) == 1
+        and not s.state.starts
+        and s.state.link.event_cursor == 7
+    )
+
+
+@pytest.mark.parametrize("closing", (False, True))
+def test_original_cleanup_or_shutdown_never_enters_planning_business_recovery(
+    planner_drain_case, closing
+):
+    from sidera_control_plane.application.planning_runner import PlanningRunner
+
+    def no_write_ownership():
+        pytest.fail("Cleanup or shutdown entered PlanningRun result ownership")
+
+    runner = PlanningRunner(
+        uow_factory=no_write_ownership,
+        adapter_factory=None,
+        owner_id="planner",
+        native_shutdown_check=lambda: closing,
+    )
+    link = replace(
+        planner_drain_case.state.link,
+        status="running" if closing else "cleanup_pending",
+    )
+    assert runner.reconcile_original_run(link) is None
+
+
+@pytest.mark.parametrize("busy", (False, True))
+@pytest.mark.parametrize("code", ("permission_denied", "control_plane_closed"))
+def test_planner_start_admission_denies_before_starting_without_unknown(
+    request, monkeypatch, busy, code
+):
+    from sidera_agents.contracts import StartReceipt
+
+    from sidera_control_plane.application.agent_planner_adapter import (
+        AgentPlannerAdapter,
+    )
+    from sidera_control_plane.application.agent_worker_adapter import (
+        request_fingerprint,
+    )
+    from sidera_control_plane.application.planner_runtime import PlannerRunControl
+    from sidera_control_plane.domain.planning_authority import PlanningAgentLink
+
+    s = request.getfixturevalue("native_start_case")
+    planner_input, _ = _planner_input()
+    request = s.request.model_copy(update={"operation_id": planner_input.operation_id})
+    link = PlanningAgentLink(
+        request.profile_ref.workspace_id,
+        planner_input.planning_run_id,
+        request.grant_id,
+        request.operation_id,
+        request.profile_ref,
+        request,
+        request_fingerprint(request),
+        "pending" if not busy else "waiting_capacity",
+        start_receipt=None
+        if not busy
+        else StartReceipt(
+            operation_id=request.operation_id,
+            status="busy",
+            run_id=None,
+            reason_code=None,
+        ),
+    )
+    state = SimpleNamespace(link=link, changes=[], starts=[], stops=[])
+
+    def save_link(supplied, **changes):
+        state.changes.append(changes)
+        pytest.fail("Known admission denial changed the original Planner intention")
+
+    services = SimpleNamespace(
+        authorizer=SimpleNamespace(require=lambda *args: None),
+        start_admission=s.permit,
+        execution=SimpleNamespace(
+            start=lambda request: state.starts.append(request),
+            stop=lambda request: state.stops.append(request),
+        ),
+    )
+    adapter = AgentPlannerAdapter(
+        services=services,
+        uow_factory=lambda: nullcontext(s.uow),
+        workspace_provider=None,
+        materializer=None,
+        authorizer=None,
+        owner_check=lambda: True,
+        clock=lambda: s.now,
+    )
+    monkeypatch.setattr(adapter, "_run_authorizer", services.authorizer, raising=False)
+    monkeypatch.setattr(
+        adapter, "_prepare", lambda supplied, control: (link, supplied, 0)
+    )
+    monkeypatch.setattr(adapter, "_save", save_link)
+    s.state.denied = code
+    control = PlannerRunControl(
+        request.operation_id,
+        s.now,
+        None,
+        owner_id="planner",
+        lease_id=uuid4(),
+        fencing_token=1,
+    )
+    outcome = adapter.plan(planner_input, control)
+    assert outcome.code == code and outcome.unknown_outcome is False
+    assert (
+        state.link == link
+        and not state.changes
+        and not state.starts
+        and not state.stops
+    )
+    assert s.state.permit == ["enter"]
 
 
 def test_private_workspace_reuses_original_directory_without_clearing(tmp_path):

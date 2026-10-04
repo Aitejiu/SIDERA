@@ -81,6 +81,9 @@ def reconcile_worker_transition(
     response: Response,
     service: Annotated[CommandService, Depends(get_command_service)],
     settings: Annotated[Settings, Depends(get_settings)],
+    trusted_identity: Annotated[
+        TrustedAssignmentIdentity | None, Depends(get_trusted_assignment_identity)
+    ] = None,
 ) -> CommandResponse:
     _require_transition_route(
         request,
@@ -88,7 +91,7 @@ def reconcile_worker_transition(
         worker_transition_id=worker_transition_id,
         command_type="ReconcileWorkerTransition",
     )
-    return _execute_command(request, response, service, settings)
+    return _execute_command(request, response, service, settings, trusted_identity)
 
 
 @router.post(
@@ -103,6 +106,9 @@ def confirm_worker_transition_stopped(
     response: Response,
     service: Annotated[CommandService, Depends(get_command_service)],
     settings: Annotated[Settings, Depends(get_settings)],
+    trusted_identity: Annotated[
+        TrustedAssignmentIdentity | None, Depends(get_trusted_assignment_identity)
+    ] = None,
 ) -> CommandResponse:
     _require_transition_route(
         request,
@@ -110,7 +116,7 @@ def confirm_worker_transition_stopped(
         worker_transition_id=worker_transition_id,
         command_type="ConfirmWorkerTransitionStopped",
     )
-    return _execute_command(request, response, service, settings)
+    return _execute_command(request, response, service, settings, trusted_identity)
 
 
 @router.post(
@@ -125,6 +131,9 @@ def recover_worker_transition(
     response: Response,
     service: Annotated[CommandService, Depends(get_command_service)],
     settings: Annotated[Settings, Depends(get_settings)],
+    trusted_identity: Annotated[
+        TrustedAssignmentIdentity | None, Depends(get_trusted_assignment_identity)
+    ] = None,
 ) -> CommandResponse:
     _require_transition_route(
         request,
@@ -132,7 +141,7 @@ def recover_worker_transition(
         worker_transition_id=worker_transition_id,
         command_type="RecoverWorkerTransition",
     )
-    return _execute_command(request, response, service, settings)
+    return _execute_command(request, response, service, settings, trusted_identity)
 
 
 def _execute_command(

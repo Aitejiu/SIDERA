@@ -1,5 +1,6 @@
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -57,6 +58,105 @@ from sidera_control_plane.domain.workspace import (
 from tests.unit.test_context_package_v2 import _materialization_v1
 
 NOW = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("missing", ("session", "link"))
+def test_native_stop_missing_post_delivery_original_remains_unknown(
+    monkeypatch, missing
+):
+    from sidera_control_plane.application.agent_worker_adapter import (
+        AgentWorkerAdapter,
+        native_capabilities,
+    )
+    from sidera_control_plane.domain.execution import ExecutionSessionStatus
+    from sidera_control_plane.domain.gateway import DeliveryOutcome, DeliveryResult
+
+    workspace_id, execution_id, lease_id, session_id, command_id = (
+        uuid4() for _ in range(5)
+    )
+    context = SimpleNamespace(execution=SimpleNamespace(stop_requested=True))
+    original = object()
+    session = SimpleNamespace(
+        id=session_id,
+        execution_id=execution_id,
+        adapter_session_id="original-session",
+        process_ref="original-process",
+        capability_snapshot=native_capabilities(),
+        last_sequence=0,
+        last_activity_at=NOW,
+        status=ExecutionSessionStatus.ACTIVE,
+    )
+    session_reads, link_reads, unknown, stops = [], [], [], []
+
+    def get_session(actual_id, actual_workspace, **kwargs):
+        assert (actual_id, actual_workspace) == (session_id, workspace_id)
+        session_reads.append(kwargs)
+        if kwargs:
+            assert kwargs == {"for_update": True}
+            return session
+        if missing == "link":
+            return SimpleNamespace(status=ExecutionSessionStatus.CLOSED)
+
+    def get_link(actual_workspace, actual_execution):
+        assert (actual_workspace, actual_execution) == (workspace_id, execution_id)
+        link_reads.append("read")
+        if len(link_reads) == 1:
+            return original
+
+    uow = SimpleNamespace(
+        execution_authorities=SimpleNamespace(get_link=get_link),
+        gateway_operations=SimpleNamespace(get_by_operation_id=lambda *args: None),
+        sessions=SimpleNamespace(get_any=get_session),
+    )
+    adapter = object.__new__(AgentWorkerAdapter)
+    gateway = object.__new__(WorkerGateway)
+    gateway._owner_check = None
+    gateway._uow_factory = lambda: nullcontext(uow)
+    gateway._native_services = SimpleNamespace(principal_id="operator")
+    gateway._begin_operation = lambda *args, **kwargs: SimpleNamespace(
+        completed=False, recovery_required=False
+    )
+    gateway._load_context_by_ids = lambda **kwargs: context
+    gateway._adapter_for_context = lambda *args, **kwargs: adapter
+    gateway._mark_operation_unknown = lambda *args: unknown.append(args)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Missing Stop original was confirmed or ingested")
+
+    gateway._persist_stop_success = forbidden
+    gateway.sync_session = forbidden
+    gateway._event_ingestor = SimpleNamespace(ingest_original_page=forbidden)
+
+    def stop(self, handle, *, operation_id):
+        assert self is adapter and handle.execution_session_id == session_id
+        stops.append(operation_id)
+        return DeliveryResult(operation_id, DeliveryOutcome.DELIVERED, 3, None)
+
+    monkeypatch.setattr(AgentWorkerAdapter, "stop_session", stop)
+    message = OutboxMessage(
+        uuid4(),
+        uuid4(),
+        STOP_TOPIC,
+        {
+            "workspace_id": str(workspace_id),
+            "aggregate_id": str(execution_id),
+            "lease_id": str(lease_id),
+            "session_id": str(session_id),
+            "command_id": str(command_id),
+            "fencing_token": 2,
+        },
+        0,
+        uuid4(),
+    )
+    with pytest.raises(
+        GatewayRecoveryRequired, match="stop confirmation could not be persisted"
+    ) as unconfirmed:
+        gateway.handle_stop(message)
+    assert isinstance(unconfirmed.value.__cause__, GatewayRecoveryRequired)
+    assert str(unconfirmed.value.__cause__) == f"original stop {missing} is unavailable"
+    assert len(stops) == len(unknown) == 1 and unknown[0][:2] == (stops[0], context)
+    assert session_reads == [{"for_update": True}, {}]
+    assert len(link_reads) == (1 if missing == "session" else 2)
 
 
 def _completion_context(
@@ -490,6 +590,90 @@ def test_assignment_lease_keeper_requires_renew_interval_below_half_ttl() -> Non
             lease_ttl_seconds=30,
             renew_interval_seconds=15,
         )
+
+
+def test_gateway_stop_only_consumer_never_claims_assignment_or_runs_active_sync() -> (
+    None
+):
+    assignment, stop = _message(), _message(STOP_TOPIC)
+    store = RecordingStore((assignment, stop))
+    gateway = RecordingGateway()
+    runner = GatewayAssignmentRunner(
+        store, gateway, active_session_sync=gateway.sync_active_demo_sessions
+    )
+    assert runner.run_stops_once() == (1, 1, 0)
+    assert store.claim_topics_history == [{STOP_TOPIC}]
+    assert gateway.messages == [stop] and gateway.active_session_syncs == 0
+    assert store.acknowledged == [(stop.id, stop.claim_token)]
+    assert assignment.id not in store.claimed_ids
+
+
+@pytest.mark.parametrize("size", (0, -1, 1001))
+def test_gateway_stop_only_consumer_preserves_batch_validation(size) -> None:
+    store, gateway = RecordingStore(()), RecordingGateway()
+    with pytest.raises(ValueError):
+        GatewayAssignmentRunner(store, gateway).run_stops_once(size)
+    assert not store.claim_topics_history and not gateway.messages
+
+
+def test_gateway_stop_only_consumer_checks_actual_owner_before_claim() -> None:
+    from sidera_agents.errors import AgentError
+
+    store, gateway = RecordingStore(()), RecordingGateway()
+    with pytest.raises(AgentError) as lost:
+        GatewayAssignmentRunner(
+            store, gateway, owner_check=lambda: False
+        ).run_stops_once()
+    assert lost.value.code == "gateway_owner_lost"
+    assert not store.claim_topics_history and not gateway.messages
+
+
+def test_gateway_close_claim_fence_blocks_assignment_after_first_stop() -> None:
+    eligible = [True]
+    assignment, stop = _message(), _message(STOP_TOPIC)
+    store = RecordingStore((assignment, stop))
+
+    class ClosingGateway(RecordingGateway):
+        def handle(self, message):
+            super().handle(message)
+            eligible[0] = False
+
+    gateway = ClosingGateway()
+    runner = GatewayAssignmentRunner(
+        store,
+        gateway,
+        active_session_sync=gateway.sync_active_demo_sessions,
+        assignment_claim_check=lambda: eligible[0],
+    )
+    assert runner.run_once() == (1, 1, 0)
+    assert store.claim_topics_history == [{STOP_TOPIC}]
+    assert gateway.messages == [stop] and gateway.active_session_syncs == 0
+
+
+def test_gateway_close_claim_fence_blocks_late_assignment_and_active_sync() -> None:
+    first, late = _message(), _message()
+    store = PublishingStore((first,))
+    gateway = GatedGateway(first)
+    eligible = [True]
+    runner = GatewayAssignmentRunner(
+        store,
+        gateway,
+        start_concurrency=2,
+        active_session_sync=gateway.sync_active_demo_sessions,
+        assignment_claim_check=lambda: eligible[0],
+    )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(runner.run_once, 3)
+        try:
+            assert gateway.first_started.wait(1)
+            eligible[0] = False
+            store.publish(late)
+        finally:
+            gateway.release_first.set()
+        assert future.result(timeout=2) == (1, 1, 0)
+    assert gateway.messages == [first] and gateway.active_session_syncs == 0
+    assert store.claim_topics_history.count({ASSIGNMENT_TOPIC}) == 1
+    assert late.id not in store.claimed_ids
 
 
 def test_gateway_runner_claims_assignment_and_stop_topics_and_acknowledges() -> None:

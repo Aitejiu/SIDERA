@@ -97,6 +97,7 @@ class CollaborationReconciler:
         recovery_limit: int = 100,
         default_workspace_id: UUID | None = None,
         default_root_task_id: UUID | None = None,
+        scan_all_workspaces: bool = False,
         governance_reconciler: CollaborationGovernanceReconciler | None = None,
         evaluation_gate: EvaluationGate | None = None,
     ) -> None:
@@ -117,6 +118,8 @@ class CollaborationReconciler:
         self._recovery_limit = recovery_limit
         self._default_workspace_id = default_workspace_id
         self._default_root_task_id = default_root_task_id
+        self._scan_all_workspaces = scan_all_workspaces
+        self._scope_after: tuple[UUID, UUID] | None = None
         self._governance_reconciler = governance_reconciler
         self._evaluation_gate = evaluation_gate
 
@@ -144,18 +147,18 @@ class CollaborationReconciler:
                 limit=self._recovery_limit,
                 workspace_id=target_workspace,
             )
-            roots = self._candidate_roots(uow, target_workspace, target_root)
-            for candidate_root in roots:
+            scopes = self._candidate_scopes(uow, target_workspace, target_root)
+            for candidate_workspace, candidate_root in scopes:
                 if target_workspace is None:
-                    continue
+                    self._scope_after = (candidate_workspace, candidate_root)
                 target_cursor = uow.projection_changes.latest_target_cursor(
-                    target_workspace,
+                    candidate_workspace,
                     "collaboration_runtime",
                     candidate_root,
                 )
                 prepared = self._prepare_root(
                     uow,
-                    workspace_id=target_workspace,
+                    workspace_id=candidate_workspace,
                     root_task_id=candidate_root,
                     fact_cursor=target_cursor,
                     owner_id=owner,
@@ -310,6 +313,27 @@ class CollaborationReconciler:
                     payload=_attention_payload(prepared, failure, now=now),
                 )
             return evaluation
+
+    def _candidate_scopes(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        workspace_id: UUID | None,
+        root_task_id: UUID | None,
+    ) -> tuple[tuple[UUID, UUID], ...]:
+        if workspace_id is not None:
+            return tuple(
+                (workspace_id, root)
+                for root in self._candidate_roots(uow, workspace_id, root_task_id)
+            )
+        if not self._scan_all_workspaces:
+            return ()
+        limit = min(self._recovery_limit, 200)
+        scopes = uow.plans.list_root_scopes_with_snapshots(
+            after=self._scope_after, limit=limit
+        )
+        if not scopes and self._scope_after is not None:
+            scopes = uow.plans.list_root_scopes_with_snapshots(limit=limit)
+        return scopes
 
     @staticmethod
     def _candidate_roots(

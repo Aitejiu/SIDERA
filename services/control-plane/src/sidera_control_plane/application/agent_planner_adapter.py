@@ -1,11 +1,20 @@
 """The CP planning contract over one bounded public agents Run."""
 
 import time
+from contextlib import ExitStack, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sidera_agents.contracts import RunStart, RunStop
+from sidera_agents.contracts import (
+    EventPage,
+    RunSnapshot,
+    RunStart,
+    RunStop,
+    StartLookup,
+    StartReceipt,
+    StopReceipt,
+)
 from sidera_agents.errors import AgentError
 
 from sidera_control_plane.application.agent_sources import (
@@ -21,6 +30,7 @@ from sidera_control_plane.application.agent_worker_adapter import (
 )
 from sidera_control_plane.application.execution_authority import (
     PlanningActionTarget,
+    PlanningAuthorityReader,
     require_active_planning,
 )
 from sidera_control_plane.application.planner_contract import (
@@ -59,12 +69,18 @@ class AgentPlannerAdapter:
         self._services, self._uow_factory = services, uow_factory
         self._workspace_provider, self._authorizer = workspace_provider, authorizer
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._run_authorizer = PlanningAuthorityReader(
+            uow_factory,
+            principal=lambda: services.principal_id,
+            authorizer=authorizer,
+            clock=self._clock,
+        )
         self._wait = wait or time.sleep
         self._poll_interval = poll_interval_seconds
         self._owner_check = owner_check
         self._sources = PlanningContextSourceReader(
             uow_factory,
-            authorizer=services.authorizer,
+            authorizer=self._run_authorizer,
             materializer=materializer,
             clock=self._clock,
         )
@@ -109,39 +125,50 @@ class AgentPlannerAdapter:
                     usage,
                 )
             try:
-                self._services.authorizer.require(
+                self._run_authorizer.require(
                     link.authority_id, "profile.read", link.profile_ref
                 )
             except (AgentError, DomainError):
                 return self._halt(planner_input, link, "native_authority_lost", usage)
             if link.status in {"pending", "waiting_capacity"}:
-                try:
-                    link = self._save(link, status="starting")
-                    self._services.authorizer.require(
-                        link.authority_id, "run.start", link.profile_ref
-                    )
-                    self._services.authorizer.require(
-                        link.authority_id,
-                        "workspace.execute",
-                        link.start_request.workspace,
-                    )
-                    require_gateway_owner(self._owner_check)
-                    receipt = self._services.execution.start(link.start_request)
-                    require_gateway_owner(self._owner_check)
-                    link = self._record_receipt(link, receipt)
-                except Exception:  # noqa: BLE001 - Preserve uncertain public admission or commit.
-                    require_gateway_owner(self._owner_check)
-                    # A failed public call or receipt commit cannot prove non-admission.
-                    link = self._original(planner_input)
-                    if link is None:
-                        return self._failure("native_admission_unknown", True, usage)
-                    if link.status != "starting":
-                        return self.classify_failure(
-                            planner_input, "native_admission_unknown", usage=usage
+                with ExitStack() as admission:
+                    try:
+                        admission.enter_context(
+                            (self._services.start_admission or nullcontext)()
                         )
-                    link = self._try_save(
-                        link, status="unknown", reason_code="native_admission_unknown"
-                    )
+                    except AgentError as exc:
+                        return self._failure(exc.code, False, usage)
+                    try:
+                        link = self._save(link, status="starting")
+                        self._run_authorizer.require(
+                            link.authority_id, "run.start", link.profile_ref
+                        )
+                        self._run_authorizer.require(
+                            link.authority_id,
+                            "workspace.execute",
+                            link.start_request.workspace,
+                        )
+                        require_gateway_owner(self._owner_check)
+                        receipt = self._services.execution.start(link.start_request)
+                        require_gateway_owner(self._owner_check)
+                        link = self._record_receipt(link, receipt)
+                    except Exception:  # noqa: BLE001 - Preserve uncertain public admission or commit.
+                        require_gateway_owner(self._owner_check)
+                        # A failed public call or receipt commit cannot prove non-admission.
+                        link = self._original(planner_input)
+                        if link is None:
+                            return self._failure(
+                                "native_admission_unknown", True, usage
+                            )
+                        if link.status != "starting":
+                            return self.classify_failure(
+                                planner_input, "native_admission_unknown", usage=usage
+                            )
+                        link = self._try_save(
+                            link,
+                            status="unknown",
+                            reason_code="native_admission_unknown",
+                        )
             elif link.run_id is None:
                 try:
                     self._require_original(link, "run.read")
@@ -706,6 +733,7 @@ class AgentPlannerAdapter:
         )
 
     def _require_original(self, link, action):
+        require_gateway_owner(self._owner_check)
         with self._uow_factory() as uow:
             saved = uow.planning_authorities.get_link(
                 link.workspace_id, link.planning_run_id
@@ -715,21 +743,30 @@ class AgentPlannerAdapter:
                 saved.start_operation_id,
                 saved.run_id,
                 saved.request_sha256,
+                saved.start_request,
+                saved.profile_ref,
             ) != (
                 link.authority_id,
                 link.start_operation_id,
                 link.run_id,
                 link.request_sha256,
+                link.start_request,
+                link.profile_ref,
             ):
                 raise AgentError(
                     "permission_denied", "Original planning Run is unavailable."
                 )
-        self._services.authorizer.require(link.authority_id, action, link.workspace_id)
+            if request_fingerprint(link.start_request) != link.request_sha256:
+                raise AgentError(
+                    "permission_denied", "Original planning intention changed."
+                )
+        self._run_authorizer.require(link.authority_id, action, link.workspace_id)
+        require_gateway_owner(self._owner_check)
 
     def _check_snapshot(self, link, snapshot):
         with self._uow_factory() as uow:
             authority = uow.planning_authorities.get(link.authority_id)
-        if authority is None or (
+        if not isinstance(snapshot, RunSnapshot) or authority is None or (
             snapshot.run_id,
             snapshot.workspace_id,
             snapshot.profile_ref,
@@ -748,6 +785,223 @@ class AgentPlannerAdapter:
                 "configuration_mismatch", "Native planning Run identity changed."
             )
 
+    def drain_original_run(self, expected: PlanningAgentLink) -> bool:
+        return self._drain_original(expected, reason_code=expected.reason_code)
+
+    def _drain_original(self, link, *, reason_code):
+        require_gateway_owner(self._owner_check)
+        try:
+            self._require_original(link, "run.read")
+            with self._uow_factory() as uow:
+                link = uow.planning_authorities.get_link(
+                    link.workspace_id, link.planning_run_id
+                )
+            if link is None:
+                return False
+            if link.closed or link.status == "pending" or link.not_admitted:
+                return True
+            if link.run_id is None:
+                found = self._services.execution.get_start(
+                    link.workspace_id,
+                    link.start_operation_id,
+                    grant_id=link.authority_id,
+                )
+                require_gateway_owner(self._owner_check)
+                if not isinstance(found, StartLookup) or not found.found:
+                    return False
+                receipt = found.receipt
+                if (
+                    not isinstance(receipt, StartReceipt)
+                    or receipt.operation_id != link.start_operation_id
+                ):
+                    return False
+                receipt = StartReceipt.model_validate(receipt.model_dump())
+                self._require_original(link, "run.read")
+                with self._uow_factory() as uow:
+                    require_gateway_owner(self._owner_check)
+                    link = uow.planning_authorities.save_link(
+                        link,
+                        run_id=receipt.run_id,
+                        start_receipt=receipt,
+                        status={
+                            "accepted": "running",
+                            "unknown": "unknown",
+                            "busy": "waiting_capacity",
+                            "rejected": "rejected",
+                        }[receipt.status.value],
+                        reason_code=receipt.reason_code,
+                    )
+                    require_gateway_owner(self._owner_check)
+                if link.not_admitted:
+                    return True
+                if link.run_id is None:
+                    return False
+            snapshot = self._read_original_snapshot(link)
+            if link.status != "cleanup_pending" and snapshot.state.value in {
+                "completed",
+                "failed",
+            }:
+                return self._consume_drain_events(link, snapshot, receipt=None)
+
+            self._require_original(link, "run.stop")
+            with self._uow_factory() as uow:
+                require_gateway_owner(self._owner_check)
+                current = uow.planning_authorities.get_link(
+                    link.workspace_id,
+                    link.planning_run_id,
+                    for_update=True,
+                )
+                if current is None or (
+                    current.authority_id,
+                    current.start_operation_id,
+                    current.run_id,
+                    current.start_request,
+                    current.request_sha256,
+                ) != (
+                    link.authority_id,
+                    link.start_operation_id,
+                    link.run_id,
+                    link.start_request,
+                    link.request_sha256,
+                ):
+                    raise AgentError(
+                        "permission_denied", "Original planning intention changed."
+                    )
+                first_stop = not current.closed and current.status != "cleanup_pending"
+                link = (
+                    uow.planning_authorities.save_link(
+                        current,
+                        status="cleanup_pending",
+                        reason_code=reason_code,
+                    )
+                    if first_stop
+                    else current
+                )
+                require_gateway_owner(self._owner_check)
+            if link.closed:
+                return True
+            self._require_original(link, "run.stop" if first_stop else "run.read")
+            receipt = (
+                self._services.execution.stop(
+                    RunStop(
+                        workspace_id=link.workspace_id,
+                        run_id=link.run_id,
+                        operation_id=link.start_operation_id,
+                        grant_id=link.authority_id,
+                    )
+                )
+                if first_stop
+                else self._services.execution.get_stop(
+                    link.workspace_id,
+                    link.run_id,
+                    link.start_operation_id,
+                    grant_id=link.authority_id,
+                )
+            )
+            require_gateway_owner(self._owner_check)
+            snapshot = self._read_original_snapshot(link)
+            if not self._stop_confirmed(link, receipt, snapshot):
+                return False
+            return self._consume_drain_events(link, snapshot, receipt=receipt)
+        except (
+            Exception
+        ) as exc:  # Unconfirmed originals retain their durable Stop latch.
+            if isinstance(exc, AgentError) and exc.code == "gateway_owner_lost":
+                raise
+            return False
+
+    def _read_original_snapshot(self, link):
+        self._require_original(link, "run.read")
+        snapshot = self._services.execution.get_run(
+            link.workspace_id,
+            link.run_id,
+            grant_id=link.authority_id,
+        )
+        require_gateway_owner(self._owner_check)
+        self._check_snapshot(link, snapshot)
+        return snapshot
+
+    @staticmethod
+    def _stop_confirmed(link, receipt, snapshot):
+        return (
+            isinstance(receipt, StopReceipt)
+            and receipt.run_id == link.run_id
+            and receipt.operation_id == link.start_operation_id
+            and receipt.status.value == "stopped"
+            and type(receipt.evidence_sequence) is int
+            and receipt.evidence_sequence > 0
+            and snapshot.state.value == "stopped"
+            and not snapshot.input_open
+            and snapshot.active_response_id is None
+            and snapshot.last_event_sequence >= receipt.evidence_sequence
+        )
+
+    def _consume_drain_events(self, link, snapshot, *, receipt):
+        cursor, response_id = link.event_cursor, link.response_id
+        complete = False
+        for _ in range(100):
+            self._require_original(link, "run.read")
+            page = self._services.execution.list_events(
+                link.workspace_id,
+                link.run_id,
+                cursor,
+                limit=100,
+                grant_id=link.authority_id,
+            )
+            require_gateway_owner(self._owner_check)
+            if not isinstance(page, EventPage):
+                raise AgentError(
+                    "configuration_mismatch", "Original planning event page changed."
+                )
+            for event in page.events:
+                if (
+                    event.run_id != link.run_id
+                    or event.sequence != cursor + 1
+                    or (
+                        event.operation_id is not None
+                        and event.operation_id != link.start_operation_id
+                    )
+                    or (
+                        event.response_id is not None
+                        and response_id is not None
+                        and event.response_id != response_id
+                    )
+                ):
+                    raise AgentError(
+                        "configuration_mismatch",
+                        "Original planning event identity changed.",
+                    )
+                if event.kind == "response.started":
+                    response_id = event.response_id
+                cursor = event.sequence
+            if page.next_sequence != cursor:
+                raise AgentError(
+                    "configuration_mismatch", "Original planning event cursor changed."
+                )
+            if not page.has_more:
+                current_snapshot = self._read_original_snapshot(link)
+                complete = cursor >= current_snapshot.last_event_sequence and (
+                    self._stop_confirmed(link, receipt, current_snapshot)
+                    if receipt is not None
+                    else (
+                        current_snapshot.state.value in {"completed", "failed"}
+                        and not current_snapshot.input_open
+                        and current_snapshot.active_response_id is None
+                    )
+                )
+                break
+        self._require_original(link, "run.read")
+        with self._uow_factory() as uow:
+            require_gateway_owner(self._owner_check)
+            uow.planning_authorities.save_original_observation(
+                link,
+                event_cursor=cursor,
+                response_id=response_id,
+                closed=complete,
+            )
+            require_gateway_owner(self._owner_check)
+        return complete
+
     def _halt(self, planner_input, link, code, usage):
         require_gateway_owner(self._owner_check)
         if link.not_admitted or link.status == "pending":
@@ -758,39 +1012,19 @@ class AgentPlannerAdapter:
             )
         if link.closed:
             return self._failure(code, False, usage)
-        if link.run_id is None:
-            self._try_save(link, status="unknown", reason_code=code)
-            return self._failure("native_admission_unknown", True, usage)
-        link = self._try_save(link, status="cleanup_pending", reason_code=code)
-        try:
-            self._require_original(link, "run.stop")
-            require_gateway_owner(self._owner_check)
-            receipt = self._services.execution.stop(
-                RunStop(
-                    workspace_id=link.workspace_id,
-                    run_id=link.run_id,
-                    operation_id=link.start_operation_id,
-                    grant_id=link.authority_id,
-                )
+        if self._drain_original(link, reason_code=code):
+            return self._failure(code, False, usage)
+        with self._uow_factory() as uow:
+            current = uow.planning_authorities.get_link(
+                link.workspace_id, link.planning_run_id
             )
-            if (
-                receipt.run_id != link.run_id
-                or receipt.operation_id != link.start_operation_id
-            ):
-                raise AgentError(
-                    "configuration_mismatch", "Native planning Stop identity changed."
-                )
-            self._require_original(link, "run.read")
-            snapshot = self._services.execution.get_run(
-                link.workspace_id, link.run_id, grant_id=link.authority_id
-            )
-            self._check_snapshot(link, snapshot)
-            if snapshot.state.value in {"completed", "stopped", "failed"}:
-                self._save(link, status="closed", closed=True)
-                return self._failure(code, False, usage)
-        except Exception:  # noqa: BLE001, S110 - Unconfirmed Stop must retain cleanup uncertainty.
-            pass
-        return self._failure("native_cleanup_pending", True, usage)
+        return self._failure(
+            "native_admission_unknown"
+            if current is None or current.run_id is None
+            else "native_cleanup_pending",
+            True,
+            usage,
+        )
 
     def classify_failure(self, planner_input, code, *, usage=None):
         require_gateway_owner(self._owner_check)

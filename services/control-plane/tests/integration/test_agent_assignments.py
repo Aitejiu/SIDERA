@@ -610,7 +610,7 @@ def _prepare_authority(s, *, runtime_ref=None):
             .values(active_lease_id=lease_id, last_fencing_token=1, status="leased")
         )
         value = ExecutionAuthority(
-            id=s["grant"],
+            id=uuid4(),
             workspace_id=s["workspace"],
             principal_id=s["principal"],
             execution_id=execution_id,
@@ -640,6 +640,7 @@ def _prepare_authority(s, *, runtime_ref=None):
                 "runtime.read",
                 "run.read",
             ),
+            upstream_grant_id=s["grant"],
         )
         uow.execution_authorities.add(value)
         uow.flush()

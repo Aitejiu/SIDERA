@@ -7,19 +7,13 @@ from typing import cast
 from uuid import UUID
 
 from sidera_control_plane.adapters.demo_worker import DemoWorkerAdapter
-from sidera_control_plane.adapters.dsh_acp import DshACPAdapter
 from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
 from sidera_control_plane.adapters.git_workspace import GitWorktreeWorkspaceManager
 from sidera_control_plane.adapters.local_verification import (
     LocalCheckRunner,
     LocalVerificationAdapter,
 )
-from sidera_control_plane.adapters.opencode_acp import OpenCodeACPAdapter
-from sidera_control_plane.application.agent_execution import TaskExecutionInputBuilder
-from sidera_control_plane.application.agent_worker_adapter import (
-    AgentWorkerAdapter,
-    NativeWorkerServices,
-)
+from sidera_control_plane.application import agent_worker_adapter as _native_workers
 from sidera_control_plane.application.ports import WorkerAdapter
 from sidera_control_plane.application.result_ports import LocalCheckRunnerPort
 from sidera_control_plane.config import Settings
@@ -32,6 +26,8 @@ from sidera_control_plane.domain.modules import (
 )
 from sidera_control_plane.domain.result_integration import CheckSpecV1
 from sidera_control_plane.domain.workspace import ExecutionWorkspaceManifest
+
+build_native_worker_adapter = _native_workers.build_native_worker_adapter
 
 
 def _deterministic_artifact_storage_ref(instance_name: str) -> str:
@@ -142,38 +138,6 @@ _WORKER_ADAPTER_REGISTRATIONS = (
 )
 
 
-def build_native_worker_adapter(
-    uow_factory,
-    *,
-    services: NativeWorkerServices,
-    authorizer,
-    source_reader,
-    workspace_id,
-    execution_id,
-    capability_snapshot,
-    clock,
-    owner_check=None,
-):
-    builder = TaskExecutionInputBuilder(
-        uow_factory,
-        authorizer=authorizer,
-        source_reader=source_reader,
-        catalog=services.catalog,
-        runtimes=services.runtimes,
-    )
-    return AgentWorkerAdapter(
-        uow_factory,
-        execution=services.execution,
-        input_builder=builder,
-        authorizer=authorizer,
-        workspace_id=workspace_id,
-        execution_id=execution_id,
-        clock=clock,
-        capability_snapshot=capability_snapshot,
-        owner_check=owner_check,
-    )
-
-
 def worker_adapter_inventory() -> tuple[WorkerAdapterRegistration, ...]:
     """Return immutable production registration facts without constructing adapters."""
 
@@ -243,6 +207,8 @@ def build_worker_adapter_factories(
         return FakeWorkerAdapter(artifacts=(artifact,))
 
     def opencode_factory(instance: ModuleInstance) -> WorkerAdapter:
+        from sidera_control_plane.adapters.opencode_acp import OpenCodeACPAdapter
+
         return OpenCodeACPAdapter(
             executable=_module_config_text(
                 instance, "executable", settings.opencode_executable
@@ -308,6 +274,8 @@ def build_worker_adapter_factories(
         )
 
     def dsh_acp_factory(instance: ModuleInstance) -> WorkerAdapter:
+        from sidera_control_plane.adapters.dsh_acp import DshACPAdapter
+
         return DshACPAdapter(
             argv=_module_config_argv(
                 instance,

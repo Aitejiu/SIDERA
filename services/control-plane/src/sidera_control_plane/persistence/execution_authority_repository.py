@@ -13,6 +13,7 @@ from sidera_agents.contracts import (
     ToolBinding,
 )
 from sqlalchemy import delete, or_, select, true, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.domain.agent_bindings import (
@@ -62,6 +63,7 @@ class ExecutionAuthorityRepository:
                 revoked=authority.revoked,
                 policy={
                     "principal_id": authority.principal_id,
+                    "upstream_grant_id": None if authority.upstream_grant_id is None else str(authority.upstream_grant_id),
                     "profile_ref": authority.profile_ref.model_dump(mode="json"),
                     "runtime_ref": authority.runtime_ref.model_dump(mode="json"),
                     "lease_id": str(authority.lease_id),
@@ -96,6 +98,13 @@ class ExecutionAuthorityRepository:
         if row is None:
             return None
         policy = row.policy
+        upstream_grant_id = policy.get("upstream_grant_id")
+        if upstream_grant_id is not None:
+            if not isinstance(upstream_grant_id, str):
+                raise ValueError(
+                    "execution authority upstream grant must be a UUID string"
+                )
+            upstream_grant_id = UUID(upstream_grant_id)
         return ExecutionAuthority(
             id=row.id,
             workspace_id=row.workspace_id,
@@ -120,6 +129,7 @@ class ExecutionAuthorityRepository:
             ),
             tools=tuple(ToolBinding.model_validate(v) for v in policy["tools"]),
             resources=tuple(ResourceRef.model_validate(v) for v in policy["resources"]),
+            upstream_grant_id=upstream_grant_id,
         )
 
     def revoke(self, authority_id, workspace_id):
@@ -376,6 +386,178 @@ class ExecutionAuthorityRepository:
             return None
         return NotAdmittedProof(link, lease.id, authority.fencing_token)
 
+    @staticmethod
+    def _known_unadmitted(link):
+        return link.known_unadmitted
+
+    def _lock_unadmitted_pin(self, expected, *, principal_id):
+        from sidera_control_plane.persistence.agent_binding_repository import (
+            AgentBindingRepository,
+        )
+        from sidera_control_plane.persistence.module_repository import (
+            ExecutionBindingRepository,
+        )
+        from sidera_control_plane.persistence.worker_repository import WorkerRepository
+
+        authority = self.get(expected.authority_id, workspace_id=expected.workspace_id)
+        if (
+            authority is None
+            or not principal_id
+            or authority.principal_id != principal_id
+        ):
+            raise AssignmentDenied("unadmitted original authority unavailable")
+        model = TaskModel if authority.target_type == "subtask" else WorkerItemModel
+        target = self._session.scalar(
+            select(model)
+            .where(
+                model.id == authority.target_id,
+                model.workspace_id == expected.workspace_id,
+            )
+            .with_for_update()
+        )
+        execution = ExecutionRepository(self._session).get(
+            expected.execution_id, expected.workspace_id, for_update=True
+        )
+        lease = LeaseStore(self._session).get(
+            authority.lease_id, expected.workspace_id, for_update=True
+        )
+        link = self.get_link(
+            expected.workspace_id, expected.execution_id, for_update=True
+        )
+        bindings = AgentBindingRepository(self._session)
+        bindings.get(
+            expected.workspace_id,
+            authority.target_type,
+            authority.target_id,
+            for_update=True,
+        )
+        historical = next(
+            (
+                binding
+                for binding in bindings.history(
+                    expected.workspace_id,
+                    authority.target_type,
+                    authority.target_id,
+                )
+                if binding.version == expected.binding_version
+            ),
+            None,
+        )
+        runtime_binding = ExecutionBindingRepository(self._session).get_for_execution(
+            expected.execution_id,
+            expected.workspace_id,
+            for_update=True,
+        )
+        worker = (
+            None
+            if lease is None
+            else WorkerRepository(self._session).get(
+                lease.worker_id,
+                expected.workspace_id,
+                for_update=True,
+            )
+        )
+        if (
+            target is None
+            or execution is None
+            or lease is None
+            or worker is None
+            or link is None
+            or link != expected
+            or historical is None
+            or runtime_binding is None
+            or authority.target_type not in {"subtask", "worker_item"}
+            or historical.profile_ref != expected.profile_ref
+            or (
+                authority.workspace_id,
+                authority.execution_id,
+                authority.profile_ref,
+                authority.binding_version,
+            )
+            != (
+                expected.workspace_id,
+                expected.execution_id,
+                expected.profile_ref,
+                expected.binding_version,
+            )
+            or (
+                execution.worker_item_id
+                if authority.target_type == "worker_item"
+                else execution.task_id
+            )
+            != authority.target_id
+            or execution.last_fencing_token != authority.fencing_token
+            or execution.started_at is not None
+            or execution.stop_requested
+            or self.has_session(expected.workspace_id, expected.execution_id)
+            or not self._known_unadmitted(link)
+            or (lease.execution_id, lease.fencing_token, execution.assigned_worker_id)
+            != (execution.id, authority.fencing_token, worker.id)
+            or (
+                runtime_binding.workspace_id,
+                runtime_binding.execution_id,
+                runtime_binding.lease_id,
+                runtime_binding.fencing_token,
+                runtime_binding.worker_id,
+            )
+            != (
+                expected.workspace_id,
+                execution.id,
+                lease.id,
+                authority.fencing_token,
+                worker.id,
+            )
+        ):
+            raise AssignmentDenied("unadmitted original pin or reservation changed")
+        return execution, lease, link, authority, worker
+
+    def lock_unadmitted_original(self, expected, *, principal_id):
+        execution, lease, link, authority, worker = self._lock_unadmitted_pin(
+            expected, principal_id=principal_id
+        )
+        if (
+            execution.status.value != "leased"
+            or execution.active_lease_id != lease.id
+            or lease.status.value != "active"
+            or worker.current_load < 1
+        ):
+            raise AssignmentDenied("unadmitted original reservation is unavailable")
+        return execution, lease, link, authority
+
+    def cancel_unadmitted_original(self, expected, *, principal_id):
+        # CommandService records the causation receipt after this handler returns.
+        with self._session.no_autoflush:
+            execution, lease, link, authority, _ = self._lock_unadmitted_pin(
+                expected, principal_id=principal_id
+            )
+            if (
+                execution.status.value != "canceled"
+                or execution.active_lease_id is not None
+                or lease.status.value != "released"
+            ):
+                raise AssignmentDenied(
+                    "unadmitted original business cancellation is incomplete"
+                )
+            result = self._session.execute(
+                update(AgentExecutionLinkModel)
+                .where(
+                    AgentExecutionLinkModel.workspace_id == link.workspace_id,
+                    AgentExecutionLinkModel.execution_id == link.execution_id,
+                    AgentExecutionLinkModel.start_operation_id
+                    == link.start_operation_id,
+                    AgentExecutionLinkModel.authority_id == link.authority_id,
+                    AgentExecutionLinkModel.binding_version == link.binding_version,
+                    AgentExecutionLinkModel.status == link.status,
+                    AgentExecutionLinkModel.run_id.is_(None),
+                    AgentExecutionLinkModel.event_cursor == 0,
+                )
+                .values(status="cancelled")
+            )
+            if not isinstance(result, CursorResult) or result.rowcount != 1:
+                raise AssignmentDenied("unadmitted original cancellation lost its CAS")
+            self.revoke(authority.id, link.workspace_id)
+            return replace(link, status="cancelled")
+
     def append_admission_history(self, pin: RetiredAdmissionPin):
         link = pin.link
         self._session.add(
@@ -485,15 +667,20 @@ class ExecutionAuthorityRepository:
     def list_reconciliation_links(
         self, workspace_id, *, limit=100, after_execution_id=None
     ):
-        ids = self._session.scalars(
-            select(AgentExecutionLinkModel.execution_id)
+        rows = self._session.execute(
+            select(
+                AgentExecutionLinkModel.workspace_id,
+                AgentExecutionLinkModel.execution_id,
+            )
             .join(
                 ExecutionModel,
                 (ExecutionModel.id == AgentExecutionLinkModel.execution_id)
                 & (ExecutionModel.workspace_id == AgentExecutionLinkModel.workspace_id),
             )
             .where(
-                AgentExecutionLinkModel.workspace_id == workspace_id,
+                true()
+                if workspace_id is None
+                else AgentExecutionLinkModel.workspace_id == workspace_id,
                 true()
                 if after_execution_id is None
                 else AgentExecutionLinkModel.execution_id > after_execution_id,
@@ -509,8 +696,8 @@ class ExecutionAuthorityRepository:
         )
         return tuple(
             link
-            for execution_id in ids
-            if (link := self.get_link(workspace_id, execution_id)) is not None
+            for original_workspace_id, execution_id in rows
+            if (link := self.get_link(original_workspace_id, execution_id)) is not None
         )
 
     def advance_link(

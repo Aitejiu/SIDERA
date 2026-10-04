@@ -177,7 +177,7 @@ class PlanningAuthorityRepository:
                 ),
             )
             .where(
-                PlanningAgentLinkModel.workspace_id == workspace_id,
+                true() if workspace_id is None else PlanningAgentLinkModel.workspace_id == workspace_id,
                 or_(
                     PlanningRunModel.status == "running",
                     and_(
@@ -198,7 +198,7 @@ class PlanningAuthorityRepository:
         return tuple(
             link
             for row in rows
-            if (link := self.get_link(workspace_id, row.planning_run_id)) is not None
+            if (link := self.get_link(row.workspace_id, row.planning_run_id)) is not None
         )
 
     def save_original_observation(

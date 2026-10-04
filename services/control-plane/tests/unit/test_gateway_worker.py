@@ -250,3 +250,107 @@ def test_native_owner_tick_adapts_batch_201_only_for_observer():
     gateway_worker._run_owner_once(owner, settings)
     assert gateway.calls == inputs.calls == [201]
     assert handoffs.calls == [7] and calls == [(workspace, 200)]
+
+
+def test_native_gateway_builder_does_not_load_ambient_acceptance_guard(
+    monkeypatch, tmp_path
+):
+    import os
+
+    from sidera_control_plane.config import Settings
+
+    calls = []
+    monkeypatch.setenv("SIDERA_ACCEPTANCE_GUARD_REQUIRED", "1")
+    monkeypatch.setenv("SIDERA_ACCEPTANCE_MANIFEST", "/unused/private-old-manifest")
+    before = dict(os.environ)
+
+    def forbidden_guard():
+        calls.append("load_guard")
+        raise RuntimeError("old acceptance manifest must not be loaded")
+
+    monkeypatch.setattr(gateway_worker, "load_acceptance_guard", forbidden_guard)
+    runtime = gateway_worker.build_gateway(
+        Settings(
+            database_url="postgresql+psycopg://unused@/unused?host=/private/tmp/unused",
+            workspace_root=tmp_path,
+            artifact_root=tmp_path / "artifacts",
+            knowledge_candidate_spool_dir=tmp_path / "spool",
+        ),
+        use_acceptance_guard=False,
+    )
+    try:
+        assert not calls
+        assert dict(os.environ) == before
+    finally:
+        runtime.close()
+
+
+def test_legacy_gateway_builder_preserves_guard_failure_and_owned_cleanup(monkeypatch):
+    from sidera_control_plane.config import Settings
+
+    calls = []
+    monkeypatch.setattr(
+        gateway_worker,
+        "Database",
+        lambda url: SimpleNamespace(
+            dispose=lambda: calls.append("database_disposed"),
+        ),
+    )
+    monkeypatch.setattr(
+        gateway_worker,
+        "KnowledgeHttpAdapter",
+        lambda **kwargs: SimpleNamespace(
+            close=lambda: calls.append("catalog_closed"),
+        ),
+    )
+
+    def guard():
+        calls.append("guard")
+        raise RuntimeError("controlled missing acceptance manifest")
+
+    monkeypatch.setattr(gateway_worker, "load_acceptance_guard", guard)
+    with pytest.raises(RuntimeError, match="controlled missing"):
+        gateway_worker.build_gateway(
+            Settings(database_url="postgresql+psycopg://unused")
+        )
+    assert calls == ["guard", "catalog_closed", "database_disposed"]
+
+
+@pytest.mark.parametrize(
+    "feature", ("result_inputs_enabled", "result_integration_enabled")
+)
+def test_native_gateway_capture_uses_lazy_injected_repository_without_settings_path(
+    tmp_path, feature
+):
+    from sidera_control_plane.config import Settings
+
+    calls = []
+
+    def resolve(ref):
+        calls.append(("resolve", ref))
+        pytest.fail("Gateway construction resolved a repository")
+
+    def refs():
+        calls.append("refs")
+        pytest.fail("Gateway construction enumerated repositories")
+
+    runtime = gateway_worker.build_gateway(
+        Settings(
+            database_url="postgresql+psycopg://unused@/unused?host=/private/tmp/unused",
+            workspace_root=tmp_path,
+            artifact_root=tmp_path / "artifacts",
+            knowledge_candidate_spool_dir=tmp_path / "spool",
+            **{feature: True},
+        ),
+        use_acceptance_guard=False,
+        repository_resolver=resolve,
+        repository_refs=refs,
+    )
+    try:
+        capture = runtime.worker_gateway._code_result_capture_service
+        assert capture is not None
+        assert capture._code_store._resolver is resolve
+        assert capture._code_store._repository_refs is refs
+        assert not calls
+    finally:
+        runtime.close()

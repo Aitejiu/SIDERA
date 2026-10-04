@@ -6,7 +6,7 @@ import stat
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -229,7 +229,9 @@ def test_runner_finalizes_log_read_error_after_identity_race(
         "import time\nprint('ignored')\ntime.sleep(0.05)\n",
     )
     request = check_case.request(argv=(sys.executable, str(script)), runner=runner)
-    monkeypatch.setattr(local_verification, "_identity_matches", lambda _identity: False)
+    monkeypatch.setattr(
+        local_verification, "_identity_matches", lambda _identity: False
+    )
 
     runner.start(request)
     observation = check_case.wait_terminal(request.operation_id, runner=runner)
@@ -322,6 +324,75 @@ def test_runner_marks_source_modified_during_check(check_case: CheckCase) -> Non
     assert observation.status is CheckRunStatus.ENVIRONMENT_BLOCKED
     assert observation.source_dirty is True
     assert observation.failure_code == "source_modified_during_check"
+
+
+@pytest.mark.parametrize("no_bytecode", (False, True))
+def test_python_import_check_requires_no_bytecode_for_clean_source(
+    check_case: CheckCase, no_bytecode: bool
+) -> None:
+    sources = {
+        "native_value.py": "VALUE = 42\n",
+        "hard_value.py": "from native_value import VALUE\nANSWER = VALUE\n",
+        "integration.txt": "Integrated 42\n",
+        "check.py": (
+            "from native_value import VALUE\nfrom hard_value import ANSWER\n"
+            "from pathlib import Path\nassert VALUE == ANSWER == 42\n"
+            "assert Path('integration.txt').read_text() == 'Integrated 42\\n'\n"
+        ),
+    }
+    for name, source in sources.items():
+        (check_case.workspace / name).write_text(source, encoding="utf-8")
+    _git(check_case.workspace, "add", *sources)
+    _git(check_case.workspace, "commit", "-m", "Controlled import check")
+    argv = (
+        (sys.executable, "-B", "check.py")
+        if no_bytecode
+        else (sys.executable, "check.py")
+    )
+    request = replace(
+        check_case.request(argv=argv),
+        actual_commit=_git(check_case.workspace, "rev-parse", "HEAD"),
+        actual_tree=_git(check_case.workspace, "rev-parse", "HEAD^{tree}"),
+    )
+
+    check_case.runner.start(request)
+    observation = check_case.wait_terminal(request.operation_id)
+    dirty_files = tuple(
+        path
+        for path in _git(
+            check_case.workspace, "ls-files", "--others", "--exclude-standard"
+        ).splitlines()
+        if not path.startswith(".sidera/")
+    )
+
+    assert observation.exit_code == 0
+    assert observation.actual_commit == request.actual_commit
+    assert observation.actual_tree == request.actual_tree
+    assert observation.source_dirty is (not no_bytecode)
+    if no_bytecode:
+        assert observation.status is CheckRunStatus.PASSED
+        assert observation.failure_code is None
+        assert dirty_files == ()
+    else:
+        assert observation.status is CheckRunStatus.ENVIRONMENT_BLOCKED
+        assert observation.failure_code == "source_modified_during_check"
+        assert len(dirty_files) == 2
+        assert all(path.startswith("__pycache__/") for path in dirty_files)
+        assert all(path.endswith(".pyc") for path in dirty_files)
+    print(
+        "N16_BYTECODE_PROBE "
+        + json.dumps(
+            {
+                "no_bytecode": no_bytecode,
+                "status": observation.status.value,
+                "failure_code": observation.failure_code,
+                "source_dirty": observation.source_dirty,
+                "exit_code": observation.exit_code,
+                "dirty_files": dirty_files,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def test_restarted_runner_returns_unknown_without_restarting_process(

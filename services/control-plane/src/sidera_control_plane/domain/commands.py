@@ -39,3 +39,4 @@ class StoredCommand:
     status: str
     result: dict[str, Any]
     rejection_reason: str | None
+    expected_version: int | None = None

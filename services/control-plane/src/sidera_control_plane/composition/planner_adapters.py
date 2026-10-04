@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from pydantic import SecretStr
 from sidera_runtime_guard import RuntimeBudgetGuard
@@ -13,10 +13,12 @@ from sidera_control_plane.adapters.fake_planner import (
     FakePlannerConfig,
     FakeScenario,
 )
-from sidera_control_plane.adapters.opencode_planner import OpenCodePlannerAdapter
 from sidera_control_plane.application.planning_runner import PlannerAdapterBuilder
 from sidera_control_plane.config import Settings
 from sidera_control_plane.demo.manifest import load_manifest, validate_manifest
+
+if TYPE_CHECKING:
+    from sidera_control_plane.adapters.opencode_planner import OpenCodePlannerAdapter
 
 
 def build_planner_adapter_builders(
@@ -49,6 +51,10 @@ def build_planner_adapter_builders(
     def opencode_builder(
         config: Mapping[str, object], secrets: tuple[SecretStr, ...]
     ) -> OpenCodePlannerAdapter:
+        from sidera_control_plane.adapters.opencode_planner import (
+            OpenCodePlannerAdapter,
+        )
+
         configured_executable = config.get(
             "planning.executable", settings.planning_opencode_executable
         )

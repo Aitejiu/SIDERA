@@ -157,6 +157,23 @@ class AgentExecutionLink:
             and self.start_receipt.run_id is None
         )
 
+    @property
+    def known_unadmitted(self) -> bool:
+        if self.run_id is not None or self.event_cursor != 0:
+            return False
+        if self.status == "pending":
+            return self.request_sha256 is None and self.start_receipt is None
+        if self.not_admitted:
+            return True
+        return (
+            self.status == "failed"
+            and self.request_sha256 is not None
+            and self.start_receipt is not None
+            and self.start_receipt.operation_id == self.start_operation_id
+            and self.start_receipt.status.value == "rejected"
+            and self.start_receipt.run_id is None
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class NotAdmittedProof:
@@ -206,10 +223,16 @@ class ExecutionAuthority:
     tools: tuple[ToolBinding, ...] = ()
     resources: tuple[ResourceRef, ...] = ()
     revoked: bool = False
+    upstream_grant_id: UUID | None = None
 
     def __post_init__(self):
         if self.target_type not in {"subtask", "worker_item"} or not self.principal_id:
             raise ValidationError("execution authority target and principal required")
+        if self.upstream_grant_id is not None and (
+            not isinstance(self.upstream_grant_id, UUID)
+            or self.upstream_grant_id == self.id
+        ):
+            raise ValidationError("execution authority requires distinct upstream UUID")
         if (
             self.profile_ref.workspace_id != self.workspace_id
             or self.runtime_ref.workspace_id != self.workspace_id

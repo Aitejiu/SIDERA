@@ -121,11 +121,13 @@ class ExecutionAuthorityReader:
                 authority.revoked
                 or action not in authority.actions
                 or self._authorizer is None
+                or not isinstance(authority.upstream_grant_id, UUID)
+                or authority.upstream_grant_id == authority.id
             ):
                 _deny()
             try:
                 self._authorizer.require(
-                    grant_id,
+                    authority.upstream_grant_id,
                     action,
                     AssignmentTarget(
                         authority.workspace_id,

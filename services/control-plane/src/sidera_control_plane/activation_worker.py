@@ -4,7 +4,7 @@ import argparse
 import json
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -13,6 +13,7 @@ from sidera_control_plane.application.activation_reconciler import (
     ActivationReconciler,
     ActivationReconcileResult,
 )
+from sidera_control_plane.application.agent_worker_adapter import require_gateway_owner
 from sidera_control_plane.config import Settings
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
@@ -37,14 +38,26 @@ class ActivationWorkerRuntime:
     database: Database
 
 
-def build_activation_worker(settings: Settings) -> ActivationWorkerRuntime:
+def build_activation_worker(
+    settings: Settings,
+    *,
+    owner_check: Callable[[], bool] | None = None,
+) -> ActivationWorkerRuntime:
     database = Database(settings.database_url)
+
+    def uow_factory() -> SqlAlchemyUnitOfWork:
+        require_gateway_owner(owner_check)
+        return SqlAlchemyUnitOfWork(
+            database,
+            projection_change_retention_seconds=settings.projection_change_retention_seconds,
+            before_commit=None
+            if owner_check is None
+            else lambda: require_gateway_owner(owner_check),
+        )
+
     try:
         reconciler = ActivationReconciler(
-            uow_factory=lambda: SqlAlchemyUnitOfWork(
-                database,
-                projection_change_retention_seconds=settings.projection_change_retention_seconds,
-            ),
+            uow_factory=uow_factory,
             owner_id=f"activation-reconciler:{settings.local_actor_id}",
             clock=lambda: datetime.now(UTC),
             execution_context_ttl_seconds=settings.execution_context_ttl_seconds,

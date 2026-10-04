@@ -18,13 +18,16 @@ CHECKER_PATH = Path(__file__).resolve().parents[4] / "scripts" / (
     "check-agent-module-installation.py"
 )
 COMBINATION_NAMES = (
+    "agents-core",
     "control-plane-core",
+    "control-plane-agents",
     "public-client",
     "gateway-core",
     "bridge-client",
     "gateway-demo",
 )
 EXPECTED_PROJECTS = {
+    "sidera-agents": "packages/agents",
     "sidera-runtime-guard": "packages/runtime-guard",
     "sidera-control-plane-client": "packages/control-plane-client",
     "sidera-control-plane": "services/control-plane",
@@ -32,15 +35,24 @@ EXPECTED_PROJECTS = {
     "sidera-main-agent-gateway": "services/main-agent-gateway",
 }
 EXPECTED_REQUIREMENTS = {
+    "agents-core": "sidera-agents==0.1.0",
     "control-plane-core": "sidera-control-plane==0.1.0",
+    "control-plane-agents": "sidera-control-plane==0.1.0",
     "public-client": "sidera-control-plane-client==0.1.0",
     "gateway-core": "sidera-main-agent-gateway==0.1.0",
     "bridge-client": "sidera-akashic-task-bridge==0.1.0",
     "gateway-demo": "sidera-main-agent-gateway[demo]==0.1.0",
 }
 EXPECTED_COMBINATION_PROJECTS = {
+    "agents-core": ("sidera-agents",),
     "control-plane-core": (
         "sidera-control-plane",
+        "sidera-agents",
+        "sidera-runtime-guard",
+    ),
+    "control-plane-agents": (
+        "sidera-control-plane",
+        "sidera-agents",
         "sidera-runtime-guard",
     ),
     "public-client": ("sidera-control-plane-client",),
@@ -60,6 +72,7 @@ EXPECTED_COMBINATION_PROJECTS = {
     ),
 }
 EXPECTED_SOURCE_ROOTS = {
+    "sidera-agents": "packages/agents/src",
     "sidera-runtime-guard": "packages/runtime-guard/src",
     "sidera-control-plane-client": "packages/control-plane-client/src",
     "sidera-control-plane": "services/control-plane/src",
@@ -120,7 +133,7 @@ def test_installation_checker_script_is_present() -> None:
     assert CHECKER_PATH.is_file()
 
 
-def test_repository_check_requires_all_five_pyprojects(tmp_path, install_checker):
+def test_repository_check_requires_all_declared_pyprojects(tmp_path, install_checker):
     repository = _make_repository(tmp_path, install_checker)
 
     assert install_checker.check_repository(repository) == repository.resolve()
@@ -183,6 +196,7 @@ def test_fixed_build_venv_and_install_argv(install_checker, tmp_path):
         ]
         for package, relative in EXPECTED_PROJECTS.items()
     }
+    expected_build["sidera-agents"].append("--offline")
 
     for package in EXPECTED_PROJECTS:
         assert install_checker.build_argv(repository, package, output) == expected_build[
@@ -204,14 +218,16 @@ def test_fixed_build_venv_and_install_argv(install_checker, tmp_path):
             str(output / f"{name}-venv" / "bin" / "python"),
             "--find-links",
             str(output / "wheels"),
-            EXPECTED_REQUIREMENTS[name],
         ]
-        if name in {"control-plane-core", "gateway-core"}:
+        if name == "agents-core":
+            expected_install.append("--offline")
+        expected_install.append(EXPECTED_REQUIREMENTS[name])
+        if name in {"control-plane-core", "control-plane-agents", "gateway-core"}:
             expected_install.append("httpx>=0.28,<1")
         assert install_checker.install_argv(name, output) == expected_install
 
 
-def test_build_wheels_runs_only_the_five_fixed_build_commands(
+def test_build_wheels_runs_only_the_fixed_build_commands(
     tmp_path, monkeypatch, install_checker
 ):
     repository = _make_repository(tmp_path, install_checker)
@@ -242,7 +258,7 @@ def test_build_wheels_runs_only_the_five_fixed_build_commands(
         install_checker.build_argv(repository, package, output)
         for package in EXPECTED_PROJECTS
     ]
-    for _argv, kwargs in calls:
+    for argv, kwargs in calls:
         assert kwargs["cwd"] == output
         assert kwargs["timeout"] == 300
         assert kwargs["shell"] is False
@@ -251,7 +267,10 @@ def test_build_wheels_runs_only_the_five_fixed_build_commands(
         assert "PYTHONPATH" not in kwargs["env"]
         assert "VIRTUAL_ENV" not in kwargs["env"]
         assert kwargs["env"]["UV_NO_CONFIG"] == "1"
-        assert Path(kwargs["env"]["UV_CACHE_DIR"]) == output / "uv-cache"
+        if argv[2] == str(repository / "packages/agents"):
+            assert "UV_CACHE_DIR" not in kwargs["env"]
+        else:
+            assert Path(kwargs["env"]["UV_CACHE_DIR"]) == output / "uv-cache"
 
 
 def test_build_wheels_rejects_missing_or_duplicate_artifacts(
@@ -299,6 +318,11 @@ def test_combination_uses_fixed_install_clean_environment_and_isolated_probe(
     output = tmp_path / "evidence"
     output.mkdir()
     wheels = _make_wheels(tmp_path, install_checker)
+    repository = _make_repository(tmp_path, install_checker)
+    if name == "agents-core":
+        example = repository / "packages/agents/examples/standalone.py"
+        example.parent.mkdir()
+        example.write_text("# Controlled public example fixture\n", encoding="ascii")
     monkeypatch.setenv("PYTHONPATH", "/untrusted/source")
     monkeypatch.setenv("VIRTUAL_ENV", "/untrusted/venv")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-cfg1-fake-not-a-credential")
@@ -314,7 +338,7 @@ def test_combination_uses_fixed_install_clean_environment_and_isolated_probe(
 
     monkeypatch.setattr(install_checker.subprocess, "run", fake_run)
 
-    result = install_checker.check_combination(name, wheels, output)
+    result = install_checker.check_combination(name, wheels, output, repository)
 
     assert result["status"] == "PASS"
     assert calls[0][0] == install_checker.venv_argv(name, output)
@@ -326,6 +350,10 @@ def test_combination_uses_fixed_install_clean_environment_and_isolated_probe(
     assert json.loads(probe_argv[5]) == {
         package: str(wheels[package]) for package in EXPECTED_COMBINATION_PROJECTS[name]
     }
+    if name == "agents-core":
+        assert probe_argv[6] == "# Controlled public example fixture\n"
+    else:
+        assert len(probe_argv) == 6
     assert len(calls) == 3
     for index, (_argv, kwargs) in enumerate(calls):
         assert kwargs["cwd"] == output
@@ -338,7 +366,10 @@ def test_combination_uses_fixed_install_clean_environment_and_isolated_probe(
         assert "OPENAI_API_KEY" not in kwargs["env"]
         assert "UV_PROJECT_ENVIRONMENT" not in kwargs["env"]
         assert kwargs["env"]["UV_NO_CONFIG"] == "1"
-        assert Path(kwargs["env"]["UV_CACHE_DIR"]) == output / "uv-cache"
+        if name == "agents-core":
+            assert "UV_CACHE_DIR" not in kwargs["env"]
+        else:
+            assert Path(kwargs["env"]["UV_CACHE_DIR"]) == output / "uv-cache"
     assert probe_kwargs["timeout"] == 30
 
 
@@ -722,10 +753,16 @@ def test_main_single_combination_keeps_other_results_not_run(
     wheels = _make_wheels(tmp_path, install_checker)
     calls = []
 
-    def fake_build(_repository, _output):
-        return wheels
+    def fake_build(actual_repository, actual_output, projects):
+        assert actual_repository == repository.resolve()
+        assert actual_output == output.resolve()
+        assert projects == ("sidera-control-plane-client",)
+        return {"sidera-control-plane-client": wheels["sidera-control-plane-client"]}
 
-    def fake_check(name, _wheels, _output):
+    def fake_check(name, selected_wheels, actual_output, actual_repository):
+        assert set(selected_wheels) == {"sidera-control-plane-client"}
+        assert actual_output == output.resolve()
+        assert actual_repository == repository.resolve()
         calls.append(name)
         return {"status": "PASS", "packages": {}}
 
@@ -747,7 +784,7 @@ def test_main_single_combination_keeps_other_results_not_run(
     result = json.loads(rendered)
     assert rendered.count("\n") == 1
     assert exit_code == 0
-    assert result["status"] == "PARTIAL"
+    assert result["status"] == "PASS"
     assert result["provider_calls"] == 0
     assert result["combinations"]["public-client"]["status"] == "PASS"
     assert {
@@ -800,7 +837,9 @@ def test_main_combination_failure_exits_one_and_preserves_not_run(
 
     monkeypatch.setattr(install_checker, "build_wheels", lambda *_args: wheels)
 
-    def fail_combination(name, _wheels, _output):
+    def fail_combination(name, _wheels, actual_output, actual_repository):
+        assert actual_output == output.resolve()
+        assert actual_repository == repository.resolve()
         if name == "gateway-core":
             raise install_checker.CheckFailure("dependency_boundary_failed", name)
         pytest.fail(f"unexpected combination: {name}")

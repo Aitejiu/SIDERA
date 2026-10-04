@@ -4089,13 +4089,16 @@ class CollaborationInputSelectionModel(Base):
             name="ck_collaboration_input_selections_hashes",
         ),
         CheckConstraint(
-            "jsonb_typeof(groups_json) = 'array' "
-            "AND jsonb_array_length(groups_json) >= 1",
+            "jsonb_typeof(groups_json) = 'array'",
             name="ck_collaboration_input_selections_groups_array",
         ),
         CheckConstraint(
             "jsonb_typeof(hard_inputs_json) = 'array'",
             name="ck_collaboration_input_selections_hard_inputs_array",
+        ),
+        CheckConstraint(
+            "jsonb_array_length(groups_json) + jsonb_array_length(hard_inputs_json) >= 1",
+            name="ck_collaboration_input_selections_nonempty",
         ),
         ForeignKeyConstraint(
             ["workspace_id"],

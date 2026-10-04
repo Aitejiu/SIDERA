@@ -34,6 +34,7 @@ def test_opencode_planner_builder_forwards_selected_settings_and_secrets(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    from sidera_control_plane.adapters import opencode_planner
     from sidera_control_plane.composition import planner_adapters
 
     settings = SimpleNamespace(
@@ -55,7 +56,7 @@ def test_opencode_planner_builder_forwards_selected_settings_and_secrets(
         captured.update(kwargs)
         return adapter
 
-    monkeypatch.setattr(planner_adapters, "OpenCodePlannerAdapter", capture)
+    monkeypatch.setattr(opencode_planner, "OpenCodePlannerAdapter", capture)
     builders = planner_adapters.build_planner_adapter_builders(
         settings,
         acceptance_guard=cast(Any, guard),

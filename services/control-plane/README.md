@@ -3,7 +3,7 @@
 The SIDERA control plane is a deterministic FastAPI service for Task commands,
 normalized operational queries, immutable Events, transactional Outbox
 delivery, modular Workers, Execution leases, scheduling, and Gateway recovery.
-PostgreSQL is its only authoritative store. The R3 Gateway launches one
+PostgreSQL is its only authoritative store. The legacy R3 Gateway launches one
 OpenCode ACP child process per Execution through a replaceable Adapter; it does
 not own the Main Agent, collaboration topology, user memory, or knowledge
 content.
@@ -13,6 +13,110 @@ Public HTTP contracts are documented in the [API guide](../../docs/api/README.md
 This component README covers Control Plane-specific preflight, migrations,
 planning profile payloads, WorkContext backfill, ContextPackage assembly, and
 operator commands.
+
+## Native Public Composition
+
+An embedding host supplies the public `sidera_agents` execution, catalog,
+observations, runtime inventory, source routing and trusted request authority.
+The Control Plane does not construct an agents engine, probe a Harness, read
+credentials, select a model or start a Run during construction.
+
+```python
+from sidera_control_plane.composition.native_runtime import (
+    create_control_plane_runtime,
+)
+
+runtime = create_control_plane_runtime(
+    settings,
+    agent_execution,
+    agent_catalog,
+    agent_observations,
+    source_router,
+    request_authorizer,
+    agent_runtimes=agent_runtimes,
+)
+```
+
+Use an explicit owned PostgreSQL URL and owned execution/result/artifact paths in
+`Settings`. Enable `result_inputs_enabled` and `result_integration_enabled` for
+the checked-result workflow. Install the Control Plane with its declared local
+`sidera-agents` and `sidera-runtime-guard` dependencies. Existing migrations and
+their configuration are packaged in the wheel; no repository checkout or
+editable import is required by the runtime.
+
+`runtime.readiness()` checks the expected schema without changing it. Explicit
+`runtime.migrate()` upgrades only its configured database; serving and workspace
+setup do not migrate or seed an unknown target. `/healthz` is public and inert.
+Protected reads and writes require `request_authorizer.authenticate_request`,
+`identity_for_grant` and action/target `require` checks. Command body actor labels
+are not authentication. Human confirmation additionally requires the configured
+local user identity and exact proposal version/hash.
+
+Register the stable `runtime.context_source_reader` and
+`runtime.execution_authorizer` with the host's default-deny routers before
+starting background work. These readers authorize saved CP Worker/Planner grants;
+the incoming host source router is not a fallback for CP-owned context. Shared
+agents services remain owned by the host.
+
+```python
+runtime.migrate()
+assert runtime.readiness()
+# Bind the CP public readers to the host routers here.
+runtime.start_background(background_identity=verified_system_identity)
+```
+
+The background identity is an explicit host-verified `ControlPlaneIdentity` with
+actor type `system`, the configured local principal and its original host grant.
+It is separate from HTTP user identity. Startup composes the existing scheduler,
+activation, context, collaboration, transition, result, lease recovery,
+notification and Gateway/Planner consumers under the existing single CP owner.
+No separate application task loop or stdout Outbox consumer is needed.
+
+### Workspace Setup
+
+`runtime.configure_workspace(request, grant_id=verified_user_grant)` accepts
+`WorkspaceSetupRequest` from `sidera_control_plane.composition.native_runtime`:
+
+```python
+request = WorkspaceSetupRequest(
+    workspace_id,
+    explicit_repository_directory,
+    0,  # Create; use the saved version for subsequent compare-and-swap updates.
+    planning_budget,
+    selected_planner_profile_ref,
+    verification_checks=explicit_check_specs,
+)
+receipt = runtime.configure_workspace(request, grant_id=verified_user_grant)
+```
+
+The repository must be an authorized absolute local Git root with an existing
+HEAD, not a symlink escape. First setup requires an explicit enabled, compatible
+Planner `ProfileRef` and nonempty existing `CheckSpecV1` checks. No Profile, model,
+verification command, task or repository content is invented. Setup stores
+configuration only; it does not run checks or modify the user's Git repository.
+
+The receipt contains the workspace version, an opaque repository reference and
+`PlanningPolicyRef(policy_id, version)`, not an agents Profile ID. Submit that
+policy and its pinned Planner through ordinary `SubmitTaskGoal`, then approve
+the exact proposal through the public human command boundary. Identical setup is
+idempotent. Changed setup requires the current expected version and retains old
+queued module/policy pins. On update, omitted Planner/check inputs retain existing
+pins; an explicit empty check tuple cannot disable verification.
+
+### Shutdown
+
+`runtime.close(grace_seconds=30.0)` returns a boolean. It fences new admissions
+and mutations, retains authorized reads while draining, and observes/stops only
+the original saved CP Worker/Planner operations and owned local verification
+processes. Protected requests and their
+dependency cleanup are included in the drain. A timeout or unresolved original
+operation returns `False` and retains owned resources; keep the host agents
+background service running and repeat close. `True` confirms CP consumers/stores
+are closed. Repeated completed close is idempotent. CP never closes the externally
+supplied agents service or an unrelated conversation.
+
+The standalone `create_app`/worker CLI material below describes explicit legacy
+consumers; it is not the authenticated native composition entrypoint.
 
 ## Prerequisites
 

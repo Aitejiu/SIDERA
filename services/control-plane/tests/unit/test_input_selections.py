@@ -10,6 +10,7 @@ import pytest
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.input_selections import (
     CollaborationInputSelectionV1,
+    InputSelectionHardInputV1,
 )
 from sidera_control_plane.domain.result_inputs import ResultInputArtifact
 
@@ -282,3 +283,52 @@ def test_wire_order_is_normalized_without_changing_selection_hash() -> None:
         "b",
     )
     assert restored.selection_hash == selection_mapping()["selection_hash"]
+
+
+def test_hard_only_selection_round_trips_without_fabricating_optional_groups() -> None:
+    first = CollaborationInputSelectionV1.from_mapping(selection_mapping())
+    hard = InputSelectionHardInputV1(
+        dependency_key="source-a-to-target",
+        rule_hash="a" * 64,
+        source=first.groups[0].sources[0],
+    )
+    draft = replace(first, groups=(), hard_inputs=(hard,))
+    value = replace(draft, selection_hash=draft.compute_selection_hash())
+    assert CollaborationInputSelectionV1.from_mapping(value.to_mapping()) == value
+    assert value.to_mapping()["groups"] == []
+    assert value.schema_version == 1 and value.hard_inputs == (hard,)
+    assert (
+        first.selection_hash
+        == "51e158d5614e750802aaa43afec1274799c2fbad5b8fcf7e1317699dcd633b16"
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ("empty", "malformed", "duplicate", "target", "hash", "missing", "empty_sources"),
+)
+def test_hard_only_selection_keeps_content_source_and_hash_validation(invalid) -> None:
+    first = CollaborationInputSelectionV1.from_mapping(selection_mapping())
+    hard = InputSelectionHardInputV1(
+        "source-a-to-target", "a" * 64, first.groups[0].sources[0]
+    )
+    draft = replace(first, groups=(), hard_inputs=(hard,))
+    value = replace(draft, selection_hash=draft.compute_selection_hash()).to_mapping()
+    if invalid == "empty":
+        value["hard_inputs"] = []
+    elif invalid == "malformed":
+        value["hard_inputs"] = {}
+    elif invalid == "duplicate":
+        value["hard_inputs"] = [hard.to_mapping(), hard.to_mapping()]
+    elif invalid == "target":
+        value["hard_inputs"][0]["source"]["worker_item_id"] = str(
+            first.target_worker_item_id
+        )
+    elif invalid == "hash":
+        value["hard_inputs"][0]["rule_hash"] = "b" * 64
+    elif invalid == "missing":
+        del value["hard_inputs"]
+    else:
+        value["groups"] = [{"group_key": "empty", "rule_hash": "a" * 64, "sources": []}]
+    with pytest.raises(ValidationError):
+        CollaborationInputSelectionV1.from_mapping(value)

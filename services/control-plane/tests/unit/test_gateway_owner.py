@@ -115,7 +115,10 @@ def test_native_handoff_factory_requires_owned_workspace_provider() -> None:
         )
 
 
-def test_gateway_owner_builds_consumers_from_one_runtime(monkeypatch) -> None:
+@pytest.mark.parametrize("use_acceptance_guard", (True, False))
+def test_gateway_owner_builds_consumers_from_one_runtime(
+    monkeypatch, use_acceptance_guard
+) -> None:
     runtime = _runtime()
     calls: list[tuple[str, object]] = []
 
@@ -139,8 +142,10 @@ def test_gateway_owner_builds_consumers_from_one_runtime(monkeypatch) -> None:
     monkeypatch.setattr(gateway_owner, "Database", lambda _url: _Database())
     monkeypatch.setattr(gateway_owner, "GatewayOwnerLock", _Lock)
 
-    def build(_settings, *, owner_check):
+    def build(_settings, *, owner_check, use_acceptance_guard=True, assignment_claim_check=None):
         assert owner_check()
+        assert use_acceptance_guard is expected_guard
+        assert assignment_claim_check is None
         runtime.owner_check = owner_check
         return runtime
 
@@ -160,8 +165,10 @@ def test_gateway_owner_builds_consumers_from_one_runtime(monkeypatch) -> None:
         ),
     )
 
+    expected_guard = use_acceptance_guard
     owner = gateway_owner.build_gateway_owner(
-        SimpleNamespace(database_url="postgresql+psycopg://test")
+        SimpleNamespace(database_url="postgresql+psycopg://test"),
+        **({"use_acceptance_guard": False} if not use_acceptance_guard else {}),
     )
 
     assert calls == [("input", runtime), ("handoff", runtime)]
@@ -200,10 +207,22 @@ def test_gateway_owner_acquires_database_lock_before_consumable_runtime(
     runtime = _Runtime()
     monkeypatch.setattr(gateway_owner, "Database", lambda _url: _Database())
     monkeypatch.setattr(gateway_owner, "GatewayOwnerLock", _Lock)
+
+    def build(
+        _settings,
+        *,
+        owner_check,
+        use_acceptance_guard=True,
+        assignment_claim_check=None,
+    ):
+        assert assignment_claim_check is None
+        events.append("runtime-built")
+        return runtime
+
     monkeypatch.setattr(
         gateway_owner,
         "build_gateway",
-        lambda _settings, *, owner_check: events.append("runtime-built") or runtime,
+        build,
     )
     monkeypatch.setattr(
         gateway_owner,

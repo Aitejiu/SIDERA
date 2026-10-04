@@ -18,7 +18,16 @@ PROJECT_PATHS = {
 }
 CLOSURES = {
     "agents-core": ("sidera-agents",),
-    "control-plane-core": ("sidera-control-plane", "sidera-runtime-guard"),
+    "control-plane-core": (
+        "sidera-control-plane",
+        "sidera-agents",
+        "sidera-runtime-guard",
+    ),
+    "control-plane-agents": (
+        "sidera-control-plane",
+        "sidera-agents",
+        "sidera-runtime-guard",
+    ),
     "public-client": ("sidera-control-plane-client",),
     "gateway-core": ("sidera-main-agent-gateway", "sidera-runtime-guard"),
     "bridge-client": ("sidera-akashic-task-bridge", "sidera-control-plane-client"),
@@ -453,3 +462,109 @@ def test_agents_consumer_probe_rejects_invalid_installation_or_public_evidence(
         namespace["sys"].argv[3] = f"def main(): return {summary!r}\n"
     with pytest.raises(namespace["ProbeFailure"]):
         probe()
+
+
+@pytest.mark.parametrize("combination", ("control-plane-core", "control-plane-agents"))
+@pytest.mark.parametrize("failed", (False, True))
+def test_native_cp_selection_has_exact_required_closure_without_other_projects(
+    script,
+    tmp_path,
+    monkeypatch,
+    capsys,
+    combination,
+    failed,
+):
+    expected = ("sidera-control-plane", "sidera-agents", "sidera-runtime-guard")
+    repository = _repository(tmp_path, expected)
+    output = tmp_path / "evidence"
+    calls = []
+
+    def run(argv, output_root, timeout, code, name=None):
+        calls.append(list(argv))
+        if argv[:2] == ["uv", "build"]:
+            project = next(
+                package
+                for package in expected
+                if Path(argv[2]) == repository / PROJECT_PATHS[package]
+            )
+            wheel_directory = output_root / "wheels"
+            wheel_directory.mkdir(exist_ok=True)
+            (
+                wheel_directory / f"{project.replace('-', '_')}-0.1.0-py3-none-any.whl"
+            ).write_bytes(b"controlled wheel boundary")
+        if "-I" in argv:
+            return subprocess.CompletedProcess(
+                argv,
+                int(failed),
+                json.dumps(
+                    {
+                        "status": "FAIL" if failed else "PASS",
+                        "code": "dependency_boundary_failed" if failed else None,
+                        "packages": {
+                            package: {"version": "0.1.0", "record_match": not failed}
+                            for package in expected
+                        },
+                    }
+                ),
+                "",
+            )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(script, "_run", run)
+    assert script.main(
+        [
+            "--repository",
+            str(repository),
+            "--output-root",
+            str(output),
+            "--combination",
+            combination,
+        ]
+    ) == int(failed)
+    report = json.loads(capsys.readouterr().out)
+    selected = report["combinations"][combination]
+    assert selected["status"] == ("FAIL" if failed else "PASS")
+    assert (
+        set(selected["source_fingerprint"])
+        == set(selected["packages"])
+        == set(expected)
+    )
+    assert all(
+        item == {"status": "NOT_RUN"}
+        for name, item in report["combinations"].items()
+        if name != combination
+    )
+    assert [
+        Path(argv[2]).relative_to(repository).as_posix()
+        for argv in calls
+        if argv[:2] == ["uv", "build"]
+    ] == [PROJECT_PATHS[package] for package in expected]
+    probes = [argv for argv in calls if "-I" in argv]
+    assert len(probes) == 1 and set(json.loads(probes[0][5])) == set(expected)
+    assert not any("--editable" in argv for argv in calls)
+    assert report["provider_calls"] == 0
+
+
+def test_native_cp_probe_uses_public_inert_composition_and_packaged_resources(script):
+    namespace = _probe_namespace(script)
+    probe = namespace.get("_probe_control_plane_agents")
+    assert callable(probe), "Native CP public installed probe is missing"
+    project_map = namespace["PROJECTS"]
+    expected = ("sidera-control-plane", "sidera-agents", "sidera-runtime-guard")
+    assert (
+        project_map["control-plane-core"]
+        == project_map["control-plane-agents"]
+        == expected
+    )
+    tree = ast.parse(script.PROBE_SOURCE)
+    function = next(
+        item
+        for item in tree.body
+        if isinstance(item, ast.FunctionDef)
+        and item.name == "_probe_control_plane_agents"
+    )
+    imported = {
+        item.module for item in ast.walk(function) if isinstance(item, ast.ImportFrom)
+    }
+    assert "sidera_control_plane.composition.native_runtime" in imported
+    assert not any(name and (".persistence" in name or ".harnesses" in name or ".adapters" in name) for name in imported)

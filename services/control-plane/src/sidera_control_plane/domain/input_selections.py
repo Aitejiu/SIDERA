@@ -345,6 +345,8 @@ class CollaborationInputSelectionV1:
             object.__setattr__(self, name, _hash(getattr(self, name), name))
         object.__setattr__(self, "groups", _group_array(self.groups))
         object.__setattr__(self, "hard_inputs", _hard_input_array(self.hard_inputs))
+        if not self.groups and not self.hard_inputs:
+            raise ValidationError("selection must contain groups or hard inputs")
         group_keys = tuple(item.group_key for item in self.groups)
         if len(group_keys) != len(set(group_keys)):
             raise ValidationError("selection group keys must be unique")
@@ -540,8 +542,6 @@ def _group_array(value: object) -> tuple[InputSelectionGroupV1, ...]:
         else InputSelectionGroupV1.from_mapping(item)
         for item in value
     )
-    if not items:
-        raise ValidationError("selection groups must not be empty")
     return tuple(sorted(items, key=lambda item: item.group_key))
 
 
