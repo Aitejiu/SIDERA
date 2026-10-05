@@ -84,7 +84,7 @@ def test_product_shares_actual_agent_public_objects_and_is_inert(
 
 
 def test_internal_service_identity_is_stable_and_not_http_auth(
-    settings_values, no_database_connections
+    settings_values, no_database_connections, monkeypatch
 ):
     composition = product_module()
     from sidera_product.config import ProductSettings
@@ -95,6 +95,14 @@ def test_internal_service_identity_is_stable_and_not_http_auth(
     second = composition.build_product_runtime(
         ProductSettings.model_validate(settings_values)
     )
+    queried = []
+
+    def missing_session(*, session_id=None, token_digest=None):
+        assert session_id == UUID(int=789) and token_digest is None
+        queried.append(session_id)
+        return None
+
+    monkeypatch.setattr(first.authority_store, "find_session", missing_session)
     try:
         assert first.background_identity == second.background_identity
         identity = first.background_identity
@@ -103,7 +111,9 @@ def test_internal_service_identity_is_stable_and_not_http_auth(
         assert (
             first.request_authorizer.identity_for_grant(identity.grant_id) is identity
         )
+        assert queried == []
         assert first.request_authorizer.identity_for_grant(UUID(int=789)) is None
+        assert queried == [UUID(int=789)]
         first.request_authorizer.require(
             identity.grant_id, "profile.list", identity_workspace(first)
         )
@@ -115,6 +125,7 @@ def test_internal_service_identity_is_stable_and_not_http_auth(
             first.request_authorizer.require(
                 identity.grant_id, "profile.list", UUID(int=321)
             )
+        assert queried == [UUID(int=789)]
     finally:
         assert first.close(grace_seconds=0) is True
         assert second.close(grace_seconds=0) is True

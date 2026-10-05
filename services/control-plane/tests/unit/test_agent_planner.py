@@ -282,6 +282,194 @@ def planner_drain_case(request):
     )
 
 
+@pytest.mark.parametrize("path", ("live", "recovery"))
+@pytest.mark.parametrize("kind", ("message", "progress.updated"))
+@pytest.mark.parametrize("shape", ("full", "chunks"))
+def test_native_planner_public_assistant_messages_reach_real_parser_with_original_fences(
+    planner_drain_case, path, kind, shape
+):
+    from sidera_agents.contracts import RunEvent
+
+    from sidera_control_plane.application.agent_planner_adapter import (
+        AgentPlannerAdapter,
+    )
+    from sidera_control_plane.application.execution_authority import (
+        PlanningActionTarget,
+    )
+    from sidera_control_plane.application.planner_runtime import (
+        PlannerClarificationResult,
+        PlannerPolicyConstraints,
+        PlannerRunControl,
+    )
+
+    s = planner_drain_case
+    authority = replace(s.authority, actions=("run.read", "run.stop", "profile.read"))
+    original_input, snapshot = _planner_input()
+    snapshot = replace(
+        native_snapshot(snapshot),
+        workspace_id=authority.workspace_id,
+        profile_id=authority.planning_profile_id,
+        profile_version=authority.planning_profile_version,
+        planner_agent_ref=authority.profile_ref,
+    )
+    planner_input = replace(
+        original_input,
+        operation_id=authority.operation_id,
+        planning_request_id=authority.planning_request_id,
+        planning_run_id=authority.planning_run_id,
+        brief=replace(
+            original_input.brief, planning_request_id=authority.planning_request_id
+        ),
+        profile_snapshot=snapshot,
+        policy_constraints=PlannerPolicyConstraints.from_profile_snapshot(snapshot),
+    )
+    with s.adapter._uow_factory() as uow:
+        saved_run = uow.planning_runs.get(
+            authority.planning_run_id, authority.workspace_id
+        )
+        saved_run.id, saved_run.workspace_id = (
+            authority.planning_run_id,
+            authority.workspace_id,
+        )
+        saved_run.profile_snapshot = snapshot
+        saved_run.brief_revision = planner_input.brief_revision
+        saved_run.status = SimpleNamespace(value="running")
+        saved_request = SimpleNamespace(
+            id=authority.planning_request_id,
+            workspace_id=authority.workspace_id,
+            current_run_id=authority.planning_run_id,
+            current_brief_revision=planner_input.brief_revision,
+            status=SimpleNamespace(value="planning"),
+            profile_snapshot=snapshot,
+        )
+        uow.planning_requests.get = lambda *args: saved_request
+        uow.planning_authorities.get = lambda *args: authority
+
+        def active_lease(run_id, workspace_id):
+            assert (run_id, workspace_id) == (
+                authority.planning_run_id,
+                authority.workspace_id,
+            )
+            return s.lease
+
+        uow.planning_leases.get_active_for_run = active_lease
+    body = json.dumps(
+        {
+            "result_type": "clarification",
+            "clarifications": [
+                {
+                    "question": "Which verified output?",
+                    "rationale": "The exact output must be specified",
+                    "answer_type": "text",
+                    "options": [],
+                    "blocking": True,
+                }
+            ],
+        }
+    )
+    pieces = (
+        (("agent_message_chunk", "discard this prefix"), ("agent_message", body))
+        if shape == "full"
+        else (
+            ("agent_message_chunk", body[: len(body) // 2]),
+            ("agent_message_chunk", body[len(body) // 2 :]),
+        )
+    )
+    observed_at = s.state.events[0].occurred_at
+
+    def event(sequence, event_kind, *, response=s.response_id, data=None):
+        return RunEvent(
+            run_id=s.state.link.run_id,
+            sequence=sequence,
+            kind=event_kind,
+            occurred_at=observed_at,
+            operation_id=authority.operation_id,
+            response_id=response,
+            data={} if data is None else data,
+        )
+
+    s.state.events = (
+        event(1, "response.started"),
+        *(
+            event(index, kind, data={"update_type": update, "text": value})
+            for index, (update, value) in enumerate(pieces, start=2)
+        ),
+        event(4, kind, data={"update_type": "tool_call", "text": "not assistant JSON"}),
+        event(
+            5,
+            kind,
+            data={
+                "update_type": "agent_thought",
+                "text": "private reasoning is not a result",
+            },
+        ),
+        event(
+            6,
+            kind,
+            response=uuid4(),
+            data={
+                "update_type": "agent_message",
+                "text": "foreign response is not a result",
+            },
+        ),
+        event(7, "response.completed"),
+        event(8, "run.closed", response=None, data={"status": "completed"}),
+    )
+    s.state.snapshot = type(s.state.snapshot).model_validate(
+        {
+            **s.state.snapshot.model_dump(),
+            "state": "completed",
+            "last_event_sequence": 8,
+        }
+    )
+    upstream_actions = []
+
+    def upstream_require(grant_id, action, target):
+        assert grant_id == authority.upstream_grant_id and action == "profile.read"
+        assert isinstance(target, PlanningActionTarget)
+        assert (target.workspace_id, target.planning_run_id, target.target) == (
+            authority.workspace_id,
+            authority.planning_run_id,
+            authority.profile_ref,
+        )
+        upstream_actions.append(action)
+
+    def no_new_workspace(**kwargs):
+        pytest.fail("An already saved original Planner prepared a new workspace")
+
+    adapter = AgentPlannerAdapter(
+        services=s.adapter._services,
+        uow_factory=s.adapter._uow_factory,
+        workspace_provider=SimpleNamespace(prepare=no_new_workspace),
+        materializer=None,
+        authorizer=SimpleNamespace(require=upstream_require),
+        owner_check=lambda: s.state.owner,
+        clock=lambda: observed_at,
+    )
+    if path == "live":
+        result = adapter.plan(
+            planner_input,
+            PlannerRunControl(
+                operation_id=authority.operation_id,
+                started_at=observed_at,
+                deadline_at=None,
+                owner_id=authority.owner_id,
+                lease_id=authority.lease_id,
+                fencing_token=authority.fencing_token,
+            ),
+        )
+    else:
+        result = adapter.recover_original_result(planner_input)
+    assert isinstance(result, PlannerClarificationResult)
+    assert result.clarifications[0].question == "Which verified output?"
+    assert result.clarifications[0].blocking is True
+    assert result.usage.input_tokens is None and result.usage.cost_microunits is None
+    assert s.state.link.closed and s.state.link.event_cursor == 8
+    assert s.state.link.response_id == s.response_id and s.state.cursors == [0]
+    assert not s.state.starts and not s.state.stops and not s.state.queries
+    assert upstream_actions == (["profile.read"] if path == "live" else [])
+
+
 def test_planner_halt_unknown_stop_does_not_close_stopped_snapshot_without_cursor(
     planner_drain_case,
 ):

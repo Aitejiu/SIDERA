@@ -40,6 +40,15 @@ class WorkspaceSetupReceipt:
     status: Literal["created", "updated", "unchanged"]
 
 
+@dataclass(frozen=True, slots=True)
+class WorkspaceSetupView:
+    workspace_id: UUID
+    version: int
+    planning_policy_ref: PlanningPolicyRef
+    repository_ref: str
+    planner_agent_ref: ProfileRef
+
+
 def native_local_slot_ids(
     workspace_module_id: UUID, verification_module_id: UUID
 ) -> tuple[UUID, UUID]:

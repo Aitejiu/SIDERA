@@ -29,6 +29,7 @@ from sidera_control_plane.api.dependencies import (
     get_assignment_agent_catalog,
     get_assignment_agent_runtimes,
     get_assignment_authorizer,
+    get_native_worker_services,
     get_trusted_assignment_identity,
 )
 from sidera_control_plane.application.agent_worker_adapter import NativeWorkerServices
@@ -44,11 +45,19 @@ from sidera_control_plane.application.request_authority import (
     ControlPlaneRequestAuthorizer,
     ControlPlaneRequestTarget,
 )
+from sidera_control_plane.application.task_tool_scope import read_task_tool_scope
 from sidera_control_plane.application.worker_commands import WorkerCommandHandler
 from sidera_control_plane.collaboration_worker import build_collaboration_worker
-from sidera_control_plane.composition.native_setup import configure_native_workspace
+from sidera_control_plane.composition.native_setup import (
+    configure_native_workspace,
+    read_native_workspace_setup,
+)
 from sidera_control_plane.config import Settings
 from sidera_control_plane.context_package_worker import build_context_package_worker
+from sidera_control_plane.domain.agent_tools import (
+    ControlPlaneToolScope,
+    WorkerProgressTarget,
+)
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.errors import VersionConflict
 from sidera_control_plane.domain.execution import ExecutionSessionStatus
@@ -56,6 +65,7 @@ from sidera_control_plane.domain.native_setup import (
     PlanningPolicyRef,
     WorkspaceSetupReceipt,
     WorkspaceSetupRequest,
+    WorkspaceSetupView,
 )
 from sidera_control_plane.gateway_owner import GatewayOwner, build_gateway_owner
 from sidera_control_plane.notification_worker import build_notification_worker
@@ -86,9 +96,12 @@ __all__ = [
     "ControlPlaneRequestAuthorizer",
     "ControlPlaneRequestTarget",
     "ControlPlaneRuntime",
+    "ControlPlaneToolScope",
     "PlanningPolicyRef",
+    "WorkerProgressTarget",
     "WorkspaceSetupReceipt",
     "WorkspaceSetupRequest",
+    "WorkspaceSetupView",
     "create_control_plane_runtime",
 ]
 
@@ -216,6 +229,9 @@ class ControlPlaneRuntime:
         )
         self.app.dependency_overrides[get_assignment_agent_runtimes] = lambda: (
             agent_runtimes
+        )
+        self.app.dependency_overrides[get_native_worker_services] = lambda: (
+            self._services
         )
 
     @property
@@ -1161,6 +1177,44 @@ class ControlPlaneRuntime:
                 self._drained.clear()
                 self._condition.notify_all()
 
+    def get_workspace_setup(
+        self, workspace_id: UUID, *, grant_id: UUID
+    ) -> WorkspaceSetupView | None:
+        with self._condition:
+            if self._closed or self._closing:
+                raise AgentError("control_plane_closed", "Control plane is closed")
+            self._active_work += 1
+            self._regular_work += 1
+        try:
+            authorizer = self._request_authorizer
+            current = None
+            if authorizer is not None and type(grant_id) is UUID:
+                try:
+                    current = authorizer.identity_for_grant(grant_id)
+                except Exception:  # noqa: BLE001 - Host failures never disclose private state.
+                    current = None
+            if (
+                authorizer is None
+                or not isinstance(current, ControlPlaneIdentity)
+                or current.grant_id != grant_id
+                or current.principal_id != self._settings.local_actor_id
+                or type(workspace_id) is not UUID
+            ):
+                raise AgentError("permission_denied", "Workspace setup read denied")
+            try:
+                authorizer.require(grant_id, "workspace.setup.read", workspace_id)
+            except Exception:  # noqa: BLE001 - Host failures never disclose private state.
+                raise AgentError(
+                    "permission_denied", "Workspace setup read denied"
+                ) from None
+            return read_native_workspace_setup(self._uow, workspace_id)
+        finally:
+            with self._condition:
+                self._active_work -= 1
+                self._regular_work -= 1
+                self._drained.clear()
+                self._condition.notify_all()
+
     def readiness(self) -> bool:
         if self._closed or self._closing or self._startup_failed:
             return False
@@ -1169,6 +1223,29 @@ class ControlPlaneRuntime:
             if owner_check is None or not owner_check():
                 return False
         return schema_ready(self._database)
+
+    def read_task_tool_scope(
+        self, *, grant_id: UUID, connection_id: UUID
+    ) -> ControlPlaneToolScope:
+        with self._condition:
+            if self._closed or self._closing:
+                raise AgentError("control_plane_closed", "Control plane is closed")
+            self._active_work += 1
+            self._regular_work += 1
+        try:
+            return read_task_tool_scope(
+                self._uow,
+                catalog=self._catalog,
+                authorizer=self._execution_authorizer,
+                grant_id=grant_id,
+                connection_id=connection_id,
+            )
+        finally:
+            with self._condition:
+                self._active_work -= 1
+                self._regular_work -= 1
+                self._drained.clear()
+                self._condition.notify_all()
 
 
 def create_control_plane_runtime(

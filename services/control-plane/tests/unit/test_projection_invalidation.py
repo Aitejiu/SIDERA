@@ -16,6 +16,36 @@ WORKER_ID = UUID("42000000-0000-0000-0000-000000000001")
 EXECUTION_ID = UUID("61000000-0000-0000-0000-000000000001")
 
 
+def test_progress_fact_invalidates_only_its_worker_workspace_and_activity():
+    report_id = UUID("91000000-0000-0000-0000-000000000001")
+    event = EventData(
+        id=report_id,
+        workspace_id=WORKSPACE_ID,
+        aggregate_type="worker_progress_report",
+        aggregate_id=report_id,
+        aggregate_version=1,
+        event_type="WorkerProgressReported",
+        payload={
+            "execution_id": str(EXECUTION_ID),
+            "worker_item_id": str(WORKER_ITEM_ID),
+            "root_task_id": str(ROOT_TASK_ID),
+        },
+        actor_type="agent",
+        actor_id="projection-test",
+        causation_id=report_id,
+        correlation_id=ROOT_TASK_ID,
+    )
+    targets = projection_targets_for_event(event)
+    assert {
+        (target.projection_type, target.resource_id, target.change_type)
+        for target in targets
+    } == {
+        ("worker_item_workspace", WORKER_ITEM_ID, "progress_reported"),
+        ("worker_item_activity", WORKER_ITEM_ID, "progress_reported"),
+    }
+    assert len(targets) == 2
+
+
 def _event(
     event_type: str,
     *,

@@ -69,6 +69,9 @@ class ProductSettings(BaseSettings):
     result_inputs_enabled: StrictBool = True
     result_integration_enabled: StrictBool = True
     managed_credentials_enabled: StrictBool = False
+    bootstrap_ttl_seconds: StrictInt = Field(default=300, ge=1, le=3600)
+    local_session_ttl_seconds: StrictInt = Field(default=43200, ge=1, le=604800)
+    tool_grant_ttl_seconds: StrictInt = Field(default=86400, ge=1, le=604800)
     selected_secrets: dict[str, SecretStr] = Field(default_factory=dict, repr=False)
     knowledge_base_url: str | None = None
     knowledge_token: SecretStr | None = Field(default=None, repr=False)
@@ -80,6 +83,9 @@ class ProductSettings(BaseSettings):
         "result_inputs_enabled",
         "result_integration_enabled",
         "managed_credentials_enabled",
+        "bootstrap_ttl_seconds",
+        "local_session_ttl_seconds",
+        "tool_grant_ttl_seconds",
         mode="before",
     )
     @classmethod

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -447,7 +447,10 @@ class ProposalMaterializer:
             != profile.planner_module_config_version
             or snapshot.proposal_schema_version != profile.proposal_schema_version
             or snapshot.execution_mode != profile.execution_mode
-            or snapshot.planner_agent_ref != profile.planner_agent_ref
+            or (
+                snapshot.execution_mode != "native_profile"
+                and snapshot.planner_agent_ref != profile.planner_agent_ref
+            )
         ):
             raise ValidationError(
                 "planning profile snapshot does not match confirmation"
@@ -480,6 +483,10 @@ class ProposalMaterializer:
 
         try:
             current_snapshot = profile.snapshot(snapshot.planner_capabilities)
+            if current_snapshot.execution_mode == "native_profile":
+                current_snapshot = replace(
+                    current_snapshot, planner_agent_ref=snapshot.planner_agent_ref
+                )
         except ValidationError as exc:
             raise ValidationError(
                 "planning profile snapshot does not match confirmation"

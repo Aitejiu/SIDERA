@@ -955,6 +955,35 @@ def test_ordinary_native_stop_queries_only_the_saved_original(ordinary_stop):
 
 
 @pytest.mark.parametrize("kind", ("stop", "query"))
+@pytest.mark.parametrize("terminal", ("completed", "failed"))
+def test_native_stop_confirms_positive_original_natural_closure(
+    ordinary_stop,
+    kind,
+    terminal,
+):
+    from sidera_agents.contracts import RunSnapshot
+
+    from sidera_control_plane.domain.gateway import DeliveryOutcome
+
+    s = ordinary_stop
+    s.snapshot = RunSnapshot.model_validate(
+        {**s.snapshot.model_dump(), "state": terminal}
+    )
+    original = s.snapshot
+    method = s.adapter.stop_session if kind == "stop" else s.adapter.get_stop
+    result = method(s.handle, operation_id=s.operation.operation_id)
+    assert result.outcome is DeliveryOutcome.DELIVERED
+    assert (
+        result.accepted_sequence == 2 and result.operation_id == s.receipt.operation_id
+    )
+    assert result.execution_session_id == s.session.id
+    assert s.snapshot is original and s.snapshot.state.value == terminal
+    assert sum(call[0] == "get_run" for call in s.calls) == 1
+    assert sum(call[0] == "stop" for call in s.calls) == (kind == "stop")
+    assert sum(call[0] == "get_stop" for call in s.calls) == (kind == "query")
+
+
+@pytest.mark.parametrize("kind", ("stop", "query"))
 @pytest.mark.parametrize(
     "bad",
     (

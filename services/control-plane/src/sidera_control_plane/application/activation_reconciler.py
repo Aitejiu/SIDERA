@@ -119,39 +119,33 @@ class ActivationReconciler:
         seen_ids: set[UUID] = set()
         now = self._clock()
 
-        with self._uow_factory() as uow:
-            blocked = uow.execution_requests.claim_blocked(now=now, limit=limit)
-            for request in blocked:
-                seen_ids.add(request.id)
-                examined += 1
-                try:
-                    with uow.savepoint():
-                        became_ready, was_deferred = self._reconcile_blocked(
-                            uow, request, now=now
-                        )
-                    readied += int(became_ready)
-                    deferred += int(was_deferred)
-                except Exception:
-                    failed += 1
-                    logger.exception(
-                        "activation_candidate_failed",
-                        extra={
-                            "workspace_id": str(request.workspace_id),
-                            "execution_request_id": str(request.id),
-                            "planning_request_id": str(request.planning_request_id),
-                        },
-                    )
-
-            ready = uow.execution_requests.claim_ready(now=now, limit=limit)
-            for request in ready:
-                if request.id not in seen_ids:
+        for status in (ExecutionRequestStatus.BLOCKED, ExecutionRequestStatus.READY):
+            with self._uow_factory() as discovery:
+                candidates = discovery.execution_requests.list_activation_candidates(
+                    status=status, now=now, limit=limit
+                )
+            for candidate in candidates:
+                if candidate.id not in seen_ids:
                     examined += 1
-                    seen_ids.add(request.id)
+                    seen_ids.add(candidate.id)
+                became_ready = False
+                execution_id = None
                 try:
-                    with uow.savepoint():
-                        execution_id, was_deferred = self._materialize_ready(
-                            uow, request, now=now
+                    with self._uow_factory() as uow:
+                        request = self._lock_candidate(
+                            uow, candidate, status=status, now=now
                         )
+                        if request is None:
+                            was_deferred = True
+                        elif status is ExecutionRequestStatus.BLOCKED:
+                            became_ready, was_deferred = self._reconcile_blocked(
+                                uow, request, now=now
+                            )
+                        else:
+                            execution_id, was_deferred = self._materialize_ready(
+                                uow, request, now=now
+                            )
+                    readied += int(became_ready)
                     if execution_id is not None:
                         materialized += 1
                         execution_ids.append(execution_id)
@@ -161,9 +155,9 @@ class ActivationReconciler:
                     logger.exception(
                         "activation_candidate_failed",
                         extra={
-                            "workspace_id": str(request.workspace_id),
-                            "execution_request_id": str(request.id),
-                            "planning_request_id": str(request.planning_request_id),
+                            "workspace_id": str(candidate.workspace_id),
+                            "execution_request_id": str(candidate.id),
+                            "planning_request_id": str(candidate.planning_request_id),
                         },
                     )
 
@@ -175,6 +169,47 @@ class ActivationReconciler:
             failed=failed,
             execution_ids=tuple(execution_ids),
         )
+
+    @staticmethod
+    def _lock_candidate(
+        uow: ControlPlaneUnitOfWork,
+        candidate: ExecutionRequest,
+        *,
+        status: ExecutionRequestStatus,
+        now: datetime,
+    ) -> ExecutionRequest | None:
+        # Match the parent-first order used by decision, governance and handoff.
+        uow.plans.get_head(
+            candidate.root_task_id, candidate.workspace_id, for_update=True
+        )
+        uow.tasks.get(candidate.subtask_id, candidate.workspace_id, for_update=True)
+        uow.worker_items.get(
+            candidate.worker_item_id, candidate.workspace_id, for_update=True
+        )
+        request = uow.execution_requests.get(
+            candidate.id, candidate.workspace_id, for_update=True
+        )
+        if (
+            request is None
+            or request.status is not status
+            or request.not_before > now
+            or any(
+                getattr(request, field) != getattr(candidate, field)
+                for field in (
+                    "workspace_id",
+                    "id",
+                    "planning_request_id",
+                    "proposal_revision_id",
+                    "plan_snapshot_id",
+                    "plan_generation",
+                    "root_task_id",
+                    "subtask_id",
+                    "worker_item_id",
+                )
+            )
+        ):
+            return None
+        return request
 
     def _reconcile_blocked(
         self,

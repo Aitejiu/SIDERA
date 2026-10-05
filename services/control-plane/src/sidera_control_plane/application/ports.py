@@ -84,6 +84,7 @@ from sidera_control_plane.domain.execution import Execution, ExecutionSession
 from sidera_control_plane.domain.execution_requests import (
     ExecutionRequest,
     ExecutionRequestDependency,
+    ExecutionRequestStatus,
 )
 from sidera_control_plane.domain.gateway import (
     AdapterEvent,
@@ -1039,6 +1040,12 @@ class ExecutionRequestRepositoryPort(Protocol):
         raise NotImplementedError
 
     def save(self, request: ExecutionRequest, previous_version: int) -> None:
+        raise NotImplementedError
+
+    def list_activation_candidates(
+        self, *, status: ExecutionRequestStatus, now: datetime, limit: int
+    ) -> tuple[ExecutionRequest, ...]:
+        """Discover due BLOCKED/READY requests without acquiring row locks."""
         raise NotImplementedError
 
     def claim_ready(self, *, now: datetime, limit: int) -> tuple[ExecutionRequest, ...]:
@@ -2614,7 +2621,13 @@ class ExecutionAuthorityRepositoryPort(Protocol):
     def record_start(self, expected, receipt, *, now: datetime):
         raise NotImplementedError
 
-    def lock_intention(self, expected, *, now: datetime | None = None):
+    def lock_intention(
+        self,
+        expected,
+        *,
+        now: datetime | None = None,
+        allow_observation_advance: bool = False,
+    ):
         raise NotImplementedError
 
     def append_admission_history(self, pin):

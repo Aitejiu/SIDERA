@@ -64,6 +64,7 @@ class ControlPlaneClient:
         config: ControlPlaneClientConfig,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        auth: httpx.Auth | None = None,
     ) -> None:
         self._config = config
         self._projection_event_limit_bytes = 262_144
@@ -78,6 +79,7 @@ class ControlPlaneClient:
                 pool=config.request_timeout_seconds,
             ),
             transport=transport,
+            auth=auth,
         )
 
     async def execute_command(self, envelope: CommandEnvelope) -> CommandExecution:
@@ -409,6 +411,35 @@ class ControlPlaneClient:
         return await self._get_object(
             f"/api/v1/workspaces/{self._config.workspace_id}/planning-requests/{request_id}"
         )
+
+    async def list_tasks(
+        self, *, limit: int = 20, offset: int = 0
+    ) -> dict[str, JsonValue]:
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        if type(offset) is not int or not 0 <= offset <= 10_000:
+            raise ValueError("offset must be between 0 and 10000")
+        response = await self._request(
+            "GET",
+            "/api/v1/tasks",
+            params={
+                "workspace_id": str(self._config.workspace_id),
+                "limit": str(limit),
+                "offset": str(offset),
+            },
+        )
+        body = self._parse_json_object(response)
+        items = body.get("items")
+        if (
+            set(body) != {"items", "total", "limit", "offset"}
+            or not isinstance(items, list)
+            or any(not isinstance(item, dict) for item in items)
+            or any(type(body[key]) is not int for key in ("total", "limit", "offset"))
+            or body["limit"] != limit
+            or body["offset"] != offset
+        ):
+            raise ControlPlaneRejected("invalid_control_plane_response", {})
+        return body
 
     async def get_task(self, task_id: UUID) -> dict[str, JsonValue]:
         """Read one task aggregate, including its optimistic-concurrency version."""

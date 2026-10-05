@@ -208,7 +208,11 @@ class ExecutionAuthorityRepository:
         )
 
     def lock_intention(
-        self, expected: AgentExecutionLink, *, now: datetime | None = None
+        self,
+        expected: AgentExecutionLink,
+        *,
+        now: datetime | None = None,
+        allow_observation_advance: bool = False,
     ):
         # Match assignment's aggregate -> execution -> lease -> intention lock order.
         authority = self.get(expected.authority_id, workspace_id=expected.workspace_id)
@@ -243,8 +247,39 @@ class ExecutionAuthorityRepository:
             for_update=True,
         )
         authority = self.get(expected.authority_id, workspace_id=expected.workspace_id)
+        same_intention = link == expected
+        if allow_observation_advance and link is not None:
+            receipt = link.start_receipt
+            admission_advanced = (
+                expected.run_id is None and link.run_id is not None
+            ) or (expected.start_receipt is None and receipt is not None)
+            accepted_advance = not admission_advanced or (
+                isinstance(receipt, StartReceipt)
+                and receipt.status.value == "accepted"
+                and receipt.operation_id == expected.start_operation_id
+                and link.run_id is not None
+                and receipt.run_id == link.run_id
+            )
+            comparison = replace(
+                link,
+                event_cursor=expected.event_cursor,
+                status=expected.status,
+                run_id=expected.run_id,
+                start_receipt=expected.start_receipt,
+            )
+            same_intention = (
+                comparison == expected
+                and link.event_cursor >= expected.event_cursor
+                and link.status in {"pending", "starting", "running", "waiting"}
+                and (expected.run_id is None or link.run_id == expected.run_id)
+                and (
+                    expected.start_receipt is None or receipt == expected.start_receipt
+                )
+                and accepted_advance
+            )
         if (
-            link != expected
+            link is None
+            or not same_intention
             or execution is None
             or lease is None
             or authority is None

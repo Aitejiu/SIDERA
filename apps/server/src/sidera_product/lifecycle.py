@@ -30,8 +30,11 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+from .auth.grants import ProductGrants, ToolConnectionResolver
+from .auth.local_session import LocalSessions
 from .config import ProductSettings
 from .postgres import PostgresProductStore
+from .postgres.authority_store import PostgresAuthorityStore
 
 if TYPE_CHECKING:
     from .composition import (
@@ -85,6 +88,10 @@ class ProductRuntime:
         *,
         settings: ProductSettings,
         product_store: PostgresProductStore,
+        authority_store: PostgresAuthorityStore,
+        local_sessions: LocalSessions,
+        grants: ProductGrants,
+        task_tool_connections: ToolConnectionResolver,
         agent_store: OwnedAgentStore,
         credential_engine: Engine,
         credential_catalog: PostgresConnectionCatalog,
@@ -99,6 +106,10 @@ class ProductRuntime:
     ) -> None:
         self.settings = settings
         self.product_store = product_store
+        self.authority_store = authority_store
+        self.local_sessions = local_sessions
+        self.grants = grants
+        self.task_tool_connections = task_tool_connections
         self.agent_store = agent_store
         self.credential_engine = credential_engine
         self.credential_catalog = credential_catalog
@@ -244,6 +255,7 @@ class ProductRuntime:
                 self.credential_engine.dispose()
                 self._credential_store_closed = True
             if not self._product_store_closed:
+                self.grants.close()
                 self.product_store.close()
                 self._product_store_closed = True
         except Exception:  # noqa: BLE001 - uncertain close retains remaining owners and supports retry

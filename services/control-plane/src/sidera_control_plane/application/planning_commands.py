@@ -84,6 +84,7 @@ from sidera_control_plane.domain.planning_profiles import (
     InvalidOutputPolicy,
     PlanningBudgetPolicy,
     PlanningProfile,
+    PlanningProfileSnapshot,
     PlanningProfileStatus,
     PlanningRetryPolicy,
     UnknownOutcomePolicy,
@@ -193,24 +194,14 @@ class PlanningCommandHandler:
             if policy is None:
                 raise NotFound("planning profile not found")
             if policy.execution_mode != "native_profile":
-                if envelope.command_type != "SubmitTaskGoal":
+                if (
+                    envelope.command_type != "SubmitTaskGoal"
+                    and envelope.payload.get("planner_agent_ref") is None
+                ):
                     return
                 raise AssignmentDenied("native planning policy required")
-            snapshot = policy.snapshot()
-            if envelope.command_type == "SubmitTaskGoal":
-                try:
-                    pin = ProfileRef.model_validate(
-                        envelope.payload.get("planner_agent_ref")
-                    )
-                except ValueError:
-                    raise ValidationError(
-                        "exact planner Agent Profile reference required"
-                    ) from None
-                if pin != snapshot.planner_agent_ref:
-                    raise AssignmentDenied(
-                        "planner Agent Profile differs from selected policy"
-                    )
-            elif envelope.command_type == "SubmitPlanRevision":
+            snapshot = self._submission_snapshot(uow, policy, envelope)
+            if envelope.command_type == "SubmitPlanRevision":
                 root_task_id = _uuid(envelope.payload, "root_task_id")
                 root = uow.tasks.get(root_task_id, envelope.workspace_id)
                 if (
@@ -698,7 +689,7 @@ class PlanningCommandHandler:
         if profile is None:
             raise NotFound("planning profile not found")
         profile.assert_user_selectable()
-        snapshot = self._policy_snapshot(uow, profile)
+        snapshot = self._submission_snapshot(uow, profile, envelope)
         request = PlanningRequest.create(
             request_id=uuid4(),
             workspace_id=envelope.workspace_id,
@@ -723,7 +714,41 @@ class PlanningCommandHandler:
             uow, envelope, profile, request, submitted_root
         )
 
-    def _policy_snapshot(self, uow, profile):
+    def _submission_snapshot(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        profile: PlanningProfile,
+        envelope: CommandEnvelope,
+    ) -> PlanningProfileSnapshot:
+        selected = envelope.payload.get("planner_agent_ref")
+        override = envelope.command_type in {"SubmitTaskGoal", "SubmitPlanRevision"}
+        if (
+            override
+            and profile.execution_mode != "native_profile"
+            and selected is not None
+        ):
+            raise AssignmentDenied("Planner override requires a native planning policy")
+        snapshot = self._policy_snapshot(uow, profile)
+        if not override or (
+            selected is None and envelope.command_type == "SubmitPlanRevision"
+        ):
+            return snapshot
+        try:
+            pin = ProfileRef.model_validate(selected)
+        except ValueError:
+            raise ValidationError(
+                "exact planner Agent Profile reference required"
+            ) from None
+        if (
+            pin.workspace_id != envelope.workspace_id
+            or profile.workspace_id != envelope.workspace_id
+        ):
+            raise AssignmentDenied("Selected Planner workspace differs")
+        return replace(snapshot, planner_agent_ref=pin)
+
+    def _policy_snapshot(
+        self, uow: ControlPlaneUnitOfWork, profile: PlanningProfile
+    ) -> PlanningProfileSnapshot:
         if profile.execution_mode == "native_profile":
             return profile.snapshot()
         instance = uow.modules.get_instance(
@@ -954,7 +979,7 @@ class PlanningCommandHandler:
             raise ValidationError(
                 "plan revision requires a planning profile with proposal schema v3, v4, v5, or v6"
             )
-        profile_snapshot = self._policy_snapshot(uow, profile)
+        profile_snapshot = self._submission_snapshot(uow, profile, envelope)
         if (
             profile.execution_mode != "native_profile"
             and profile.proposal_schema_version

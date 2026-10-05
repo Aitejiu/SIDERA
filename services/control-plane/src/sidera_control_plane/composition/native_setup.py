@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -17,6 +18,7 @@ from sidera_control_plane.adapters.git_workspace import opaque_repository_ref
 from sidera_control_plane.adapters.local_verification import LocalVerificationAdapter
 from sidera_control_plane.application.agent_worker_adapter import native_capabilities
 from sidera_control_plane.application.assignments import AssignmentCommandHandler
+from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.collaboration import (
     CollaborationRuntimeBindingSnapshot,
     CollaborationStrategy,
@@ -42,6 +44,7 @@ from sidera_control_plane.domain.native_setup import (
     PlanningPolicyRef,
     WorkspaceSetupReceipt,
     WorkspaceSetupRequest,
+    WorkspaceSetupView,
     native_local_slot_ids,
 )
 from sidera_control_plane.domain.planning_profiles import (
@@ -341,7 +344,9 @@ def _ensure_slot(
         uow.worker_runtime_configurations.add(runtime)
 
 
-def _current_policy(uow, workspace_id, version):
+def _current_policy(
+    uow: ControlPlaneUnitOfWork, workspace_id: UUID, version: int
+) -> PlanningProfile | None:
     policy_id = uow.session.scalar(
         select(PlanningProfileModel.id).where(
             PlanningProfileModel.workspace_id == workspace_id,
@@ -359,6 +364,50 @@ def _current_policy(uow, workspace_id, version):
     ):
         raise AgentError("configuration_mismatch", "Native setup policy is unavailable")
     return policy
+
+
+def read_native_workspace_setup(
+    uow_factory: Callable[[], ControlPlaneUnitOfWork], workspace_id: UUID
+) -> WorkspaceSetupView | None:
+    with uow_factory() as uow:
+        workspace = uow.session.get(WorkspaceModel, workspace_id)
+        has_policy = (
+            uow.session.scalar(
+                select(PlanningProfileModel.id)
+                .where(
+                    PlanningProfileModel.workspace_id == workspace_id,
+                    PlanningProfileModel.profile_key == NATIVE_SETUP_POLICY_KEY,
+                )
+                .limit(1)
+            )
+            is not None
+        )
+        if not has_policy:
+            return None
+        if workspace is None or workspace.status != "active":
+            raise AgentError(
+                "configuration_mismatch", "Native workspace setup is unavailable"
+            )
+        policy = _current_policy(uow, workspace_id, workspace.version)
+        if policy is None or policy.planner_agent_ref is None:
+            raise AgentError(
+                "configuration_mismatch", "Native setup policy is unavailable"
+            )
+        result = policy.system_policy.get("result_integration")
+        repository_ref = (
+            result.get("repository_ref") if isinstance(result, Mapping) else None
+        )
+        if not isinstance(repository_ref, str) or not repository_ref:
+            raise AgentError(
+                "configuration_mismatch", "Native repository setup is unavailable"
+            )
+        return WorkspaceSetupView(
+            workspace_id,
+            workspace.version,
+            PlanningPolicyRef(policy.id, policy.version),
+            repository_ref,
+            policy.planner_agent_ref,
+        )
 
 
 def configure_native_workspace(

@@ -8,6 +8,7 @@ from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Annotated
 from uuid import uuid4
 
 import pytest
@@ -698,6 +699,160 @@ def test_public_startup_shares_exact_host_services_and_is_currently_idempotent(
     assert len(s.builds) == 10 and len(s.lookups) >= 3
     assert all(grant == s.identity.grant_id for grant in s.lookups)
     assert not s.native.calls
+
+
+def test_native_http_services_dependency_stays_inert_until_public_startup(
+    monkeypatch,
+    request,
+):
+    from fastapi import Depends
+    from sqlalchemy.engine import Engine
+
+    from sidera_control_plane.api.dependencies import get_native_worker_services
+    from sidera_control_plane.application.agent_worker_adapter import (
+        NativeWorkerServices,
+    )
+
+    connects, resolved = [], []
+
+    def reject_connect(*args, **kwargs):
+        connects.append(True)
+        pytest.fail("Native HTTP service resolution attempted a database connection")
+
+    monkeypatch.setattr(Engine, "connect", reject_connect)
+    s = request.getfixturevalue("startup_case")
+
+    @s.runtime.app.get("/api/v1/workspaces/{workspace_id}/native-services-probe")
+    def read_services(
+        services: Annotated[
+            NativeWorkerServices | None, Depends(get_native_worker_services)
+        ],
+    ):
+        resolved.append(services)
+        return {"available": services is not None}
+
+    path = f"/api/v1/workspaces/{s.workspace_id}/native-services-probe"
+    assert not s.lookups and not s.builds and not s.native.calls and not connects
+    with TestClient(s.runtime.app) as client:
+        cold = client.get(path)
+        assert cold.status_code == 200 and cold.json() == {"available": False}
+        assert resolved == [None]
+        assert not s.lookups and not s.builds and not s.native.calls and not connects
+        s.runtime.start_background(background_identity=s.identity)
+        started = client.get(path)
+        assert started.status_code == 200 and started.json() == {"available": True}
+        assert resolved[1] is s.builds[0][1]["native_services"]
+    assert not s.native.calls and not connects
+
+
+def test_native_http_services_dependency_uses_exact_started_owner_service(
+    startup_case,
+    monkeypatch,
+):
+    from fastapi import Depends
+    from sqlalchemy.engine import Engine
+
+    from sidera_control_plane.api.dependencies import get_native_worker_services
+    from sidera_control_plane.application.agent_worker_adapter import (
+        NativeWorkerServices,
+    )
+
+    def reject_connect(*args, **kwargs):
+        pytest.fail("Native HTTP service resolution attempted a database connection")
+
+    monkeypatch.setattr(Engine, "connect", reject_connect)
+    s = startup_case
+    resolved = []
+
+    @s.runtime.app.get("/api/v1/workspaces/{workspace_id}/native-services-probe")
+    def read_services(
+        services: Annotated[
+            NativeWorkerServices | None, Depends(get_native_worker_services)
+        ],
+    ):
+        resolved.append(services)
+        return {"available": services is not None}
+
+    s.runtime.start_background(background_identity=s.identity)
+    services = s.builds[0][1]["native_services"]
+    with TestClient(s.runtime.app) as client:
+        response = client.get(
+            f"/api/v1/workspaces/{s.workspace_id}/native-services-probe"
+        )
+        assert response.status_code == 200 and response.json() == {"available": True}
+    assert resolved[0] is services
+    assert s.builds[1][1]["native_services"] is services
+    assert (
+        next(options for name, options in s.builds if name == "scheduler")[
+            "native_services"
+        ]
+        is services
+    )
+    assert (
+        services.execution
+        is services.catalog
+        is services.observations
+        is services.runtimes
+        is s.native
+    )
+    assert not s.native.calls
+
+
+def test_native_http_services_dependency_reuses_owner_and_keeps_default_inert(
+    startup_case,
+    monkeypatch,
+):
+    from fastapi import Depends, FastAPI
+    from sqlalchemy.engine import Engine
+
+    from sidera_control_plane.api.dependencies import get_native_worker_services
+    from sidera_control_plane.application.agent_worker_adapter import (
+        NativeWorkerServices,
+    )
+
+    def reject_connect(*args, **kwargs):
+        pytest.fail("Native HTTP service resolution attempted a database connection")
+
+    monkeypatch.setattr(Engine, "connect", reject_connect)
+    s = startup_case
+    resolved = []
+
+    @s.runtime.app.get("/api/v1/workspaces/{workspace_id}/native-services-probe")
+    def read_services(
+        services: Annotated[
+            NativeWorkerServices | None, Depends(get_native_worker_services)
+        ],
+    ):
+        resolved.append(services)
+        return {"available": services is not None}
+
+    s.runtime.start_background(background_identity=s.identity)
+    services = s.builds[0][1]["native_services"]
+    with TestClient(s.runtime.app) as client:
+        for supplied in (None, s.identity):
+            s.runtime.start_background(background_identity=supplied)
+            response = client.get(
+                f"/api/v1/workspaces/{s.workspace_id}/native-services-probe"
+            )
+            assert response.status_code == 200 and response.json() == {
+                "available": True
+            }
+    assert len(resolved) == 2 and all(value is services for value in resolved)
+    assert tuple(name for name, _ in s.builds) == ALL_STARTUP_NAMES
+    default_app = FastAPI()
+
+    @default_app.get("/native-services-probe")
+    def read_default_services(
+        services: Annotated[
+            NativeWorkerServices | None, Depends(get_native_worker_services)
+        ],
+    ):
+        return {"available": services is not None}
+
+    with TestClient(default_app) as client:
+        response = client.get("/native-services-probe")
+        assert response.status_code == 200 and response.json() == {"available": False}
+    assert get_native_worker_services() is None and not s.native.calls
 
 
 @pytest.mark.parametrize("startup_case", (None,), indirect=True)

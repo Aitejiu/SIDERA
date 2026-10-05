@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import stat
@@ -264,15 +265,54 @@ class TargetGuard:
     initial: dict[str, object]
     active: bool = True
 
+    def row_fingerprints(self) -> dict[str, dict[str, int | str]]:
+        self.connection.rollback()
+        try:
+            inventory = verify_objects(self.connection, self.target)
+            result = {}
+            for relation in inventory["relations"]:
+                if (
+                    relation["kind"] not in {"r", "p"}
+                    or relation["name"] == "alembic_version"
+                ):
+                    continue
+                schema, name = relation["schema"], relation["name"]
+                quote = self.connection.dialect.identifier_preparer.quote
+                projection = "to_jsonb(original)"
+                if self.target.component == "product" and name == "browser_sessions":
+                    projection += " - 'csrf_digest'"
+                rows = sorted(
+                    self.connection.execute(
+                        text(
+                            f"SELECT ({projection})::text FROM {quote(schema)}.{quote(name)} AS original"
+                        )
+                    ).scalars()
+                )
+                digest = hashlib.sha256()
+                for row in rows:
+                    encoded = row.encode("utf-8")
+                    digest.update(len(encoded).to_bytes(8, "big"))
+                    digest.update(encoded)
+                result[f"{schema}.{name}"] = {
+                    "rows": len(rows),
+                    "sha256": digest.hexdigest(),
+                }
+            return result
+        finally:
+            self.connection.rollback()
+
     def inspect(self) -> dict[str, object]:
-        identity = dict(self.connection.execute(IDENTITY).mappings().one())
-        verify_identity(self.target, identity)
-        return {
-            "component": self.target.component,
-            "identity": identity,
-            "inventory": verify_objects(self.connection, self.target),
-            "idle": dict(self.connection.execute(IDLE_QUERY).mappings().one()),
-        }
+        try:
+            identity = dict(self.connection.execute(IDENTITY).mappings().one())
+            verify_identity(self.target, identity)
+            return {
+                "component": self.target.component,
+                "identity": identity,
+                "inventory": verify_objects(self.connection, self.target),
+                "idle": dict(self.connection.execute(IDLE_QUERY).mappings().one()),
+            }
+        finally:
+            self.connection.rollback()
 
     def release(self) -> bool:
         if not self.active:

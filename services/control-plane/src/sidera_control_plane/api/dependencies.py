@@ -117,6 +117,9 @@ from sidera_control_plane.application.work_context_queries import (
     WorkContextQueryService,
 )
 from sidera_control_plane.application.worker_commands import WorkerCommandHandler
+from sidera_control_plane.application.worker_progress import (
+    WorkerProgressCommandHandler,
+)
 from sidera_control_plane.application.worker_runtime import WorkerRuntimeResolver
 from sidera_control_plane.application.worker_trace_queries import (
     WorkerTraceQueryService,
@@ -526,6 +529,12 @@ def get_command_service(
         identity=assignment_identity,
         native_services=native_services,
     )
+    progress = WorkerProgressCommandHandler(
+        lambda: datetime.now(UTC),
+        identity=assignment_identity,
+        authorizer=assignment_authorizer,
+        native_services=native_services,
+    )
     handoffs = HandoffCommandHandler(
         lambda: datetime.now(UTC),
         candidate_service=handoff_candidates,
@@ -545,6 +554,7 @@ def get_command_service(
         assignments.preflight(uow, envelope)
         planning.preflight(uow, envelope)
         inputs.preflight(uow, envelope)
+        progress.preflight(uow, envelope)
         handoffs.preflight(uow, envelope)
 
     return CommandService(
@@ -571,6 +581,7 @@ def get_command_service(
                 result_integration_enabled=settings.result_integration_enabled,
             ),
             inputs,
+            progress,
             ResultReworkService(
                 lambda: datetime.now(UTC),
                 local_actor_type=settings.local_actor_type,

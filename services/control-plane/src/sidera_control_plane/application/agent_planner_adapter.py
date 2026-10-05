@@ -227,7 +227,7 @@ class AgentPlannerAdapter:
                             )
                         response_id = event.response_id
                     elif response_id is not None and event.response_id == response_id:
-                        if event.kind == "progress.updated":
+                        if event.kind in {"message", "progress.updated"}:
                             update_type = event.data.get("update_type")
                             value = event.data.get("text")
                             if update_type in {
@@ -338,7 +338,7 @@ class AgentPlannerAdapter:
                         )
                     response_id = event.response_id
                 elif response_id is not None and event.response_id == response_id:
-                    if event.kind == "progress.updated":
+                    if event.kind in {"message", "progress.updated"}:
                         value, update_type = (
                             event.data.get("text"),
                             event.data.get("update_type"),

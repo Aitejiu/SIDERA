@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select, text
+from pydantic import TypeAdapter, ValidationError
+from sqlalchemy import DateTime, or_, select, text
+from sqlalchemy.orm import Session
 
 from sidera_control_plane.application.worker_workspace_queries import (
     WorkerWorkspaceQuerySnapshot,
@@ -23,6 +26,7 @@ from sidera_control_plane.domain.worker_item_projections import (
     WorkerFact,
     WorkerItemFact,
     WorkerItemPlacementFact,
+    WorkerProgressFact,
 )
 from sidera_control_plane.persistence.collaboration_query_store import (
     SqlAlchemyCollaborationQueryStore,
@@ -32,9 +36,13 @@ from sidera_control_plane.persistence.handoff_query_store import (
     SqlAlchemyHandoffQueryStore,
 )
 from sidera_control_plane.persistence.models import (
+    AgentBindingModel,
+    AgentExecutionLinkModel,
     ArtifactModel,
     AssignmentLeaseModel,
+    EventModel,
     EvidenceClaimModel,
+    ExecutionAuthorityModel,
     ExecutionBindingModel,
     ExecutionEventModel,
     ExecutionInputModel,
@@ -53,6 +61,9 @@ from sidera_control_plane.persistence.models import (
 from sidera_control_plane.persistence.plan_convergence_query import (
     load_plan_convergence_facts,
 )
+
+_PROGRESS_FACT = TypeAdapter(WorkerProgressFact)
+_MAX_PROGRESS_REPORTS = 1000
 
 
 class SqlAlchemyWorkerWorkspaceQueryStore:
@@ -107,6 +118,31 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                 .order_by(ExecutionModel.created_at.asc(), ExecutionModel.id.asc())
             ).all()
             execution_ids = {row.id for row in execution_rows}
+            native_versions = _native_progress_bindings(
+                session, workspace_id, worker_item_id, execution_ids
+            )
+            progress_rows = session.scalars(
+                select(EventModel)
+                .where(
+                    EventModel.workspace_id == workspace_id,
+                    EventModel.aggregate_type == "worker_progress_report",
+                    EventModel.event_type == "WorkerProgressReported",
+                    EventModel.payload["worker_item_id"].astext == str(worker_item_id),
+                    EventModel.payload["root_task_id"].astext
+                    == str(worker_item.root_task_id),
+                    EventModel.payload["execution_id"].astext.in_(
+                        tuple(str(value) for value in execution_ids)
+                    ),
+                )
+                .order_by(
+                    EventModel.payload["reported_at"]
+                    .astext.cast(DateTime(timezone=True))
+                    .desc(),
+                    EventModel.id.desc(),
+                )
+                .limit(_MAX_PROGRESS_REPORTS)
+            ).all()
+            progress_reports = tuple(_progress_report(row) for row in progress_rows)
 
             active_block_rows = session.scalars(
                 select(SchedulingBlockModel).where(
@@ -293,6 +329,7 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                     *(execution.updated_at for execution in execution_rows),
                     *(session.last_activity_at for session in sessions),
                     *(event.occurred_at for event in events),
+                    *(report.reported_at for report in progress_reports),
                     *(item.updated_at for item in inputs),
                     *(artifact.created_at for artifact in artifacts),
                     *(claim.created_at for claim in evidence),
@@ -316,7 +353,12 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                 worker_item=worker_item,
                 placements=placements,
                 executions=tuple(
-                    _execution(row, active_blocks.get(row.id)) for row in execution_rows
+                    _execution(
+                        row,
+                        active_blocks.get(row.id),
+                        native_binding_version=native_versions.get(row.id),
+                    )
+                    for row in execution_rows
                 ),
                 sessions=sessions,
                 workers=workers,
@@ -332,7 +374,94 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                 active_handoff=active_handoff,
                 collaboration_facts=collaboration_facts,
                 root_task_status=root_task_status,
+                progress_reports=progress_reports,
             )
+
+
+def _native_progress_bindings(
+    session: Session,
+    workspace_id: UUID,
+    worker_item_id: UUID,
+    execution_ids: set[UUID],
+) -> dict[UUID, int]:
+    if not execution_ids:
+        return {}
+    links = session.scalars(
+        select(AgentExecutionLinkModel)
+        .join(
+            ExecutionAuthorityModel,
+            (ExecutionAuthorityModel.id == AgentExecutionLinkModel.authority_id)
+            & (
+                ExecutionAuthorityModel.workspace_id
+                == AgentExecutionLinkModel.workspace_id
+            )
+            & (
+                ExecutionAuthorityModel.execution_id
+                == AgentExecutionLinkModel.execution_id
+            ),
+        )
+        .join(
+            ExecutionModel,
+            (ExecutionModel.id == AgentExecutionLinkModel.execution_id)
+            & (ExecutionModel.workspace_id == AgentExecutionLinkModel.workspace_id),
+        )
+        .join(
+            AgentBindingModel,
+            (AgentBindingModel.workspace_id == ExecutionAuthorityModel.workspace_id)
+            & (AgentBindingModel.target_type == ExecutionAuthorityModel.target_type)
+            & (AgentBindingModel.target_id == ExecutionAuthorityModel.target_id)
+            & (AgentBindingModel.version == ExecutionAuthorityModel.binding_version),
+        )
+        .where(
+            AgentExecutionLinkModel.workspace_id == workspace_id,
+            AgentExecutionLinkModel.execution_id.in_(execution_ids),
+            ExecutionModel.worker_item_id == worker_item_id,
+            or_(
+                (ExecutionAuthorityModel.target_type == "worker_item")
+                & (ExecutionAuthorityModel.target_id == worker_item_id),
+                (ExecutionAuthorityModel.target_type == "subtask")
+                & (ExecutionAuthorityModel.target_id == ExecutionModel.task_id),
+            ),
+            ExecutionAuthorityModel.revoked.is_(False),
+            AgentBindingModel.is_current.is_(True),
+            AgentBindingModel.runnable.is_(True),
+            AgentBindingModel.assignee_kind == "profile",
+            AgentBindingModel.version == AgentExecutionLinkModel.binding_version,
+            AgentBindingModel.profile_ref == AgentExecutionLinkModel.profile_ref,
+            ExecutionAuthorityModel.policy["profile_ref"]
+            == AgentExecutionLinkModel.profile_ref,
+        )
+    )
+    return {link.execution_id: link.binding_version for link in links}
+
+
+def _progress_report(row: EventModel) -> WorkerProgressFact:
+    if (
+        row.aggregate_type != "worker_progress_report"
+        or row.event_type != "WorkerProgressReported"
+        or row.aggregate_id != row.id
+        or row.aggregate_version != 1
+        or row.payload.get("verified") is not False
+    ):
+        raise ValueError("Invalid saved progress report")
+    try:
+        fact = _PROGRESS_FACT.validate_python({**row.payload, "event_id": row.id})
+        encoded = json.dumps(
+            {"summary": fact.summary, "steps": fact.steps},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (ValidationError, ValueError, TypeError, UnicodeError):
+        raise ValueError("Invalid saved progress report data") from None
+    if (
+        fact.report_id != row.id
+        or fact.reported_at.tzinfo is None
+        or len(encoded) > 32768
+    ):
+        raise ValueError("Invalid saved progress report identity or timestamp")
+    return fact
 
 
 def _plan(row: PlanSnapshotModel) -> TaskPlanSnapshot:
@@ -374,6 +503,8 @@ def _placement(row: WorkerItemPlacementModel) -> WorkerItemPlacementFact:
 def _execution(
     row: ExecutionModel,
     active_block: SchedulingBlockModel | None,
+    *,
+    native_binding_version: int | None = None,
 ) -> ExecutionFact:
     if row.worker_item_id is None:
         raise ValueError("WorkerItem execution must have worker_item_id")
@@ -393,6 +524,7 @@ def _execution(
         started_at=_as_utc_optional(row.started_at),
         finished_at=_as_utc_optional(row.finished_at),
         version=row.version,
+        native_binding_version=native_binding_version,
         capability_requirements=tuple(sorted(row.capability_requirements or ())),
         adapter_preferences=tuple(row.adapter_preferences or ()),
         adapter_forbidden=tuple(sorted(row.adapter_forbidden or ())),

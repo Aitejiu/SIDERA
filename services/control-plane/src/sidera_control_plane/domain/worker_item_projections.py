@@ -6,8 +6,10 @@ import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any, Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
+
+from pydantic import Field, JsonValue, StrictInt, StringConstraints
 
 from sidera_control_plane.domain.collaboration_projections import (
     WorkerItemCollaborationSummaryProjection,
@@ -75,6 +77,7 @@ class ExecutionFact:
     waiting_details_summary: str | None = None
     requires_operator: bool = False
     blocked_since: datetime | None = None
+    native_binding_version: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +175,36 @@ class InputFact:
     operation_id: UUID | None
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerProgressFact:
+    report_id: UUID
+    event_id: UUID
+    execution_id: UUID
+    binding_version: Annotated[StrictInt, Field(ge=1)]
+    run_id: UUID
+    response_id: UUID
+    summary: Annotated[
+        str, StringConstraints(strict=True, min_length=1, max_length=4000)
+    ]
+    steps: Annotated[tuple[dict[str, JsonValue], ...], Field(max_length=64)]
+    reported_at: datetime
+    verified: Literal[False] = False
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerProgressProjection:
+    report_id: UUID
+    event_id: UUID
+    execution_id: UUID
+    binding_version: int
+    run_id: UUID
+    response_id: UUID
+    summary: str
+    steps: tuple[dict[str, JsonValue], ...]
+    reported_at: datetime
+    verified: Literal[False] = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,6 +428,7 @@ class WorkerWorkspaceProjection:
     plan_sync: WorkerPlanSyncProjection | None = None
     active_handoff: ActiveHandoffProjection | None = None
     collaboration: WorkerItemCollaborationSummaryProjection | None = None
+    current_progress: WorkerProgressProjection | None = None
 
 
 class WorkerItemProjectionService:
@@ -419,6 +453,7 @@ class WorkerItemProjectionService:
         active_handoff: ActiveHandoffProjection | None = None,
         collaboration: WorkerItemCollaborationSummaryProjection | None = None,
         root_task_status: str | None = None,
+        progress_reports: Iterable[WorkerProgressFact] = (),
     ) -> None:
         self.worker_item = worker_item
         self.placements = tuple(placements)
@@ -438,6 +473,7 @@ class WorkerItemProjectionService:
         self.active_handoff = active_handoff
         self.collaboration = collaboration
         self.root_task_status = root_task_status
+        self.progress_reports = tuple(progress_reports)
         self._convergence_service = PlanConvergenceProjectionService()
 
     def compose_workspace(self) -> WorkerWorkspaceProjection:
@@ -549,10 +585,14 @@ class WorkerItemProjectionService:
             latest_checkpoint=latest_checkpoint,
             usage=_usage_summary(self.events),
             artifacts=tuple(
-                sorted(self.artifacts, key=lambda item: (item.created_at, item.artifact_id))
+                sorted(
+                    self.artifacts, key=lambda item: (item.created_at, item.artifact_id)
+                )
             ),
             evidence=tuple(
-                sorted(self.evidence, key=lambda item: (item.created_at, item.evidence_id))
+                sorted(
+                    self.evidence, key=lambda item: (item.created_at, item.evidence_id)
+                )
             ),
             can_intervene=read_only_reason is None,
             read_only_reason=read_only_reason,
@@ -563,10 +603,41 @@ class WorkerItemProjectionService:
             plan_sync=plan_sync,
             active_handoff=self.active_handoff,
             collaboration=self.collaboration,
+            current_progress=self._current_progress(current_execution),
+        )
+
+    def _current_progress(
+        self, execution: ExecutionFact | None
+    ) -> WorkerProgressProjection | None:
+        if execution is None or execution.native_binding_version is None:
+            return None
+        current = max(
+            (
+                report
+                for report in self.progress_reports
+                if report.execution_id == execution.id
+                and report.binding_version == execution.native_binding_version
+            ),
+            key=lambda report: (report.reported_at, report.event_id),
+            default=None,
+        )
+        if current is None:
+            return None
+        return WorkerProgressProjection(
+            report_id=current.report_id,
+            event_id=current.event_id,
+            execution_id=current.execution_id,
+            binding_version=current.binding_version,
+            run_id=current.run_id,
+            response_id=current.response_id,
+            summary=current.summary,
+            steps=current.steps,
+            reported_at=current.reported_at,
+            verified=False,
         )
 
     def activity_facts(self) -> tuple[WorkerActivityFact, ...]:
-        return _activity_facts(
+        native = _activity_facts(
             self.worker_item.root_task_id,
             executions=self.executions,
             sessions=self.sessions,
@@ -575,6 +646,40 @@ class WorkerItemProjectionService:
             artifacts=self.artifacts,
             evidence=self.evidence,
         )
+        reports = tuple(
+            WorkerActivityFact(
+                id=report.event_id,
+                source_type="progress_report",
+                source_id=report.report_id,
+                execution_id=report.execution_id,
+                session_id=None,
+                occurred_at=report.reported_at,
+                kind="progress_report",
+                title="Progress report",
+                summary=report.summary,
+                correlation_id=report.report_id,
+                source_priority=45,
+                body=json.dumps(
+                    {
+                        "report_id": str(report.report_id),
+                        "binding_version": report.binding_version,
+                        "run_id": str(report.run_id),
+                        "response_id": str(report.response_id),
+                        "summary": report.summary,
+                        "steps": report.steps,
+                        "verified": False,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ),
+                delivery_status=None,
+                trace_descriptor=None,
+            )
+            for report in self.progress_reports
+        )
+        return native + reports
 
     def compose_activity(
         self,

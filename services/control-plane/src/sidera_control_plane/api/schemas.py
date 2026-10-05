@@ -8,6 +8,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     StrictInt,
     StringConstraints,
     field_serializer,
@@ -107,6 +108,7 @@ from sidera_control_plane.application.work_context_queries import (
     WorkContextRevisionView,
 )
 from sidera_control_plane.collaboration_readiness import ReadinessReport
+from sidera_control_plane.domain.agent_tools import WorkerProgressPayload
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.context_packages import (
     ContextPackageManifestV2,
@@ -406,6 +408,7 @@ class SubmitPlanRevisionPayload(BaseModel):
     acceptance_criteria: tuple[NonEmptyString, ...] = Field(min_length=1)
     planning_profile_id: UUID
     planning_profile_version: int = Field(gt=0)
+    planner_agent_ref: ProfileRef | None = None
 
 
 class CancelPlanningRequestPayload(BaseModel):
@@ -2367,6 +2370,21 @@ class WorkerActivityProjectionResponse(BaseModel):
     trace_descriptor: TraceDescriptorProjectionResponse | None
 
 
+class WorkerProgressProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    report_id: UUID
+    event_id: UUID
+    execution_id: UUID
+    binding_version: StrictInt = Field(ge=1)
+    run_id: UUID
+    response_id: UUID
+    summary: str
+    steps: tuple[dict[str, JsonValue], ...]
+    reported_at: datetime
+    verified: Literal[False] = False
+
+
 class WorkerWorkspaceProjectionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2391,6 +2409,7 @@ class WorkerWorkspaceProjectionResponse(BaseModel):
     plan_sync: WorkerPlanSyncProjectionResponse | None = None
     active_handoff: ActiveHandoffProjectionResponse | None = None
     collaboration: WorkerItemCollaborationSummaryResponse | None = None
+    current_progress: WorkerProgressProjectionResponse | None = None
 
 
 class WorkerItemActivityPageResponse(BaseModel):
@@ -3073,6 +3092,7 @@ class CommandRequest(BaseModel):
             "UpdateUnstartedAgentBinding",
             "PrepareProfileHandoff",
             "ConfirmProfileHandoff",
+            "ReportWorkerProgress",
         }:
             version = value.get("expected_version")
             if type(version) is not int or version < 1:
@@ -3265,6 +3285,9 @@ class CommandRequest(BaseModel):
         elif self.command_type == "ReportExecutionStarted":
             self._require_mutation_target("execution")
             parsed = ReportExecutionStartedPayload.model_validate(self.payload)
+        elif self.command_type == "ReportWorkerProgress":
+            self._require_mutation_target("execution")
+            parsed = WorkerProgressPayload.model_validate(self.payload)
         elif self.command_type == "ReportExecutionSucceeded":
             self._require_mutation_target("execution")
             parsed = ReportExecutionFinishedPayload.model_validate(self.payload)

@@ -4,10 +4,12 @@ import os
 import subprocess
 import sys
 import webbrowser
+from dataclasses import asdict
 from pathlib import Path
 from typing import NoReturn
 from uuid import UUID
 
+import httpx
 import uvicorn
 from pydantic import JsonValue, TypeAdapter, ValidationError
 from sidera_agents.contracts import ProfileRef
@@ -20,9 +22,21 @@ from sidera_control_plane.domain.planning_profiles import PlanningBudgetPolicy
 from sidera_control_plane.domain.result_integration import CheckSpecV1
 
 from .app import create_app
+from .auth.local_session import (
+    CSRF_COOKIE,
+    CSRF_HEADER,
+    SESSION_COOKIE,
+    LocalSessionError,
+    LocalSessions,
+    read_bootstrap_file,
+    write_bootstrap_file,
+)
 from .composition import build_product_runtime
 from .config import ProductSettings
 from .lifecycle import ProductRuntime, credential_alembic_config_path
+from .postgres import PostgresProductStore
+from .postgres.authority_store import PostgresAuthorityStore
+from .postgres.store import ProductStoreError
 
 
 class ProductCLIError(RuntimeError):
@@ -108,6 +122,10 @@ def parser() -> SafeArgumentParser:
     commands.add_parser("migrate")
     preflight = commands.add_parser("preflight")
     preflight.add_argument("--json", action="store_true")
+    session = commands.add_parser("session")
+    session_commands = session.add_subparsers(dest="session_command", required=True)
+    bootstrap = session_commands.add_parser("bootstrap")
+    bootstrap.add_argument("--output", type=Path)
     workspace = commands.add_parser("workspace")
     workspace_commands = workspace.add_subparsers(
         dest="workspace_command", required=True
@@ -118,7 +136,25 @@ def parser() -> SafeArgumentParser:
     configure.add_argument("--planner-profile")
     configure.add_argument("--verification-checks")
     configure.add_argument("--expected-version", default="0")
+    configure.add_argument("--bootstrap-file", type=Path)
     return root
+
+
+def bootstrap_local_session(settings: ProductSettings, *, output: Path | None) -> None:
+    store = PostgresProductStore(settings.product_database_url.get_secret_value())
+    try:
+        if not store.readiness():
+            raise ProductCLIError("schema_not_ready")
+        sessions = LocalSessions(settings, PostgresAuthorityStore(store.engine))
+        issue = sessions.create_bootstrap()
+        location = write_bootstrap_file(issue, output=output)
+        print(
+            json.dumps(
+                {"output": str(location), "expires_at": issue.expires_at.isoformat()}
+            )
+        )
+    finally:
+        store.close()
 
 
 def configure_workspace(
@@ -138,12 +174,43 @@ def configure_workspace(
         or runtime.request_authorizer.identity_for_grant(identity.grant_id) != identity
     ):
         raise ProductCLIError("local_session_required")
+    request = workspace_setup_request(
+        runtime.settings,
+        workspace=workspace,
+        repository=repository,
+        planner_profile=planner_profile,
+        verification_checks=verification_checks,
+        expected_version=expected_version,
+    )
+    receipt = runtime.control_plane.configure_workspace(
+        request, grant_id=identity.grant_id
+    )
+    print(
+        json.dumps(
+            {
+                "workspace_id": str(receipt.workspace_id),
+                "version": receipt.version,
+                "status": receipt.status,
+            }
+        )
+    )
+
+
+def workspace_setup_request(
+    settings: ProductSettings,
+    *,
+    workspace: str,
+    repository: str,
+    planner_profile: str | None,
+    verification_checks: str | None,
+    expected_version: str,
+) -> WorkspaceSetupRequest:
     try:
         workspace_id = UUID(workspace)
         version = int(expected_version)
         directory = Path(repository)
         if (
-            workspace_id != runtime.settings.workspace_id
+            workspace_id != settings.workspace_id
             or version < 0
             or not directory.is_absolute()
             or ".." in directory.parts
@@ -151,7 +218,7 @@ def configure_workspace(
             raise ValueError("Invalid setup selection")
     except ValueError:
         raise ProductCLIError("invalid_workspace_setup") from None
-    request = WorkspaceSetupRequest(
+    return WorkspaceSetupRequest(
         workspace_id=workspace_id,
         repository_directory=directory,
         expected_version=version,
@@ -167,15 +234,90 @@ def configure_workspace(
         planner_agent_ref=parse_planner_profile(planner_profile, workspace_id),
         verification_checks=parse_verification_checks(verification_checks),
     )
-    receipt = runtime.control_plane.configure_workspace(
-        request, grant_id=identity.grant_id
+
+
+def _require_http_success(reply: httpx.Response) -> dict[str, JsonValue]:
+    try:
+        body = TypeAdapter(dict[str, JsonValue]).validate_json(reply.content)
+    except ValidationError:
+        raise ProductCLIError("product_operation_failed") from None
+    if reply.is_success:
+        return body
+    detail = body.get("detail")
+    code = detail.get("code") if isinstance(detail, dict) else None
+    if isinstance(code, str) and code in {
+        "bootstrap_consumed",
+        "bootstrap_expired",
+        "bootstrap_invalid",
+        "local_session_required",
+        "csrf_required",
+        "origin_denied",
+        "host_denied",
+        "permission_denied",
+        "schema_not_ready",
+        "setup_required",
+        "validation_error",
+        "revision_conflict",
+        "configuration_mismatch",
+    }:
+        raise ProductCLIError(code)
+    raise ProductCLIError("product_operation_failed")
+
+
+def configure_live_workspace(
+    settings: ProductSettings, request: WorkspaceSetupRequest, *, bootstrap_file: Path
+) -> None:
+    bootstrap = read_bootstrap_file(bootstrap_file)
+    payload: dict[str, JsonValue] = TypeAdapter(dict[str, JsonValue]).validate_python(
+        {
+            "repository_directory": str(request.repository_directory),
+            "expected_version": request.expected_version,
+            "planner_agent_ref": None
+            if request.planner_agent_ref is None
+            else request.planner_agent_ref.model_dump(mode="json"),
+            "planning_budget": asdict(request.planning_budget),
+            "verification_checks": None
+            if request.verification_checks is None
+            else [check.to_mapping() for check in request.verification_checks],
+        }
     )
+    with httpx.Client(
+        base_url=settings.local_url,
+        headers={"Origin": settings.web_origin},
+        trust_env=False,
+        timeout=30.0,
+        follow_redirects=False,
+    ) as client:
+        _require_http_success(
+            client.post(
+                "/product/v1/session/bootstrap",
+                json={"token": bootstrap.get_secret_value()},
+            )
+        )
+        csrf = client.cookies.get(CSRF_COOKIE)
+        if not csrf or not client.cookies.get(SESSION_COOKIE):
+            raise ProductCLIError("local_session_required")
+        reply = _require_http_success(
+            client.post(
+                f"/product/v1/workspaces/{request.workspace_id}/setup",
+                json=payload,
+                headers={CSRF_HEADER: csrf},
+            )
+        )
+    version, status = reply.get("version"), reply.get("status")
+    if (
+        reply.get("workspace_id") != str(request.workspace_id)
+        or type(version) is not int
+        or version < 1
+        or status not in {"created", "updated", "unchanged"}
+    ):
+        raise ProductCLIError("product_operation_failed")
     print(
         json.dumps(
             {
-                "workspace_id": str(receipt.workspace_id),
-                "version": receipt.version,
-                "status": receipt.status,
+                "workspace_id": str(request.workspace_id),
+                "version": version,
+                "status": status,
             }
         )
     )
@@ -201,8 +343,24 @@ def main(
             if not webbrowser.open(selected.local_url):
                 raise ProductCLIError("browser_unavailable")
             return 0
-        if arguments.command == "workspace" and trusted_identity is None:
-            raise ProductCLIError("local_session_required")
+        if arguments.command == "session":
+            bootstrap_local_session(selected, output=arguments.output)
+            return 0
+        if arguments.command == "workspace" and runtime is None:
+            if arguments.bootstrap_file is None:
+                raise ProductCLIError("local_session_required")
+            request = workspace_setup_request(
+                selected,
+                workspace=arguments.workspace,
+                repository=arguments.repository,
+                planner_profile=arguments.planner_profile,
+                verification_checks=arguments.verification_checks,
+                expected_version=arguments.expected_version,
+            )
+            configure_live_workspace(
+                selected, request, bootstrap_file=arguments.bootstrap_file
+            )
+            return 0
         if arguments.command == "serve":
             values = selected.model_dump()
             if arguments.host is not None:
@@ -245,6 +403,9 @@ def main(
                 expected_version=arguments.expected_version,
             )
     except ProductCLIError as error:
+        print(json.dumps({"error": {"code": error.code}}), file=sys.stderr)
+        result = 1
+    except (LocalSessionError, ProductStoreError) as error:
         print(json.dumps({"error": {"code": error.code}}), file=sys.stderr)
         result = 1
     except ValidationError:

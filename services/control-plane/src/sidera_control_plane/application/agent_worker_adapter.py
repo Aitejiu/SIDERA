@@ -800,7 +800,8 @@ class AgentWorkerAdapter:
             snapshot.run_id != link.run_id
             or snapshot.workspace_id != link.workspace_id
             or snapshot.profile_ref != link.profile_ref
-            or snapshot.state is not RunState.STOPPED
+            or snapshot.state
+            not in {RunState.STOPPED, RunState.COMPLETED, RunState.FAILED}
             or snapshot.input_open
             or snapshot.active_response_id is not None
             or snapshot.last_event_sequence < receipt.evidence_sequence

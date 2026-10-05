@@ -49,6 +49,20 @@ def install_native_http_error_handler(app: FastAPI) -> None:
     ) -> JSONResponse:
         return native_http_error_response(exc)
 
+    @app.exception_handler(DomainError)
+    async def handle_native_domain_error(
+        _request: Request, exc: DomainError
+    ) -> JSONResponse:
+        if exc.code in {
+            "assignment_forbidden",
+            "permission_denied",
+            "grant_revoked",
+            "grant_denied",
+            "grant_required",
+        }:
+            return _error_response(403, exc.code, "permission denied", {})
+        return _domain_error_response(exc)
+
 
 def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(RequestValidationError)
@@ -86,19 +100,23 @@ def install_error_handlers(app: FastAPI) -> None:
     async def handle_domain_error(
         _request: Request, exc: DomainError
     ) -> JSONResponse:
-        status_code = (
-            422
-            if exc.code
-            in {
-                ValidationError.code,
-                "adapter_workflow_requires_loopback",
-                "demo_runtime_binding_forbidden",
-                "result_inputs_disabled",
-                "result_cursor_invalid",
-            }
-            else 409
-        )
-        return _error_response(status_code, exc.code, str(exc), exc.details)
+        return _domain_error_response(exc)
+
+
+def _domain_error_response(exc: DomainError) -> JSONResponse:
+    status_code = (
+        422
+        if exc.code
+        in {
+            ValidationError.code,
+            "adapter_workflow_requires_loopback",
+            "demo_runtime_binding_forbidden",
+            "result_inputs_disabled",
+            "result_cursor_invalid",
+        }
+        else 409
+    )
+    return _error_response(status_code, exc.code, str(exc), exc.details)
 
 
 def _error_response(

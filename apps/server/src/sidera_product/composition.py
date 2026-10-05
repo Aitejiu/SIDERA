@@ -2,10 +2,11 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
+from urllib.parse import urlsplit
 from uuid import UUID, uuid5
 
 from fastapi import Request
-from pydantic import SecretStr
+from pydantic import SecretStr, TypeAdapter, ValidationError
 from sidera_agents import bootstrap
 from sidera_agents.contracts import (
     CredentialRef,
@@ -21,23 +22,26 @@ from sidera_agents.contracts import (
 from sidera_agents.errors import AgentError
 from sidera_agents.ports import (
     ContextSourceReader,
-    DenyToolConnectionReader,
     ExecutionAuthorizer,
     HarnessAdapter,
     ToolConnectionReader,
 )
 from sidera_control_plane.application.assignments import AssignmentTarget
 from sidera_control_plane.application.execution_authority import PlanningActionTarget
+from sidera_control_plane.application.planning_commands import PlanningCommandTarget
+from sidera_control_plane.application.request_authority import ControlPlaneRequestTarget
 from sidera_control_plane.composition import native_runtime
 from sidera_control_plane.composition.native_runtime import (
     ControlPlaneIdentity,
     ControlPlaneRequestAuthorizer,
+    WorkerProgressTarget,
 )
 from sidera_control_plane.domain.context_packages import (
     ContextConsumerType,
     ContextPackageManifestV1,
     ContextPurpose,
 )
+from sidera_control_plane.domain.native_setup import WorkspaceSetupRequest
 from sidera_model_connections.contracts import CredentialRef as ModelCredentialRef
 from sidera_model_connections.errors import ConfigurationError
 from sidera_model_connections.macos_keychain import MacOSKeychainSecretStore
@@ -51,9 +55,12 @@ from sidera_model_connections.postgres import PostgresConnectionCatalog
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from .auth.grants import ProductGrants, ToolConnectionResolver, VerifiedToolGrant
+from .auth.local_session import SESSION_COOKIE, LocalSessions
 from .config import ProductSettings
 from .lifecycle import ProductRuntime
 from .postgres import PostgresProductStore
+from .postgres.authority_store import PostgresAuthorityStore, ReceiptStore
 
 
 def deny() -> NoReturn:
@@ -70,6 +77,9 @@ class ProductRequestAuthorizer:
     ) -> None:
         self.settings = settings
         self.trusted = trusted
+        self.local_sessions: LocalSessions | None = None
+        self.grants: ProductGrants | None = None
+        self.tool_receipts: ReceiptStore | None = None
         self.background_identity = ControlPlaneIdentity(
             principal_id=settings.local_principal_id,
             grant_id=uuid5(
@@ -80,6 +90,27 @@ class ProductRequestAuthorizer:
         )
 
     def authenticate_request(self, request: Request) -> ControlPlaneIdentity | None:
+        authorization = request.headers.get("authorization")
+        if authorization is not None:
+            if (
+                SESSION_COOKIE in request.cookies
+                or self.grants is None
+                or not authorization.lower().startswith("bearer ")
+                or request.headers.get("host")
+                not in {
+                    urlsplit(self.settings.local_url).netloc,
+                    urlsplit(self.settings.web_origin).netloc,
+                }
+            ):
+                return None
+            try:
+                return self.grants.verify(
+                    SecretStr(authorization[7:]), require_running=True
+                ).identity
+            except AgentError:
+                return None
+        if SESSION_COOKIE in request.cookies and self.local_sessions is not None:
+            return self.local_sessions.authenticate_request(request)
         identity = (
             None if self.trusted is None else self.trusted.authenticate_request(request)
         )
@@ -94,12 +125,40 @@ class ProductRequestAuthorizer:
     def identity_for_grant(self, grant_id: UUID) -> ControlPlaneIdentity | None:
         if grant_id == self.background_identity.grant_id:
             return self.background_identity
-        return (
+        trusted = (
             None if self.trusted is None else self.trusted.identity_for_grant(grant_id)
         )
+        if trusted is not None:
+            return trusted
+        local = (
+            None
+            if self.local_sessions is None
+            else self.local_sessions.identity_for_grant(grant_id)
+        )
+        if local is not None:
+            return local
+        if self.grants is not None:
+            record = self.grants.store.find_grant(grant_id=grant_id)
+            if record is not None:
+                try:
+                    return self.grants.verify_grant(grant_id).identity
+                except AgentError:
+                    return None
+        return None
 
     def require(self, grant_id: UUID, action: str, target: object) -> None:
         if grant_id != self.background_identity.grant_id:
+            if self.local_sessions is not None:
+                identity = self.local_sessions.identity_for_grant(grant_id)
+                if identity is not None:
+                    self._require_local_user(identity, action, target)
+                    return
+            if (
+                self.grants is not None
+                and self.grants.store.find_grant(grant_id=grant_id) is not None
+            ):
+                self._require_tool(self.grants.verify_grant(grant_id), action, target)
+                return
             if self.trusted is None:
                 deny()
             self.trusted.require(grant_id, action, target)
@@ -143,6 +202,359 @@ class ProductRequestAuthorizer:
                 "run.interrupt",
             }
         ):
+            return
+        deny()
+
+    def _require_tool(
+        self, verified: VerifiedToolGrant, action: str, target: object
+    ) -> None:
+        record = verified.record
+        if (
+            self.grants is None
+            or record.workspace_id != self.settings.workspace_id
+            or record.principal_id != self.settings.local_principal_id
+        ):
+            deny()
+        if (
+            action == "workspace.setup.read"
+            and record.role == "main"
+            and type(target) is UUID
+            and target == record.workspace_id
+        ):
+            return
+        if isinstance(target, PlanningCommandTarget):
+            if (
+                action != "planning.submit"
+                or record.role != "main"
+                or target.workspace_id != record.workspace_id
+                or target.principal_id != record.principal_id
+                or target.planning_request_id is not None
+                or target.assignee_bindings
+                or type(target.planning_profile_id) is not UUID
+                or type(target.planning_profile_version) is not int
+                or target.planning_profile_version < 1
+            ):
+                deny()
+            self.grants.require(
+                record.grant_id, "profile.read", target.planner_agent_ref
+            )
+            return
+        if isinstance(target, WorkerProgressTarget) and action == "progress.report":
+            self._require_progress(verified, target)
+            return
+        if not isinstance(target, ControlPlaneRequestTarget) or (
+            target.workspace_id != record.workspace_id
+            or target.principal_id != record.principal_id
+        ):
+            deny()
+        if (
+            action == "control_plane.query"
+            and target.method in {"GET", "HEAD"}
+            and target.command is None
+        ):
+            self._require_tool_read(verified, target)
+            return
+        command = target.command
+        if (
+            command is None
+            or target.method != "POST"
+            or target.route != "/api/v1/commands"
+            or action != "control_plane.command:" + command.command_type
+            or command.workspace_id != record.workspace_id
+            or command.actor_type != "agent"
+            or command.actor_id != record.principal_id
+        ):
+            deny()
+        if record.role == "main":
+            if (
+                command.command_type == "SubmitTaskGoal"
+                and command.target_type == "workspace"
+                and command.target_id is None
+            ):
+                return
+            if (
+                command.command_type == "SubmitPlanRevision"
+                and command.target_type == "task"
+                and type(command.target_id) is UUID
+            ):
+                return
+        if (
+            record.role == "worker"
+            and command.command_type == "ReportWorkerProgress"
+            and command.target_type == "execution"
+        ):
+            if type(command.expected_version) is not int or any(
+                type(command.payload.get(key)) is not int
+                for key in ("binding_version", "fencing_token")
+            ):
+                deny()
+            try:
+                progress = TypeAdapter(WorkerProgressTarget).validate_python(
+                    {
+                        "workspace_id": record.workspace_id,
+                        "principal_id": record.principal_id,
+                        "execution_id": command.target_id,
+                        "execution_version": command.expected_version,
+                        "native_grant_id": command.payload.get("authority_id"),
+                        **{
+                            key: command.payload.get(key)
+                            for key in (
+                                "worker_item_id",
+                                "connection_id",
+                                "binding_version",
+                                "lease_id",
+                                "fencing_token",
+                                "run_id",
+                                "response_id",
+                            )
+                        },
+                    }
+                )
+            except (ValueError, ValidationError):
+                deny()
+            self._require_progress(verified, progress)
+            return
+        deny()
+
+    @staticmethod
+    def _require_progress(
+        verified: VerifiedToolGrant, target: WorkerProgressTarget
+    ) -> None:
+        scope = verified.scope
+        if (
+            verified.record.role != "worker"
+            or scope is None
+            or (
+                target.workspace_id,
+                target.principal_id,
+                target.execution_id,
+                target.worker_item_id,
+                target.native_grant_id,
+                target.connection_id,
+                target.execution_version,
+                target.binding_version,
+                target.lease_id,
+                target.fencing_token,
+                target.run_id,
+                target.response_id,
+            )
+            != (
+                scope.workspace_id,
+                scope.principal_id,
+                scope.execution_id,
+                scope.worker_item_id,
+                scope.native_grant_id,
+                scope.connection_id,
+                scope.execution_version,
+                scope.binding_version,
+                scope.lease_id,
+                scope.fencing_token,
+                verified.run.run_id,
+                verified.run.active_response_id,
+            )
+        ):
+            deny()
+
+    def _require_tool_read(
+        self, verified: VerifiedToolGrant, target: ControlPlaneRequestTarget
+    ) -> None:
+        record = verified.record
+        paths = dict(target.path_parameters)
+        if "workspace_id" in paths and paths["workspace_id"] != str(
+            record.workspace_id
+        ):
+            deny()
+        if target.route == "/api/v1/tasks" and not paths and record.role == "main":
+            return
+        if target.route == "/api/v1/tasks/{task_id}" and set(paths) == {"task_id"}:
+            try:
+                root = UUID(paths["task_id"])
+            except ValueError:
+                deny()
+            if record.role == "main" or record.root_task_id == root:
+                return
+        if (
+            target.route
+            == "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/active-plan"
+            and set(paths) == {"workspace_id", "root_task_id"}
+            and record.role == "main"
+        ):
+            return
+        if (
+            target.route
+            == "/api/v1/workspaces/{workspace_id}/planning-requests/{request_id}"
+            and set(paths) == {"workspace_id", "request_id"}
+            and (
+                record.role == "main"
+                or (
+                    record.role == "planner"
+                    and paths["request_id"] == str(record.planning_request_id)
+                )
+            )
+        ):
+            return
+        if (
+            target.route
+            in {
+                "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/workspace",
+                "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/activity",
+            }
+            and set(paths) == {"workspace_id", "worker_item_id"}
+            and record.role == "worker"
+            and paths["worker_item_id"] == str(record.worker_item_id)
+        ):
+            return
+        if (
+            target.route == "/api/v1/workspaces/{workspace_id}/commands/{command_id}"
+            and set(paths) == {"workspace_id", "command_id"}
+            and self.tool_receipts is not None
+        ):
+            try:
+                command_id = UUID(paths["command_id"])
+            except ValueError:
+                deny()
+            receipt = self.tool_receipts.find_receipt(
+                grant_id=record.grant_id, command_id=command_id
+            )
+            if (
+                receipt is not None
+                and receipt.run_id == verified.run.run_id
+                and receipt.response_id == verified.run.active_response_id
+            ):
+                return
+        deny()
+
+    def _require_local_user(
+        self, identity: ControlPlaneIdentity, action: str, target: object
+    ) -> None:
+        workspace = self.settings.workspace_id
+        if (
+            identity.actor_type != "user"
+            or identity.principal_id != self.settings.local_principal_id
+        ):
+            deny()
+        if isinstance(target, ControlPlaneRequestTarget):
+            if (
+                target.workspace_id != workspace
+                or target.principal_id != identity.principal_id
+            ):
+                deny()
+            if action == "control_plane.query" and target.method in {"GET", "HEAD"}:
+                return
+            command = target.command
+            if command is not None and (
+                action == "control_plane.command:" + command.command_type
+                and command.workspace_id == workspace
+                and command.actor_type == "user"
+                and command.actor_id == identity.principal_id
+                and command.command_type
+                in {
+                    "SubmitTaskGoal",
+                    "SubmitPlanRevision",
+                    "CancelPlanningRequest",
+                    "AnswerPlanningClarification",
+                    "RequestProposalRevision",
+                    "RejectPlanningProposal",
+                    "ConfirmPlanningProposal",
+                    "ConfirmPlanRevision",
+                    "SetSubtaskAssignee",
+                    "SetWorkerItemAssignee",
+                    "UpdateUnstartedAgentBinding",
+                    "ConfirmProfileHandoff",
+                    "ConfirmWorkerHandoff",
+                    "ConfirmWorkerTransitionStopped",
+                    "ApproveCollaborationReleaseProposal",
+                    "AuthorizeAdditionalRework",
+                    "CompleteTask",
+                    "SubmitResult",
+                    "AcceptResult",
+                    "RejectResult",
+                    "CreateTaskInput",
+                    "RetryTaskInput",
+                    "CancelTaskInput",
+                    "RequestExecutionStop",
+                    "ReconcileWorkerTransition",
+                    "RecoverWorkerTransition",
+                    "SendExecutionInput",
+                    "UpdatePendingExecutionInput",
+                    "CancelExecutionInput",
+                    "RetryBlockedExecutionInput",
+                    "PrepareProfileHandoff",
+                    "CancelWorkerHandoff",
+                    "RecoverWorkerHandoff",
+                    "RetryBlockedPlanningRun",
+                }
+            ):
+                return
+            deny()
+        if (
+            action == "workspace.setup.read"
+            and type(target) is UUID
+            and target == workspace
+        ):
+            return
+        if (
+            action == "workspace.configure"
+            and isinstance(target, WorkspaceSetupRequest)
+            and target.workspace_id == workspace
+        ):
+            return
+        if (
+            isinstance(target, PlanningCommandTarget)
+            and action
+            in {
+                "planning.submit",
+                "planning.answer",
+                "planning.revise",
+                "planning.confirm",
+                "planning.cancel",
+                "planning.reject",
+                "planning.write",
+            }
+            and target.workspace_id == workspace
+            and target.principal_id == identity.principal_id
+            and target.planner_agent_ref.workspace_id == workspace
+        ):
+            return
+        if (
+            isinstance(target, AssignmentTarget)
+            and target.workspace_id == workspace
+            and target.principal_id == identity.principal_id
+            and action
+            in {"assignment.write", "profile.read", "runtime.read", "resource.read"}
+            and target.target_type in {"subtask", "worker_item", "execution"}
+            and type(target.target_id) is UUID
+        ):
+            return
+        if (
+            type(target) is UUID
+            and target == workspace
+            and action
+            in {
+                "profile.list",
+                "profile.create",
+                "resource.list",
+                "resource.create",
+                "runtime.list",
+                "runtime.register",
+                "runtime.discover",
+            }
+        ):
+            return
+        if (
+            (
+                isinstance(target, ProfileRef)
+                and action in {"profile.read", "profile.revise"}
+            )
+            or (
+                isinstance(target, ResourceRef)
+                and action in {"resource.read", "resource.revise"}
+            )
+            or (
+                isinstance(target, RuntimeRef)
+                and action in {"runtime.read", "runtime.refresh", "runtime.configure"}
+            )
+        ) and target.workspace_id == workspace:
             return
         deny()
 
@@ -219,6 +631,7 @@ class AuthorityRouter:
     ) -> None:
         self.host = host
         self.product = product
+        self.grants: ProductGrants | None = None
         self.control_plane: ExecutionAuthorizer | None = None
 
     def require(self, grant_id: UUID, action: str, target: object) -> None:
@@ -240,6 +653,11 @@ class AuthorityRouter:
         if grant_id == self.host.background_identity.grant_id:
             self.host.require(grant_id, action, target)
             return
+        if self.host.local_sessions is not None and (
+            self.host.local_sessions.store.find_session(session_id=grant_id) is not None
+        ):
+            self.host.require(grant_id, action, target)
+            return
         if self.product is not None:
             try:
                 self.product.require(grant_id, action, target)
@@ -247,6 +665,12 @@ class AuthorityRouter:
             except AgentError as error:
                 if error.code != "permission_denied":
                     raise
+        if (
+            self.grants is not None
+            and self.grants.store.find_grant(grant_id=grant_id) is not None
+        ):
+            self.grants.require(grant_id, action, target)
+            return
         if self.control_plane is None:
             deny()
         # Never resolve a CP-minted grant via the host identity lookup or recurse
@@ -332,10 +756,15 @@ def build_product_runtime(
     secret_store: SecretStore | None = None,
     tool_connections: ToolConnectionReader | None = None,
 ) -> ProductRuntime:
+    store = PostgresProductStore(settings.product_database_url.get_secret_value())
+    authority_store = PostgresAuthorityStore(store.engine)
+    local_sessions = LocalSessions(settings, authority_store)
+    tool_reader = ToolConnectionResolver(settings, tool_connections)
     host = ProductRequestAuthorizer(settings, request_authorizer)
+    host.local_sessions = local_sessions
+    host.tool_receipts = authority_store
     authority = AuthorityRouter(host, product_authorizer)
     sources = SourceRouter(product_sources)
-    store = PostgresProductStore(settings.product_database_url.get_secret_value())
     credential_engine = create_engine(
         settings.credential_database_url.get_secret_value(),
         pool_pre_ping=True,
@@ -368,7 +797,7 @@ def build_product_runtime(
         sources=sources,
         secrets=secrets,
         clock=lambda: datetime.now(UTC),
-        tool_connections=tool_connections or DenyToolConnectionReader(),
+        tool_connections=tool_reader,
     )
     try:
         cp = native_runtime.create_control_plane_runtime(
@@ -388,9 +817,24 @@ def build_product_runtime(
         raise RuntimeError("product_composition_failed") from None
     authority.control_plane = cp.execution_authorizer
     sources.control_plane = cp.context_source_reader
+    grants = ProductGrants(
+        settings,
+        authority_store,
+        local_sessions,
+        catalog=agents.catalog,
+        runtimes=agents.runtimes,
+        execution=agents.execution,
+        read_cp_scope=cp.read_task_tool_scope,
+        parent_authorizer=host,
+    )
+    host.grants = authority.grants = tool_reader.grants = grants
     return ProductRuntime(
         settings=settings,
         product_store=store,
+        authority_store=authority_store,
+        local_sessions=local_sessions,
+        grants=grants,
+        task_tool_connections=tool_reader,
         agent_store=agent_store,
         credential_engine=credential_engine,
         credential_catalog=catalog,
