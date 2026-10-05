@@ -3,6 +3,8 @@ import { Send, Square } from "lucide-react";
 export function ChatComposer({
   value,
   active,
+  interruptAvailable,
+  interruptReasonCode,
   disabled,
   errorMessage,
   onChange,
@@ -11,6 +13,8 @@ export function ChatComposer({
 }: {
   value: string;
   active: boolean;
+  interruptAvailable: boolean;
+  interruptReasonCode: string | null;
   disabled: boolean;
   errorMessage: string | null;
   onChange: (value: string) => void;
@@ -44,9 +48,9 @@ export function ChatComposer({
               className="icon-button icon-button--danger"
               type="button"
               onClick={onInterrupt}
-              disabled={disabled}
-              aria-label="停止当前对话"
-              title="停止当前对话"
+              disabled={disabled || !interruptAvailable}
+              aria-label="中断当前回复"
+              title={interruptAvailable ? "中断当前回复" : interruptReasonCode ?? "cancel_unconfirmed"}
             >
               <Square size={15} aria-hidden="true" />
             </button>

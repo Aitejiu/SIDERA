@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     MetaData,
     String,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -141,3 +142,79 @@ class ToolReceiptRow(Base):
     result: Mapped[dict[str, JsonValue] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ConversationRow(Base):
+    __tablename__ = "conversations"
+    __table_args__ = (
+        CheckConstraint("version > 0", name="conversation_version_positive"),
+        CheckConstraint(
+            "stop_state IS NULL OR stop_state IN "
+            "('prepared', 'dispatching', 'accepted', 'unknown', 'stopped', 'failed')",
+            name="conversation_stop_state",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    workspace_id: Mapped[UUID]
+    principal_id: Mapped[str] = mapped_column(String(200))
+    title: Mapped[str] = mapped_column(String(120))
+    context_refs: Mapped[list[str]] = mapped_column(JSONB)
+    profile_ref: Mapped[dict[str, JsonValue]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int]
+    active_turn_id: Mapped[UUID | None]
+    grant_id: Mapped[UUID | None]
+    start_operation_id: Mapped[UUID | None]
+    run_id: Mapped[UUID | None]
+    execution_workspace: Mapped[dict[str, JsonValue] | None] = mapped_column(JSONB)
+    stop_operation_id: Mapped[UUID | None]
+    stop_state: Mapped[str | None] = mapped_column(String(16))
+
+
+class ChatTurnRow(Base):
+    __tablename__ = "chat_turns"
+    __table_args__ = (
+        CheckConstraint("version > 0", name="chat_turn_version_positive"),
+        CheckConstraint("dispatch_attempt >= 0", name="chat_turn_attempt_nonnegative"),
+        UniqueConstraint(
+            "workspace_id",
+            "conversation_id",
+            "operation_id",
+            name="chat_turn_original_operation",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "conversation_id",
+            "native_operation_id",
+            name="chat_turn_native_operation",
+        ),
+        CheckConstraint("kind IN ('start', 'input')", name="chat_turn_kind"),
+        CheckConstraint(
+            "request_state IN ('claimed', 'prepared', 'dispatching', 'accepted', "
+            "'delivered', 'busy', 'rejected', 'unknown')",
+            name="chat_turn_request_state",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    conversation_id: Mapped[UUID]
+    workspace_id: Mapped[UUID]
+    principal_id: Mapped[str] = mapped_column(String(200))
+    operation_id: Mapped[str] = mapped_column(String(128))
+    native_operation_id: Mapped[UUID]
+    request_fingerprint: Mapped[str] = mapped_column(String(64))
+    input_text: Mapped[str] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(String(8))
+    request_state: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int]
+    dispatch_attempt: Mapped[int]
+    native_request: Mapped[dict[str, JsonValue] | None] = mapped_column(JSONB)
+    response_id: Mapped[UUID | None]
+    reason_code: Mapped[str | None] = mapped_column(String(100))
+    cached_view: Mapped[dict[str, JsonValue] | None] = mapped_column(JSONB)
+    interrupt_operation_id: Mapped[UUID | None]
+    interrupt_state: Mapped[str | None] = mapped_column(String(16))

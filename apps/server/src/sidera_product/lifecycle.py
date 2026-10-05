@@ -37,6 +37,7 @@ from .postgres import PostgresProductStore
 from .postgres.authority_store import PostgresAuthorityStore
 
 if TYPE_CHECKING:
+    from .chat.service import ChatService
     from .composition import (
         AgentSecretReader,
         AuthorityRouter,
@@ -91,6 +92,7 @@ class ProductRuntime:
         authority_store: PostgresAuthorityStore,
         local_sessions: LocalSessions,
         grants: ProductGrants,
+        chat: ChatService,
         task_tool_connections: ToolConnectionResolver,
         agent_store: OwnedAgentStore,
         credential_engine: Engine,
@@ -109,6 +111,7 @@ class ProductRuntime:
         self.authority_store = authority_store
         self.local_sessions = local_sessions
         self.grants = grants
+        self.chat = chat
         self.task_tool_connections = task_tool_connections
         self.agent_store = agent_store
         self.credential_engine = credential_engine
@@ -128,6 +131,7 @@ class ProductRuntime:
         self._admission = False
         self._execution_available = False
         self._cp_closed = False
+        self._chat_closed = False
         self._agents_closed = False
         self._agent_store_closed = False
         self._credential_store_closed = False
@@ -178,6 +182,7 @@ class ProductRuntime:
                 self._state = "starting"
                 if self._shutdown_requested.is_set():
                     raise RuntimeError("product_closed")
+                self.chat.activate()
                 self.agents.start_background(
                     interval_seconds=self.settings.agent_poll_interval_seconds
                 )
@@ -220,6 +225,7 @@ class ProductRuntime:
         deadline = monotonic() + grace
         self._shutdown_requested.set()
         self._admission = False
+        self.chat.begin_close()
         if not self._lock.acquire(timeout=max(0.0, deadline - monotonic())):
             return False
         try:
@@ -229,6 +235,7 @@ class ProductRuntime:
 
     def _close_locked(self, deadline: float) -> bool:
         self._shutdown_requested.set()
+        self.chat.begin_close()
         if self._state == "closed":
             return True
         self._state = "closing"
@@ -245,6 +252,15 @@ class ProductRuntime:
                     self._cleanup_code = "control_plane_cleanup_pending"
                     return False
                 self._cp_closed = True
+            if not self._chat_closed:
+                if (
+                    self.chat.close(grace_seconds=max(0.0, deadline - monotonic()))
+                    is not True
+                ):
+                    self._state = "cleanup_incomplete"
+                    self._cleanup_code = "conversation_cleanup_pending"
+                    return False
+                self._chat_closed = True
             if not self._agents_closed:
                 self.agents.close(timeout=max(0.0, deadline - monotonic()))
                 self._agents_closed = True
@@ -273,23 +289,27 @@ class ProductRuntime:
             )
 
     def status(self) -> dict[str, JsonValue]:
+        execution_ready = (
+            not self._shutdown_requested.is_set()
+            and self._admission
+            and self._state == "ready"
+            and self._execution_available
+        )
         return {
             "lifecycle": self._state,
             "cleanup": {
                 "complete": self._state == "closed",
                 "code": self._cleanup_code,
             },
-            "execution": {
-                "ready": not self._shutdown_requested.is_set()
-                and self._admission
-                and self._state == "ready"
-                and self._execution_available
-            },
+            "execution": {"ready": execution_ready},
             "knowledge": {
                 "available": False,
                 "configured": self.settings.knowledge_base_url is not None,
             },
-            "main_agent": {"available": False, "code": "not_implemented"},
+            "main_agent": {
+                "available": execution_ready,
+                "code": None if execution_ready else "product_unavailable",
+            },
             "tools": {"available": False, "code": "local_session_required"},
             "workspace_id": str(self.settings.workspace_id),
             "setup": {"configured": None, "code": "local_session_required"},

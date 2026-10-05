@@ -8,8 +8,10 @@ import {
   resolveE2eRuntime,
   rewriteKnowledgeProxyPath,
 } from "./src/e2eConfig.js";
+import { resolveBackendProxyTargets } from "./src/nativeBackendConfig.js";
 
-const { controlPlanePort, knowledgeServicePort, mainAgentPort } = resolveE2eRuntime(process.env);
+const { knowledgeServicePort } = resolveE2eRuntime(process.env);
+const backendProxies = resolveBackendProxyTargets(process.env);
 
 export default defineConfig({
   plugins: [react()],
@@ -21,8 +23,7 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     proxy: {
-      "/api": `http://127.0.0.1:${controlPlanePort}`,
-      "/healthz": `http://127.0.0.1:${controlPlanePort}`,
+      ...backendProxies,
       "/knowledge-api": {
         target: knowledgeProxyTarget(knowledgeServicePort),
         rewrite: rewriteKnowledgeProxyPath,
@@ -35,7 +36,6 @@ export default defineConfig({
           }
         },
       },
-      "/main-agent": `http://127.0.0.1:${mainAgentPort}`,
     },
   },
   preview: {

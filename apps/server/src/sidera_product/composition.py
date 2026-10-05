@@ -57,10 +57,12 @@ from sqlalchemy.orm import sessionmaker
 
 from .auth.grants import ProductGrants, ToolConnectionResolver, VerifiedToolGrant
 from .auth.local_session import SESSION_COOKIE, LocalSessions
+from .chat.service import ChatService
 from .config import ProductSettings
 from .lifecycle import ProductRuntime
 from .postgres import PostgresProductStore
 from .postgres.authority_store import PostgresAuthorityStore, ReceiptStore
+from .postgres.chat_store import PostgresChatStore
 
 
 def deny() -> NoReturn:
@@ -828,12 +830,25 @@ def build_product_runtime(
         parent_authorizer=host,
     )
     host.grants = authority.grants = tool_reader.grants = grants
+    chat = ChatService(
+        settings=settings,
+        product_store=store,
+        store=PostgresChatStore(store.engine),
+        sessions=local_sessions,
+        catalog=agents.catalog,
+        runtimes=agents.runtimes,
+        execution=agents.execution,
+        grants=grants,
+        authority_store=authority_store,
+        receipt_store=authority_store,
+    )
     return ProductRuntime(
         settings=settings,
         product_store=store,
         authority_store=authority_store,
         local_sessions=local_sessions,
         grants=grants,
+        chat=chat,
         task_tool_connections=tool_reader,
         agent_store=agent_store,
         credential_engine=credential_engine,

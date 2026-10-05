@@ -5,6 +5,8 @@ from uuid import UUID
 
 import anyio
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import (
@@ -34,6 +36,9 @@ from .auth.local_session import (
     LocalSessionError,
 )
 from .auth.middleware import LocalSessionMiddleware
+from .chat.contracts import error_envelope
+from .chat.routes import chat_router
+from .chat.service import ChatError
 from .composition import build_product_runtime
 from .config import ProductSettings
 from .lifecycle import ProductRuntime
@@ -115,7 +120,10 @@ def create_app(
         request: Request, error: LocalSessionError
     ) -> JSONResponse:
         return JSONResponse(
-            {"detail": {"code": error.code}}, status_code=error.status_code
+            error_envelope(error.code)
+            if request.url.path.startswith("/main-agent/v1/")
+            else {"detail": {"code": error.code}},
+            status_code=error.status_code,
         )
 
     @app.exception_handler(ProductStoreError)
@@ -123,8 +131,24 @@ def create_app(
         request: Request, error: ProductStoreError
     ) -> JSONResponse:
         return JSONResponse(
-            {"detail": {"code": "product_store_unavailable"}}, status_code=503
+            error_envelope("product_store_unavailable", retryable=True)
+            if request.url.path.startswith("/main-agent/v1/")
+            else {"detail": {"code": "product_store_unavailable"}},
+            status_code=503,
         )
+
+    @app.exception_handler(ChatError)
+    async def chat_error(request: Request, error: ChatError) -> JSONResponse:
+        return JSONResponse(
+            error_envelope(error.code, retryable=error.retryable),
+            status_code=error.status_code,
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, error: RequestValidationError):
+        if request.url.path.startswith("/main-agent/v1/"):
+            return JSONResponse(error_envelope("validation_error"), status_code=422)
+        return await request_validation_exception_handler(request, error)
 
     @app.post("/product/v1/session/bootstrap")
     async def exchange_bootstrap(request: Request) -> JSONResponse:
@@ -310,9 +334,6 @@ def create_app(
 
     @app.api_route("/agents/v1/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
     @app.api_route(
-        "/main-agent/v1/{path:path}", methods=["GET", "POST", "PUT", "DELETE"]
-    )
-    @app.api_route(
         "/product/v1/workspaces/{path:path}", methods=["GET", "POST", "PUT", "DELETE"]
     )
     async def protected_unavailable(request: Request) -> None:
@@ -320,5 +341,6 @@ def create_app(
         raise HTTPException(503, detail={"code": "not_implemented"})
 
     app.mount("/product/v1/task-tools", task_tool_app)
+    app.include_router(chat_router(owner))
     app.mount("/", owner.control_plane.app)
     return app

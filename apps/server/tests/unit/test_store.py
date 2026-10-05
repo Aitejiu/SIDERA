@@ -31,6 +31,8 @@ def test_owned_schema_has_no_foundation_rows_or_cross_schema_foreign_keys():
         "product.local_bootstraps",
         "product.agent_grants",
         "product.tool_receipts",
+        "product.conversations",
+        "product.chat_turns",
     }
     defaults = base.metadata.tables["product.product_defaults"]
     assert set(defaults.columns.keys()) == {
@@ -66,8 +68,10 @@ def test_owned_forward_migration_resources_match_readiness_head():
     config_path = store_class.alembic_config_path()
     config = Config(str(config_path))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0002_local_authority_tools"]
+    assert scripts.get_heads() == ["0003_conversations"]
     assert Path(config_path).is_file()
+
+
 def test_authority_fencing_token_matches_migration_bigint():
     from sidera_product.postgres.models import AgentGrantRow
 
@@ -75,7 +79,10 @@ def test_authority_fencing_token_matches_migration_bigint():
 
 
 def test_actual_grant_insert_serializes_original_record_column_keys_without_connecting(
-    settings_values, tmp_path, no_database_connections, monkeypatch,
+    settings_values,
+    tmp_path,
+    no_database_connections,
+    monkeypatch,
 ):
     from sidera_product.postgres import authority_store as module
     from sidera_product.postgres.models import AgentGrantRow

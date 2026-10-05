@@ -33,7 +33,11 @@ def selected_product_targets(tmp_path_factory):
             [guard.initial for guard in guards],
         )
         accepted_heads = {
-            "product": {"0001_product_defaults_sessions", "0002_local_authority_tools"},
+            "product": {
+                "0001_product_defaults_sessions",
+                "0002_local_authority_tools",
+                "0003_conversations",
+            },
             "agents": {"0004_inputs_events"},
             "cp": {"0039_hard_only_input_selections"},
             "credentials": {"0001_connections_credentials"},

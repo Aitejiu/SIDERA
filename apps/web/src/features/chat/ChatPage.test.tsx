@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { createMemoryRouter, RouterProvider, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -19,6 +19,7 @@ class TestEventSource {
   static instances: TestEventSource[] = [];
   onopen: ((event: Event) => void) | null = null;
   onerror: ((event: Event) => void) | null = null;
+  closed = false;
   private readonly listeners = new Map<string, (event: MessageEvent<string>) => void>();
 
   constructor(public readonly url: string) {
@@ -29,7 +30,7 @@ class TestEventSource {
     this.listeners.set(type, listener);
   }
 
-  close(): void {}
+  close(): void { this.closed = true; }
 
   emit(type: string, data: unknown, lastEventId: string): void {
     this.listeners.get(type)?.({
@@ -61,6 +62,8 @@ function turn(overrides: Record<string, unknown> = {}) {
     error: null,
     streamAvailable: false,
     recoveryMode: null,
+    interruptAvailable: false,
+    interruptReasonCode: "cancel_unconfirmed",
     ...overrides,
   };
 }
@@ -94,12 +97,12 @@ function renderChat(path: string) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  render(
+  const rendered = render(
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
     </QueryClientProvider>,
   );
-  return { router };
+  return { router, unmount: rendered.unmount };
 }
 
 function TestRoute() {
@@ -142,6 +145,273 @@ describe("Main Agent chat workspace", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("keeps one stream across consecutive same-turn snapshots and reconnects from its actual cursor", async () => {
+    useBaseHandlers({ thread: thread({ turns: [turn({ status: "in_progress", completedAt: null, finalResponse: null, items: [], streamAvailable: true })] }) });
+    renderChat(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
+    await waitFor(() => expect(TestEventSource.instances).toHaveLength(1));
+    const source = TestEventSource.instances[0]!;
+    source.emit("item", { item: { id: "response:assistant", type: "assistantMessage", data: { text: "one" } } }, "7");
+    expect(await screen.findByText("one")).toBeInTheDocument();
+    source.emit("item", { item: { id: "response:assistant", type: "assistantMessage", data: { text: "one two" } } }, "11");
+    expect(await screen.findByText("one two")).toBeInTheDocument();
+    expect(TestEventSource.instances).toHaveLength(1);
+    expect(source.closed).toBe(false);
+    source.fail(500);
+    await waitFor(() => expect(TestEventSource.instances).toHaveLength(2));
+    expect(TestEventSource.instances[1]!.url).toContain("after=11");
+  });
+
+  it("refreshes trusted receipts with one two-second read-only timer even while SSE is healthy", async () => {
+    useBaseHandlers({ thread: thread({ turns: [turn({ status: "in_progress", completedAt: null, finalResponse: null, items: [], streamAvailable: true })] }) });
+    let reads = 0, writes = 0;
+    server.use(
+      http.get(`/main-agent/v1/threads/${THREAD_ID}/turns/${TURN_ID}`, () => {
+        reads += 1;
+        return HttpResponse.json(turn({ status: "in_progress", completedAt: null, finalResponse: null, streamAvailable: true, items: [{
+          id: "product-receipt:50000000-0000-0000-0000-000000000001", type: "toolCall", data: {
+            receiptSource: "sidera.product.task-receipt.v1", receiptId: "50000000-0000-0000-0000-000000000001",
+            name: "sidera_submit_goal", verified: true, logicalRequestId: "60000000-0000-0000-0000-000000000001",
+            commandId: "70000000-0000-0000-0000-000000000001", runId: "80000000-0000-0000-0000-000000000001",
+            responseId: "90000000-0000-0000-0000-000000000001", outcome: "applied", status: "submitted",
+            errorCode: null, rootTaskId: TASK_CONTEXT_ID, planningRequestId: null, webUrl: `/workspaces/${WORKSPACE_ID}/tasks/${TASK_CONTEXT_ID}`,
+          },
+        }] }));
+      }),
+      http.post(`/main-agent/v1/threads/${THREAD_ID}/turns`, () => { writes += 1; return HttpResponse.error(); }),
+    );
+    const { unmount } = renderChat(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
+    expect(await screen.findByText("原命令已应用：submitted", {}, { timeout: 3500 })).toBeInTheDocument();
+    expect(reads).toBe(1);
+    expect(writes).toBe(0);
+    expect(TestEventSource.instances).toHaveLength(1);
+    unmount();
+    expect(TestEventSource.instances[0]!.closed).toBe(true);
+  });
+
+  it.each([401, 403])("stops the stream and shared refresh after a %s view denial", async (status) => {
+    useBaseHandlers({ thread: thread({ turns: [turn({ status: "in_progress", completedAt: null, finalResponse: null, items: [], streamAvailable: true })] }) });
+    let reads = 0;
+    server.use(http.get(`/main-agent/v1/threads/${THREAD_ID}/turns/${TURN_ID}`, () => {
+      reads += 1;
+      return HttpResponse.json({ error: { code: "local_session_required", message: "denied", retryable: false } }, { status });
+    }));
+    renderChat(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
+    await waitFor(() => expect(TestEventSource.instances).toHaveLength(1));
+    TestEventSource.instances[0]!.fail(409);
+    await waitFor(() => expect(reads).toBe(1));
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 2100));
+    expect(reads).toBe(1);
+    expect(TestEventSource.instances[0]!.closed).toBe(true);
+    expect(TestEventSource.instances).toHaveLength(1);
+  });
+
+  it("aborts the current view read and ignores old response frames after navigation", async () => {
+    useBaseHandlers({ thread: thread({ turns: [turn({ status: "in_progress", completedAt: null, finalResponse: null, items: [], streamAvailable: true })] }) });
+    let readSignal: AbortSignal | undefined;
+    let release: (() => void) | undefined;
+    server.use(
+      http.get(`/main-agent/v1/threads/${THREAD_ID}/turns/${TURN_ID}`, async ({ request }) => {
+        readSignal = request.signal;
+        await new Promise<void>((resolve) => { release = resolve; });
+        return HttpResponse.json(turn());
+      }),
+      http.get("/main-agent/v1/threads/thread-new", () => HttpResponse.json(thread({ id: "thread-new", turns: [] }))),
+    );
+    const { router } = renderChat(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
+    try {
+      await waitFor(() => expect(TestEventSource.instances).toHaveLength(1));
+      const old = TestEventSource.instances[0]!;
+      old.fail(409);
+      await waitFor(() => expect(readSignal).toBeDefined());
+      await act(async () => { await router.navigate(`/workspaces/${WORKSPACE_ID}/chat/thread-new`); });
+      expect(readSignal!.aborted).toBe(true);
+      expect(old.closed).toBe(true);
+      old.emit("item", { item: { id: "old-response", type: "assistantMessage", data: { text: "STALE_OLD_RESPONSE" } } }, "12");
+      expect(screen.queryByText("STALE_OLD_RESPONSE")).not.toBeInTheDocument();
+    } finally {
+      release?.();
+    }
+  });
+
+  it("aborts held no-SSE reading on unmount without a later timer, stream, or write", async () => {
+    useBaseHandlers({ thread: thread({ turns: [turn({ status: "queued", completedAt: null, finalResponse: null, streamAvailable: false })] }) });
+    let signal: AbortSignal | undefined;
+    let release: (() => void) | undefined;
+    let reads = 0, writes = 0;
+    server.use(
+      http.get(`/main-agent/v1/threads/${THREAD_ID}/turns/${TURN_ID}`, async ({ request }) => {
+        signal = request.signal;
+        reads += 1;
+        await new Promise<void>((resolve) => { release = resolve; });
+        return HttpResponse.json(turn());
+      }),
+      http.post(`/main-agent/v1/threads/${THREAD_ID}/turns`, () => {
+        writes += 1;
+        return HttpResponse.error();
+      }),
+    );
+    const { unmount } = renderChat(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
+    try {
+      await waitFor(() => expect(signal).toBeDefined());
+      unmount();
+      expect(signal!.aborted).toBe(true);
+      vi.useFakeTimers();
+      release?.();
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(reads).toBe(1);
+      expect(writes).toBe(0);
+      expect(TestEventSource.instances).toHaveLength(0);
+    } finally {
+      release?.();
+      vi.useRealTimers();
+      unmount();
+    }
+  });
+
+  it("disables one-response interruption when the native turn does not confirm it", async () => {
+    useBaseHandlers({ thread: thread({ turns: [turn({ status: "in_progress", completedAt: null, finalResponse: null, streamAvailable: true, interruptAvailable: false, interruptReasonCode: "cancel_unconfirmed" })] }) });
+    renderChat(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
+    const action = await screen.findByRole("button", { name: "中断当前回复" });
+    expect(action).toBeDisabled();
+    expect(action).toHaveAttribute("title", "cancel_unconfirmed");
+  });
+
+  it("retains the draft and original operation for a durable UNKNOWN acknowledgement without resend", async () => {
+    const user = userEvent.setup();
+    useBaseHandlers();
+    vi.stubGlobal("crypto", { randomUUID: () => "operation-durable-unknown" });
+    const operations: unknown[] = [];
+    server.use(
+      http.post(`/main-agent/v1/threads/${THREAD_ID}/turns`, async ({ request }) => {
+        const body = await request.json() as Record<string, unknown>;
+        operations.push(body.operationId);
+        return HttpResponse.json(turn({ status: "queued", items: [{ id: "original:user", type: "userMessage", data: { text: body.input } }], completedAt: null, finalResponse: null, streamAvailable: false, operationId: body.operationId, operationState: "unknown" }), { status: 202 });
+      }),
+      http.get(`/main-agent/v1/threads/${THREAD_ID}/turns/${TURN_ID}`, () => HttpResponse.json(turn({ status: "queued", completedAt: null, finalResponse: null, streamAvailable: false, operationState: "unknown" }))),
+    );
+    renderChat(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
+    const composer = await screen.findByRole("textbox", { name: "给 Main Agent 的消息" });
+    await user.type(composer, "original unknown text");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+    await screen.findByRole("status", { name: "发送结果恢复状态" });
+    expect(composer).toHaveValue("original unknown text");
+    expect(operations).toEqual(["operation-durable-unknown"]);
+  });
+
+  it("retains a proven BUSY draft without polling or resend and explicitly retries the original operation", async () => {
+    const user = userEvent.setup();
+    useBaseHandlers();
+    vi.stubGlobal("crypto", { randomUUID: () => "operation-proven-busy" });
+    const bodies: unknown[] = [];
+    let reads = 0;
+    server.use(
+      http.post(`/main-agent/v1/threads/${THREAD_ID}/turns`, async ({ request }) => {
+        const body = await request.json() as Record<string, unknown>;
+        bodies.push(body);
+        return HttpResponse.json(turn({
+          status: bodies.length === 1 ? "failed" : "completed",
+          items: [{ id: "original:user", type: "userMessage", data: { text: body.input } }],
+          startedAt: null, completedAt: null, finalResponse: null, streamAvailable: false,
+          operationId: body.operationId, operationState: bodies.length === 1 ? "busy" : "accepted",
+          error: bodies.length === 1 ? { code: "resource_busy", retryable: true } : null,
+        }), { status: 202 });
+      }),
+      http.get(`/main-agent/v1/threads/${THREAD_ID}/turns/${TURN_ID}`, () => {
+        reads += 1;
+        return HttpResponse.json(turn());
+      }),
+    );
+    const { unmount } = renderChat(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
+    try {
+      const composer = await screen.findByRole("textbox", { name: "给 Main Agent 的消息" });
+      await user.type(composer, "original busy text");
+      await user.click(screen.getByRole("button", { name: "发送消息" }));
+      await screen.findByText("未受理");
+      expect(composer).toHaveValue("original busy text");
+      expect(composer).toBeEnabled();
+      expect(TestEventSource.instances).toHaveLength(0);
+      vi.useFakeTimers();
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(reads).toBe(0);
+      expect(bodies).toEqual([{ input: "original busy text", operationId: "operation-proven-busy" }]);
+      vi.useRealTimers();
+      await user.click(screen.getByRole("button", { name: "稍后重试" }));
+      await waitFor(() => expect(bodies).toHaveLength(2));
+      expect(bodies[1]).toEqual(bodies[0]);
+    } finally {
+      vi.useRealTimers();
+      unmount();
+    }
+  });
+
+  it("retries saved BUSY history with its exact original text and operation without local pending state", async () => {
+    const user = userEvent.setup();
+    const original = " original saved busy ";
+    const saved = turn({
+      status: "failed", startedAt: null, completedAt: null, finalResponse: null,
+      items: [{ id: "saved:user", type: "userMessage", data: { text: original } }],
+      operationId: "saved:busy:original", operationState: "busy",
+      error: { code: "resource_busy", retryable: true },
+    });
+    useBaseHandlers({ thread: thread({ turns: [saved] }) });
+    const bodies: unknown[] = [];
+    server.use(http.post(`/main-agent/v1/threads/${THREAD_ID}/turns`, async ({ request }) => {
+      bodies.push(await request.json());
+      return HttpResponse.json(turn({ operationId: "saved:busy:original", operationState: "accepted" }), { status: 202 });
+    }));
+    renderChat(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
+    expect(await screen.findByText("未受理")).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "发送结果恢复状态" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "稍后重试" }));
+    await waitFor(() => expect(bodies).toEqual([{ input: original, operationId: "saved:busy:original" }]));
+    expect(TestEventSource.instances).toHaveLength(0);
+  });
+
+  it("never offers a fresh retry action for a saved UNKNOWN operation", async () => {
+    useBaseHandlers({ thread: thread({ turns: [turn({
+      status: "failed", completedAt: null, finalResponse: null,
+      operationId: "unknown:original", operationState: "unknown",
+      error: { code: "native_operation_unknown", retryable: false },
+    })] }) });
+    let writes = 0;
+    server.use(http.post(`/main-agent/v1/threads/${THREAD_ID}/turns`, () => {
+      writes += 1;
+      return HttpResponse.error();
+    }));
+    renderChat(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
+    expect(await screen.findByText("之前的需求")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /重试/ })).not.toBeInTheDocument();
+    expect(writes).toBe(0);
+  });
+
+  it("keeps an accepted queued UNKNOWN response query-only after refresh with no fresh retry or second POST", async () => {
+    const pending = turn({
+      status: "queued", completedAt: null, finalResponse: null, startedAt: "2026-08-24T04:00:01Z",
+      operationId: "input:unknown:original", operationState: "accepted", responseId: "original-response",
+      streamAvailable: false, recoveryMode: "poll",
+      error: { code: "native_run_unknown", retryable: false },
+    });
+    useBaseHandlers({ thread: thread({ turns: [pending] }) });
+    let reads = 0, writes = 0;
+    server.use(
+      http.get(`/main-agent/v1/threads/${THREAD_ID}/turns/${TURN_ID}`, () => {
+        reads += 1;
+        return HttpResponse.json(pending);
+      }),
+      http.post(`/main-agent/v1/threads/${THREAD_ID}/turns`, () => {
+        writes += 1;
+        return HttpResponse.error();
+      }),
+    );
+    renderChat(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
+    await waitFor(() => expect(reads).toBe(1));
+    expect(screen.getByRole("textbox", { name: "给 Main Agent 的消息" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /重试/ })).not.toBeInTheDocument();
+    expect(screen.getByText("结果待确认")).toBeInTheDocument();
+    expect(TestEventSource.instances).toHaveLength(0);
+    expect(writes).toBe(0);
   });
 
   it("creates an empty conversation only after an explicit click", async () => {
@@ -219,7 +489,7 @@ describe("Main Agent chat workspace", () => {
     expect(screen.getByRole("textbox", { name: "给 Main Agent 的消息" })).toHaveValue(contextRef);
   });
 
-  it("restores server history, sends only on click, and exposes the active stop action", async () => {
+  it("restores server history, sends only on click, and disables unconfirmed response interruption", async () => {
     const user = userEvent.setup();
     useBaseHandlers({ thread: thread({ turns: [turn()] }) });
     let startCount = 0;
@@ -253,7 +523,7 @@ describe("Main Agent chat workspace", () => {
 
     await waitFor(() => expect(startCount).toBe(1));
     expect(screen.getByRole("textbox", { name: "给 Main Agent 的消息" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "停止当前对话" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "中断当前回复" })).toBeDisabled();
   });
 
   it("retries a message when the Gateway reports a transient busy thread", async () => {
@@ -365,7 +635,7 @@ describe("Main Agent chat workspace", () => {
     expect(randomUUID).toHaveBeenCalledTimes(2);
   });
 
-  it("interrupts only the current active turn", async () => {
+  it("never dispatches interruption without current native confirmation", async () => {
     const user = userEvent.setup();
     useBaseHandlers({
       thread: thread({
@@ -381,10 +651,12 @@ describe("Main Agent chat workspace", () => {
     );
 
     renderChat(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
-    await user.click(await screen.findByRole("button", { name: "停止当前对话" }));
+    const action = await screen.findByRole("button", { name: "中断当前回复" });
+    expect(action).toBeDisabled();
+    await user.click(action);
 
-    await waitFor(() => expect(interruptCount).toBe(1));
-    expect(screen.getByText("已中断")).toBeInTheDocument();
+    expect(interruptCount).toBe(0);
+    expect(screen.queryByText("已中断")).not.toBeInTheDocument();
   });
 
   it("polls the same turn when the event stream is unavailable", async () => {
@@ -527,16 +799,14 @@ describe("Main Agent chat workspace", () => {
           items: [
             { id: "tool-user", type: "userMessage", data: { content: "查任务" } },
             {
-              id: "tool-result",
+              id: "product-receipt:50000000-0000-0000-0000-000000000001",
               type: "toolCall",
               data: {
-                name: "sidera_get_task_status",
-                resultPreview: JSON.stringify({
-                  outcome: "ok",
-                  summary: "Task progress loaded.",
-                  resource_ref: `task:${taskId}`,
-                  web_url: `/workspaces/${WORKSPACE_ID}/tasks/${taskId}`,
-                }),
+                receiptSource: "sidera.product.task-receipt.v1", receiptId: "50000000-0000-0000-0000-000000000001",
+                name: "sidera_submit_goal", verified: true, logicalRequestId: "60000000-0000-0000-0000-000000000001",
+                commandId: "70000000-0000-0000-0000-000000000001", runId: "80000000-0000-0000-0000-000000000001",
+                responseId: "90000000-0000-0000-0000-000000000001", outcome: "applied", status: "submitted",
+                errorCode: null, rootTaskId: taskId, planningRequestId: null, webUrl: `/workspaces/${WORKSPACE_ID}/tasks/${taskId}`,
               },
             },
           ],
@@ -557,7 +827,7 @@ describe("Main Agent chat workspace", () => {
 
     renderChat(`/workspaces/${WORKSPACE_ID}/chat/${THREAD_ID}`);
 
-    expect(await screen.findByText("Task progress loaded.")).toBeInTheDocument();
+    expect(await screen.findByText("原命令已应用：submitted")).toBeInTheDocument();
     expect(await screen.findByText("控制面任务")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "打开任务" })).toHaveAttribute(
       "href",

@@ -1,4 +1,5 @@
 import type { paths } from "./schema";
+import { localSessionRequest } from "./localSession";
 
 type GetOperation<Path extends keyof paths> = paths[Path] extends {
   get: infer Operation;
@@ -68,13 +69,11 @@ export async function apiRequestJson<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
+  const headers = new Headers(init.headers);
+  if (!headers.has("Accept")) headers.set("Accept", "application/json");
+  if (init.body !== undefined && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   const response = await fetch(path, {
-    ...init,
-    headers: {
-      Accept: "application/json",
-      ...(init.body === undefined ? {} : { "Content-Type": "application/json" }),
-      ...init.headers,
-    },
+    ...localSessionRequest({ ...init, headers }),
   });
   return parseResponse<T>(response);
 }
@@ -99,7 +98,7 @@ export async function apiCommand<Response = unknown, Path extends keyof paths = 
   path: Path,
   init: RequestInit,
 ): Promise<Response> {
-  const response = await fetch(path as string, init);
+  const response = await fetch(path as string, localSessionRequest(init));
   return parseResponse<Response>(response);
 }
 

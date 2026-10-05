@@ -5,7 +5,6 @@ from threading import Event
 from uuid import uuid4
 
 import pytest
-
 from sidera_agents.contracts import (
     InputStatus,
     InterruptStatus,
@@ -13,6 +12,7 @@ from sidera_agents.contracts import (
     NativeCancelState,
     NativeCloseOutcome,
     NativeCloseState,
+    NativeHandle,
     NativeInspection,
     NativeOutcomeStatus,
     NativeProcessState,
@@ -816,6 +816,246 @@ def test_unknown_stop_retains_session_reservation(admission_lab, monkeypatch):
     entry = lab.store.get_runtime_entry(lab.runtime.ref)
     assert entry.installation.session_count == 1
     assert len(lab.native.open_calls) == 1
+
+
+def _unknown_original_stop(lab, monkeypatch):
+    start = _start(lab)
+    lab.pump()
+    close_calls = []
+
+    def unknown_close(handle):
+        close_calls.append(handle.run_id)
+        assert lab.native.inspect(handle).process_state is NativeProcessState.ALIVE
+        return NativeCloseOutcome(
+            status=NativeCloseState.UNKNOWN, reason_code="native_close_unknown"
+        )
+
+    monkeypatch.setattr(lab.native, "close", unknown_close)
+    stop = RunStop(
+        workspace_id=lab.workspace_id,
+        run_id=start.run_id,
+        operation_id=uuid4(),
+        grant_id=lab.grant_id,
+    )
+    assert lab.execution.stop(stop).status is StopStatus.ACCEPTED
+    assert (
+        lab.execution.get_stop(
+            lab.workspace_id, start.run_id, stop.operation_id, grant_id=lab.grant_id
+        ).status
+        is StopStatus.UNKNOWN
+    )
+    assert close_calls == [start.run_id]
+    return start, stop, close_calls
+
+
+def test_unknown_stop_is_confirmed_after_original_process_exit(
+    admission_lab, monkeypatch
+):
+    lab = admission_lab
+    start, stop, close_calls = _unknown_original_stop(lab, monkeypatch)
+    saved_handle = lab.store.get_native_handle(lab.workspace_id, start.run_id)
+    original = lab.execution.get_run(
+        lab.workspace_id, start.run_id, grant_id=lab.grant_id
+    )
+    for _ in range(3):
+        lab.pump()
+        assert (
+            lab.execution.get_stop(
+                lab.workspace_id, start.run_id, stop.operation_id, grant_id=lab.grant_id
+            ).status
+            is StopStatus.UNKNOWN
+        )
+    assert close_calls == [start.run_id]
+    lab.native.inspections[start.run_id] = NativeInspection(
+        process_state=NativeProcessState.GONE,
+        response_state=NativeResponseState.IDLE,
+        reason_code=None,
+    )
+    lab.pump()
+    receipt = lab.execution.get_stop(
+        lab.workspace_id, start.run_id, stop.operation_id, grant_id=lab.grant_id
+    )
+    assert receipt.status is StopStatus.STOPPED
+    assert receipt.operation_id == stop.operation_id and receipt.run_id == start.run_id
+    snapshot = lab.execution.get_run(
+        lab.workspace_id, start.run_id, grant_id=lab.grant_id
+    )
+    assert snapshot.state is RunState.STOPPED and not snapshot.input_open
+    assert snapshot.profile_ref == original.profile_ref
+    assert snapshot.effective_config == original.effective_config
+    assert lab.store.get_native_handle(lab.workspace_id, start.run_id) == saved_handle
+    events = lab.store.get_lifecycle_events(lab.workspace_id, start.run_id)
+    assert [
+        event.kind for event in events if event.operation_id == stop.operation_id
+    ] == ["stop.accepted", "stop.unknown", "stop.stopped"]
+    for _ in range(3):
+        lab.pump()
+        assert (
+            lab.execution.get_stop(
+                lab.workspace_id, start.run_id, stop.operation_id, grant_id=lab.grant_id
+            )
+            == receipt
+        )
+    assert lab.store.get_lifecycle_events(lab.workspace_id, start.run_id) == events
+    installation = lab.store.get_runtime_entry(lab.runtime.ref).installation
+    reservation = lab.store._run_reservations[start.run_id]
+    assert installation.active_count == installation.session_count == 0
+    assert not reservation.active and not reservation.session
+    assert close_calls == [start.run_id]
+    assert len(lab.native.open_calls) == len(lab.native.prompt_calls) == 1
+
+
+@pytest.mark.parametrize("observation", ("alive", "unknown", "inspector_error"))
+def test_unknown_stop_requires_authoritative_original_exit(
+    admission_lab, monkeypatch, observation
+):
+    lab = admission_lab
+    start, stop, close_calls = _unknown_original_stop(lab, monkeypatch)
+    if observation == "inspector_error":
+
+        def unavailable_inspection(handle):
+            raise RuntimeError("controlled inspection unavailable")
+
+        monkeypatch.setattr(lab.native, "inspect", unavailable_inspection)
+    else:
+        lab.native.inspections[start.run_id] = NativeInspection(
+            process_state=NativeProcessState(observation),
+            response_state=NativeResponseState.UNKNOWN,
+            reason_code=None,
+        )
+    for _ in range(3):
+        lab.pump()
+        assert (
+            lab.execution.get_stop(
+                lab.workspace_id, start.run_id, stop.operation_id, grant_id=lab.grant_id
+            ).status
+            is StopStatus.UNKNOWN
+        )
+    assert (
+        lab.execution.get_run(
+            lab.workspace_id, start.run_id, grant_id=lab.grant_id
+        ).state
+        is RunState.UNKNOWN
+    )
+    installation = lab.store.get_runtime_entry(lab.runtime.ref).installation
+    assert installation.session_count == 1
+    assert lab.store._run_reservations[start.run_id].session
+    assert close_calls == [start.run_id]
+    assert [
+        event.kind
+        for event in lab.store.get_lifecycle_events(lab.workspace_id, start.run_id)
+        if event.operation_id == stop.operation_id
+    ] == ["stop.accepted", "stop.unknown"]
+
+
+def test_gone_without_original_stop_does_not_invent_stopped(admission_lab, monkeypatch):
+    lab = admission_lab
+    start = _start(lab)
+    lab.native.outcomes[start.run_id] = NativeOutcomeStatus.UNKNOWN
+    lab.pump()
+    close_calls = []
+    monkeypatch.setattr(lab.native, "close", lambda handle: close_calls.append(handle))
+    assert (
+        lab.execution.get_run(
+            lab.workspace_id, start.run_id, grant_id=lab.grant_id
+        ).state
+        is RunState.UNKNOWN
+    )
+    lab.native.inspections[start.run_id] = NativeInspection(
+        process_state=NativeProcessState.GONE,
+        response_state=NativeResponseState.IDLE,
+        reason_code=None,
+    )
+    lab.pump()
+    assert (
+        lab.execution.get_run(
+            lab.workspace_id, start.run_id, grant_id=lab.grant_id
+        ).state
+        is RunState.UNKNOWN
+    )
+    assert not any(
+        event.kind.startswith("stop.")
+        for event in lab.store.get_lifecycle_events(lab.workspace_id, start.run_id)
+    )
+    assert close_calls == []
+    installation = lab.store.get_runtime_entry(lab.runtime.ref).installation
+    assert installation.active_count == installation.session_count == 0
+
+
+def test_foreign_handle_cannot_confirm_or_release_original_unknown_stop(
+    admission_lab, monkeypatch
+):
+    lab = admission_lab
+    start, stop, close_calls = _unknown_original_stop(lab, monkeypatch)
+    original = lab.execution.get_run(
+        lab.workspace_id, start.run_id, grant_id=lab.grant_id
+    )
+    saved_handle = lab.store.get_native_handle(lab.workspace_id, start.run_id)
+    foreign = NativeHandle(
+        run_id=uuid4(),
+        session_id="foreign-controlled-session",
+        process_identity=saved_handle.process_identity,
+        capabilities=saved_handle.capabilities,
+    )
+    unresolved = lab.store.list_unresolved_runs
+
+    def foreign_unresolved():
+        return tuple(
+            (snapshot, foreign, terminal, reason)
+            for snapshot, _, terminal, reason in unresolved()
+        )
+
+    inspected = []
+
+    def foreign_gone(handle):
+        inspected.append(handle)
+        return NativeInspection(
+            process_state=NativeProcessState.GONE,
+            response_state=NativeResponseState.IDLE,
+            reason_code=None,
+        )
+
+    monkeypatch.setattr(lab.store, "list_unresolved_runs", foreign_unresolved)
+    monkeypatch.setattr(lab.native, "inspect", foreign_gone)
+    lab.pump()
+    assert inspected == []
+    assert (
+        lab.execution.get_run(lab.workspace_id, start.run_id, grant_id=lab.grant_id)
+        == original
+    )
+    assert (
+        lab.execution.get_stop(
+            lab.workspace_id, start.run_id, stop.operation_id, grant_id=lab.grant_id
+        ).status
+        is StopStatus.UNKNOWN
+    )
+    assert lab.store.get_runtime_entry(lab.runtime.ref).installation.session_count == 1
+    assert lab.store._run_reservations[start.run_id].session
+    assert close_calls == [start.run_id]
+
+
+def test_unauthorized_original_stop_query_does_not_inspect_native(
+    admission_lab, monkeypatch
+):
+    lab = admission_lab
+    start, stop, close_calls = _unknown_original_stop(lab, monkeypatch)
+    inspected = []
+    original_inspect = lab.native.inspect
+
+    def tracked_inspection(handle):
+        inspected.append(handle)
+        return original_inspect(handle)
+
+    monkeypatch.setattr(lab.native, "inspect", tracked_inspection)
+    history = lab.store.get_lifecycle_events(lab.workspace_id, start.run_id)
+    with pytest.raises(AgentError) as denied:
+        lab.execution.get_stop(
+            lab.workspace_id, start.run_id, stop.operation_id, grant_id=uuid4()
+        )
+    assert denied.value.code == "permission_denied"
+    assert inspected == [] and close_calls == [start.run_id]
+    assert lab.store.get_lifecycle_events(lab.workspace_id, start.run_id) == history
+    assert lab.store._run_reservations[start.run_id].session
 
 
 def test_revoked_grant_cannot_resume_but_trusted_owner_can_stop(

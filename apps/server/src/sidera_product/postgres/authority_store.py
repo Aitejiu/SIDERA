@@ -62,6 +62,12 @@ class ToolReceiptRecord:
     updated_at: datetime
 
 
+class ReceiptReader(Protocol):
+    def list_receipts(
+        self, *, grant_id: UUID, run_id: UUID, response_id: UUID
+    ) -> tuple[ToolReceiptRecord, ...]: ...
+
+
 class ReceiptStore(Protocol):
     def find_receipt(
         self,
@@ -408,6 +414,27 @@ class PostgresAuthorityStore:
             with Session(self.engine) as session:
                 row = session.scalar(statement)
                 return None if row is None else _tool_receipt(row)
+        except SQLAlchemyError:
+            raise ProductStoreError("product_store_unavailable") from None
+
+    def list_receipts(
+        self, *, grant_id: UUID, run_id: UUID, response_id: UUID
+    ) -> tuple[ToolReceiptRecord, ...]:
+        statement = (
+            select(ToolReceiptRow)
+            .where(
+                ToolReceiptRow.grant_id == grant_id,
+                ToolReceiptRow.run_id == run_id,
+                ToolReceiptRow.response_id == response_id,
+            )
+            .order_by(ToolReceiptRow.created_at, ToolReceiptRow.receipt_id)
+        )
+        try:
+            with Session(self.engine) as session:
+                return tuple(
+                    _tool_receipt(row)
+                    for row in session.execute(statement).scalars().all()
+                )
         except SQLAlchemyError:
             raise ProductStoreError("product_store_unavailable") from None
 

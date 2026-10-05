@@ -1,4 +1,5 @@
 import type {
+  ChatProfileRef,
   MainAgentCapabilities,
   MainAgentErrorEnvelope,
   MainAgentHealth,
@@ -6,6 +7,7 @@ import type {
   MainAgentThreadList,
   MainAgentTurn,
 } from "./types";
+import { localSessionRequest } from "@/shared/api/localSession";
 
 const API_BASE = "/main-agent/v1";
 
@@ -36,13 +38,11 @@ export function mainAgentThreadQueryKey(workspaceId: string, threadId: string) {
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (!headers.has("Accept")) headers.set("Accept", "application/json");
+  if (init?.body !== undefined && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   const response = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers: {
-      Accept: "application/json",
-      ...(init?.body === undefined ? {} : { "Content-Type": "application/json" }),
-      ...init?.headers,
-    },
+    ...localSessionRequest({ ...init, headers }),
   });
   if (!response.ok) {
     throw await parseApiProblem(response);
@@ -102,7 +102,7 @@ export function listThreads(
 }
 
 export function createThread(
-  payload: Pick<MainAgentThread, "contextRefs"> & { title?: string | null },
+  payload: Pick<MainAgentThread, "contextRefs"> & { title?: string | null; profileRef?: ChatProfileRef },
 ): Promise<MainAgentThread> {
   return requestJson<MainAgentThread>("/threads", {
     method: "POST",

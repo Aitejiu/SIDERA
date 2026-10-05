@@ -133,7 +133,7 @@ export function subscribeTurnEvents(
       }
       closeSource();
       const status = (error as Event & { status?: number }).status;
-      if (status === 409) {
+      if (status === 409 || status === 401 || status === 403) {
         options.onPollingRequired?.(status);
         return;
       }

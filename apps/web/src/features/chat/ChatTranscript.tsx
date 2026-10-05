@@ -33,7 +33,7 @@ export function ChatTranscript({
               <strong>{turnHasUserMessage(turn) ? "你" : "Main Agent"}</strong>
             </span>
             <span className={`chat-turn__status chat-turn__status--${turn.status}`}>
-              {turnStatusLabel(turn.status)}
+              {turn.operationState === "busy" ? "未受理" : turn.status === "queued" && turn.error !== null ? "结果待确认" : turnStatusLabel(turn.status)}
             </span>
           </div>
           <div className="chat-turn__items">
@@ -45,12 +45,15 @@ export function ChatTranscript({
           {turn.error ? (
             <div className="chat-turn__error" role="alert">
               <AlertTriangle size={14} aria-hidden="true" />
-              <span>这轮对话没有完成</span>
+              <span>{turn.operationState === "busy" ? "当前请求未受理，请稍后重试。" : turn.status === "queued" ? "原响应结果待确认。" : "这轮对话没有完成"}</span>
             </div>
           ) : null}
-          {TERMINAL_STATUSES.has(turn.status) && turn.status !== "completed" ? (
+          {TERMINAL_STATUSES.has(turn.status) && turn.status !== "completed"
+            && turn.operationState !== "claimed" && turn.operationState !== "prepared"
+            && turn.operationState !== "dispatching" && turn.operationState !== "unknown"
+            && (turn.operationState !== "busy" || turn.operationId !== undefined) ? (
             <button className="quiet-button chat-turn__retry" type="button" onClick={() => onRetry(turn.id)}>
-              <RotateCcw size={14} aria-hidden="true" />重试
+              <RotateCcw size={14} aria-hidden="true" />{turn.operationState === "busy" ? "稍后重试" : "重试"}
             </button>
           ) : null}
         </article>

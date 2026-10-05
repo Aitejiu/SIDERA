@@ -1622,7 +1622,9 @@ class RunExecution:
             with self._input_lock:
                 self._run_contexts.pop(run_id, None)
 
-    def _pending_stop_ids(self, snapshot: RunSnapshot) -> tuple[UUID, ...]:
+    def _pending_stop_ids(
+        self, snapshot: RunSnapshot, *, include_unknown: bool = False
+    ) -> tuple[UUID, ...]:
         latest = {
             event.operation_id: event
             for event in self._store.get_lifecycle_events(
@@ -1630,17 +1632,27 @@ class RunExecution:
             )
             if event.kind.startswith("stop.")
         }
+        kinds = {"stop.accepted"}
+        if include_unknown:
+            kinds.add("stop.unknown")
         return tuple(
             operation_id
             for operation_id, event in latest.items()
-            if operation_id is not None and event.kind == "stop.accepted"
+            if operation_id is not None and event.kind in kinds
         )
 
     def _complete_pending_stops(
-        self, snapshot: RunSnapshot, *, stopped: bool, reason_code: str | None
+        self,
+        snapshot: RunSnapshot,
+        *,
+        stopped: bool,
+        reason_code: str | None,
+        include_unknown: bool = False,
     ) -> bool:
         with self._input_lock:
-            operation_ids = self._pending_stop_ids(snapshot)
+            operation_ids = self._pending_stop_ids(
+                snapshot, include_unknown=include_unknown
+            )
             for operation_id in operation_ids:
                 self._store.complete_stop(
                     snapshot.run_id,
@@ -1773,6 +1785,8 @@ class RunExecution:
         terminal_state: RunState | None,
         terminal_reason_code: str | None,
     ) -> None:
+        if handle.run_id != snapshot.run_id:
+            return
         if snapshot.state is RunState.RUNNING:
             snapshot = snapshot.model_copy(
                 update={
@@ -1794,6 +1808,12 @@ class RunExecution:
         except Exception:  # noqa: BLE001 - failed inspection cannot prove process exit
             return
         if inspection.process_state is NativeProcessState.GONE:
+            if self._complete_pending_stops(
+                snapshot, stopped=True, reason_code=None, include_unknown=True
+            ):
+                with self._input_lock:
+                    self._run_contexts.pop(snapshot.run_id, None)
+                return
             if snapshot.state is RunState.CLOSING and terminal_state is not None:
                 reconciled = snapshot.model_copy(
                     update={

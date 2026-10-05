@@ -88,17 +88,41 @@ advance native sequence or accept a result. Stored tokens are digests only.
 Original retained bearers can still be verified against durable metadata while
 their current Run authority is valid. Raw bearer reprojection after cache loss
 returns `tool_connection_unavailable`; it never rotates a live bearer or starts
-another Run. Bootstrap UI, persistent ordinary chat and directory/default route
-work remain N20, N19 and N20/N21 respectively.
+another Run. Bootstrap UI and directory/default route work remain N20/N21.
+
+## Persistent Native Chat
+
+`/main-agent/v1` serves the existing thread/turn/events wire from product-owned
+conversations and the public agents Run engine. Empty threads pin an explicit
+authorized Profile revision or the configured Main default without starting a
+Run. First input starts one conversation Run; later replies use that same open
+Run and original grant. Opaque operation IDs retain their exact intent through
+duplicates, lost replies and explicit non-admitted BUSY retries. UNKNOWN is
+query-only and keeps admission blocked until actual terminal evidence exists.
+
+History requires the current local human session and live original structural
+authority. Revoked or unavailable original authority cannot expose cached native
+messages or trusted task receipts. Cards are verified only from saved original
+Run/response receipts and actual CP outcomes, never native tool preview text.
+Response interruption remains disabled because the current public port exposes
+no authoritative live cancellation negotiation. Conversation Stop/query at
+shutdown is separate and must confirm original cleanup before owner disposal.
+
+The Web's default/`legacy` Vite proxy selection is unchanged. Native selection
+requires `SIDERA_WEB_BACKEND=native` and an explicit loopback root
+`SIDERA_WEB_PRODUCT_URL=http://127.0.0.1:<port>`. Configure the product Web origin
+to the actual browser origin. Native `/api`, `/healthz`, `/main-agent`, `/product`
+and `/agents` share that product target; Knowledge remains independently routed.
+Cookie-authenticated JSON writes share the exact CSRF helper. No browser bearer
+or Provider settings are added.
 
 ## Ownership And HTTP
 
 Construction is inert. Startup checks schemas, starts the sole agents owner,
 verifies its actual owner lock and starts CP with a registered internal system
 identity. That identity cannot authenticate HTTP, configure a repository or
-perform human confirmation. Anonymous protected routes remain denied. Main
-conversation (N19) and catalog/configuration route implementations are not
-provided by this delivery.
+perform human confirmation. Anonymous protected routes remain denied.
+Catalog/configuration route delivery remains separate from persistent chat.
 
 `/healthz` is inert liveness; `/readyz` checks component readiness;
 `/product/v1/status` reports safe availability. CP is mounted last at `/`, so
@@ -106,8 +130,9 @@ existing `/api/v1` contracts retain their paths. In-process public CP clients
 use ASGI transport, not blocking same-port HTTP. Knowledge retains its independent
 public service/API; unavailable required sources fail the corresponding work.
 
-Shutdown fences product writes and drains CP while agents remains alive. Only
-confirmed CP close and agents shutdown permit disposal of the owned stores.
+Shutdown fences product writes and drains CP while agents remains alive. Then
+chat reconciles its own original conversation Stops before agents shutdown.
+Only confirmed component close permits disposal of the owned stores.
 Pending/UNKNOWN cleanup is reported incomplete and may be retried through the
 same owners; no foreign Run enumeration or process kill is performed.
 
@@ -120,9 +145,9 @@ uv run ruff format --check .
 uv run pyright --pythonpath .venv/bin/python
 ```
 
-Strict typing of the current 19 product source files reports 55 public-foundation
-boundary diagnostics: 54 missing type-marker sites and the agents factory's
-unannotated clock parameter, with no product-owned diagnostics. The accepted N17
+The accepted N18 nineteen-source baseline reports 55 public-foundation boundary
+diagnostics: 54 missing type-marker sites and the agents factory's unannotated
+clock parameter, with no product-owned diagnostics. The accepted N17
 nine-file baseline remains 31 (30 missing markers plus that clock parameter);
 new imports expose additional marker sites. This is not a globally clean type
 result. Installed typing metadata remains an N22/N24 follow-up; this delivery

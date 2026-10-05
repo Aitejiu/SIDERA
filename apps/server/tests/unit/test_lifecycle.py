@@ -81,6 +81,13 @@ def controlled_owner_runtime(settings_values, no_database_connections, monkeypat
     monkeypatch.setattr(runtime.agents, "readiness", lambda **kwargs: True)
     monkeypatch.setattr(runtime.control_plane, "readiness", lambda: True)
     monkeypatch.setattr(lifecycle, "credential_schema_ready", lambda engine: True)
+
+    def empty_conversations(*, workspace_id, principal_id):
+        assert workspace_id == runtime.settings.workspace_id
+        assert principal_id == runtime.settings.local_principal_id
+        return ()
+
+    monkeypatch.setattr(runtime.chat.store, "list_conversations", empty_conversations)
     snapshot = RuntimeSnapshot(
         ref=RuntimeRef(workspace_id=runtime.settings.workspace_id, runtime_id=uuid4()),
         harness_id="controlled-owner-start",
@@ -119,6 +126,7 @@ def controlled_owner_runtime(settings_values, no_database_connections, monkeypat
         monkeypatch.setattr(owner, method, close)
 
     record_close(runtime.control_plane, "close", "cp.close")
+    record_close(runtime.chat, "close", "chat.close")
     record_close(runtime.agents, "close", "agents.close")
     record_close(runtime.agent_store, "close", "agents.store.close")
     record_close(runtime.credential_engine, "dispose", "credentials.dispose")
@@ -127,6 +135,55 @@ def controlled_owner_runtime(settings_values, no_database_connections, monkeypat
         yield runtime, calls
     finally:
         assert runtime.close(grace_seconds=0) is True
+
+
+def test_cold_main_chat_status_is_unavailable_and_repeated_reads_are_inert(
+    settings_values, no_database_connections
+):
+    from sidera_product.composition import build_product_runtime
+    from sidera_product.config import ProductSettings
+
+    runtime = build_product_runtime(ProductSettings.model_validate(settings_values))
+    try:
+        first, second = runtime.status(), runtime.status()
+        assert first == second
+        assert first["execution"]["ready"] is False
+        assert first["main_agent"] == {
+            "available": False,
+            "code": "product_unavailable",
+        }
+    finally:
+        assert runtime.close(grace_seconds=0) is True
+
+
+def test_main_chat_status_matches_actual_ready_and_cleanup_fence_without_owner_calls(
+    controlled_owner_runtime, monkeypatch
+):
+    runtime, calls = controlled_owner_runtime
+    runtime.start()
+    before = list(calls)
+    for _ in range(2):
+        status = runtime.status()
+        assert status["execution"]["ready"] is True
+        assert status["main_agent"] == {"available": True, "code": None}
+    assert calls == before
+    original_close = runtime.control_plane.close
+    monkeypatch.setattr(runtime.control_plane, "close", lambda **kwargs: False)
+    try:
+        assert runtime.close(grace_seconds=0) is False
+        before = list(calls)
+        for _ in range(2):
+            status = runtime.status()
+            assert status["lifecycle"] == "cleanup_incomplete"
+            assert status["execution"]["ready"] is False
+            assert status["main_agent"] == {
+                "available": False,
+                "code": "product_unavailable",
+            }
+        assert calls == before
+    finally:
+        monkeypatch.setattr(runtime.control_plane, "close", original_close)
+    assert runtime.close(grace_seconds=0) is True
 
 
 @pytest.mark.parametrize("owner_name", ["agents", "control_plane"])
@@ -175,6 +232,7 @@ def test_close_during_owner_start_is_a_monotonic_admission_fence(
         starts.append("cp.start")
     assert calls == starts + [
         "cp.close",
+        "chat.close",
         "agents.close",
         "agents.store.close",
         "credentials.dispose",
@@ -195,6 +253,7 @@ def test_close_before_start_never_starts_an_owner(controlled_owner_runtime):
     assert denied.value.code == "product_unavailable"
     assert calls == [
         "cp.close",
+        "chat.close",
         "agents.close",
         "agents.store.close",
         "credentials.dispose",
@@ -232,6 +291,7 @@ def test_ready_close_retains_original_owners_until_confirmed(
         "cp.start",
         "cp.pending",
         "cp.close",
+        "chat.close",
         "agents.close",
         "agents.store.close",
         "credentials.dispose",

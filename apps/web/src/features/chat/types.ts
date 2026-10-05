@@ -14,6 +14,12 @@ export type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue };
 
+export interface ChatProfileRef {
+  workspace_id: string;
+  profile_id: string;
+  revision: number;
+}
+
 export interface MainAgentThread {
   id: string;
   title: string;
@@ -21,6 +27,8 @@ export interface MainAgentThread {
   updatedAt: string;
   contextRefs: string[];
   turns: MainAgentTurn[];
+  profileRef?: ChatProfileRef;
+  runId?: string | null;
 }
 
 export interface MainAgentThreadList {
@@ -47,21 +55,28 @@ export interface MainAgentTurn {
   error: Record<string, JsonValue> | null;
   streamAvailable: boolean;
   recoveryMode: "poll" | null;
+  profileRef?: ChatProfileRef;
+  runId?: string | null;
+  responseId?: string | null;
+  operationId?: string;
+  operationState?: "claimed" | "prepared" | "dispatching" | "accepted" | "delivered" | "busy" | "rejected" | "unknown";
+  interruptAvailable?: boolean;
+  interruptReasonCode?: string | null;
 }
 
 export interface MainAgentCapabilities {
-  thread_list: true;
-  thread_create: true;
-  thread_read: true;
-  thread_rename: false;
-  turn_stream: true;
-  turn_interrupt: true;
-  stream_resume_after_gateway_restart: false;
+  thread_list: boolean;
+  thread_create: boolean;
+  thread_read: boolean;
+  thread_rename: boolean;
+  turn_stream: boolean;
+  turn_interrupt: boolean;
+  stream_resume_after_gateway_restart: boolean;
 }
 
 export interface MainAgentHealth {
   status: "ok";
-  service: "sidera-main-agent-gateway";
+  service: "sidera-main-agent-gateway" | "sidera-product";
   provider: "available" | "unavailable";
 }
 
