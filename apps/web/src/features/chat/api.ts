@@ -6,6 +6,7 @@ import type {
   MainAgentThread,
   MainAgentThreadList,
   MainAgentTurn,
+  ThreadStop,
 } from "./types";
 import { localSessionRequest } from "@/shared/api/localSession";
 
@@ -115,6 +116,10 @@ export function getThread(threadId: string, signal?: AbortSignal): Promise<MainA
     `/threads/${encodeURIComponent(threadId)}`,
     requestOptions(signal),
   );
+}
+
+export function stopThread(threadId: string): Promise<ThreadStop> {
+  return requestJson<ThreadStop>(`/threads/${encodeURIComponent(threadId)}/stop`, { method: "POST" });
 }
 
 export function startTurn(

@@ -18,6 +18,9 @@ from sidera_control_plane.api.agent_context_queries import (
 from sidera_control_plane.api.artifact_content import (
     router as artifact_content_router,
 )
+from sidera_control_plane.api.assignment_queries import (
+    router as assignment_queries_router,
+)
 from sidera_control_plane.api.collaboration_queries import (
     router as collaboration_queries_router,
 )
@@ -284,6 +287,7 @@ def _build_app(
     if native:
         install_native_http_error_handler(app)
     app.include_router(agent_context_queries_router)
+    app.include_router(assignment_queries_router)
     app.include_router(task_commands_router)
     app.include_router(command_queries_router)
     app.include_router(collaboration_queries_router)

@@ -142,6 +142,13 @@ class ThreadListView(ChatModel):
     next_cursor: str | None = Field(default=None, alias="nextCursor")
 
 
+class ThreadStopView(ChatModel):
+    conversation_id: UUID
+    cleanup_confirmed: bool
+    stop_state: StopState | None
+    reason_code: str | None
+
+
 class ChatCapabilities(ChatModel):
     thread_list: bool = True
     thread_create: bool = True

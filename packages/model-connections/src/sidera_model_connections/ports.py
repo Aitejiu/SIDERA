@@ -41,6 +41,10 @@ class ConnectionCatalog(Protocol):
 
     def get_credential(self, ref: CredentialRef) -> CredentialMetadata: ...
 
+    def list_credentials(
+        self, workspace_id: UUID
+    ) -> tuple[CredentialMetadata, ...]: ...
+
     def credential_read_lease(
         self, ref: CredentialRef
     ) -> AbstractContextManager[CredentialMetadata]: ...

@@ -9,6 +9,7 @@ from fastapi import Request
 from pydantic import SecretStr, TypeAdapter, ValidationError
 from sidera_agents import bootstrap
 from sidera_agents.contracts import (
+    CatalogStatusTarget,
     CredentialRef,
     ExecutionWorkspace,
     ProfileRef,
@@ -34,6 +35,8 @@ from sidera_control_plane.composition import native_runtime
 from sidera_control_plane.composition.native_runtime import (
     ControlPlaneIdentity,
     ControlPlaneRequestAuthorizer,
+    ProfileWorkRunTarget,
+    ProfileWorkTarget,
     WorkerProgressTarget,
 )
 from sidera_control_plane.domain.context_packages import (
@@ -55,10 +58,13 @@ from sidera_model_connections.postgres import PostgresConnectionCatalog
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from .agents.configuration import ConfigurationService
+from .agents.configuration_store import PostgresConfigurationStore
 from .auth.grants import ProductGrants, ToolConnectionResolver, VerifiedToolGrant
 from .auth.local_session import SESSION_COOKIE, LocalSessions
 from .chat.service import ChatService
 from .config import ProductSettings
+from .defaults import DefaultsService
 from .lifecycle import ProductRuntime
 from .postgres import PostgresProductStore
 from .postgres.authority_store import PostgresAuthorityStore, ReceiptStore
@@ -82,6 +88,7 @@ class ProductRequestAuthorizer:
         self.local_sessions: LocalSessions | None = None
         self.grants: ProductGrants | None = None
         self.tool_receipts: ReceiptStore | None = None
+        self.registered_harness_ids: frozenset[str] = frozenset()
         self.background_identity = ControlPlaneIdentity(
             principal_id=settings.local_principal_id,
             grant_id=uuid5(
@@ -155,6 +162,8 @@ class ProductRequestAuthorizer:
                 if identity is not None:
                     self._require_local_user(identity, action, target)
                     return
+            if isinstance(target, (ProfileWorkTarget, ProfileWorkRunTarget)):
+                deny()
             if (
                 self.grants is not None
                 and self.grants.store.find_grant(grant_id=grant_id) is not None
@@ -435,6 +444,51 @@ class ProductRequestAuthorizer:
             or identity.principal_id != self.settings.local_principal_id
         ):
             deny()
+        if type(target) is ProfileWorkTarget:
+            if (
+                action == "assignment.read"
+                and type(target.workspace_id) is UUID
+                and target.workspace_id == workspace
+                and type(target.profile_id) is UUID
+                and target.principal_id == identity.principal_id
+            ):
+                return
+            deny()
+        if type(target) is ProfileWorkRunTarget:
+            if (
+                action == "assignment.read"
+                and type(target.workspace_id) is UUID
+                and target.workspace_id == workspace
+                and type(target.work_id) is UUID
+                and target.principal_id == identity.principal_id
+                and target.kind in {"assignment", "execution", "planning"}
+                and (
+                    target.target_type in {"subtask", "worker_item"}
+                    if target.kind == "assignment"
+                    else target.target_type is None
+                )
+            ):
+                return
+            deny()
+        if isinstance(target, CatalogStatusTarget):
+            if (
+                type(target.workspace_id) is UUID
+                and target.workspace_id == workspace
+                and type(target.entity_id) is UUID
+                and (target.entity, action)
+                in {
+                    ("profile", "profile.enable"),
+                    ("profile", "profile.disable"),
+                    ("resource", "resource.enable"),
+                    ("resource", "resource.disable"),
+                }
+            ):
+                return
+            deny()
+        if action == "runtime.describe":
+            if type(target) is str and target in self.registered_harness_ids:
+                return
+            deny()
         if isinstance(target, ControlPlaneRequestTarget):
             if (
                 target.workspace_id != workspace
@@ -523,7 +577,13 @@ class ProductRequestAuthorizer:
             and target.workspace_id == workspace
             and target.principal_id == identity.principal_id
             and action
-            in {"assignment.write", "profile.read", "runtime.read", "resource.read"}
+            in {
+                "assignment.read",
+                "assignment.write",
+                "profile.read",
+                "runtime.read",
+                "resource.read",
+            }
             and target.target_type in {"subtask", "worker_item", "execution"}
             and type(target.target_id) is UUID
         ):
@@ -540,6 +600,7 @@ class ProductRequestAuthorizer:
                 "runtime.list",
                 "runtime.register",
                 "runtime.discover",
+                "runtime.descriptor.list",
             }
         ):
             return
@@ -637,10 +698,19 @@ class AuthorityRouter:
         self.control_plane: ExecutionAuthorizer | None = None
 
     def require(self, grant_id: UUID, action: str, target: object) -> None:
-        if not isinstance(
+        known_descriptor = (
+            action == "runtime.describe"
+            and type(target) is str
+            and target in self.host.registered_harness_ids
+        )
+        if not known_descriptor and not isinstance(
             target,
             (
                 UUID,
+                CatalogStatusTarget,
+                AssignmentTarget,
+                ProfileWorkTarget,
+                ProfileWorkRunTarget,
                 ProfileRef,
                 ResourceRef,
                 RuntimeRef,
@@ -660,6 +730,14 @@ class AuthorityRouter:
         ):
             self.host.require(grant_id, action, target)
             return
+        if isinstance(
+            target, (CatalogStatusTarget, ProfileWorkTarget, ProfileWorkRunTarget)
+        ) or action in {
+            "assignment.read",
+            "runtime.describe",
+            "runtime.descriptor.list",
+        }:
+            deny()
         if self.product is not None:
             try:
                 self.product.require(grant_id, action, target)
@@ -801,6 +879,7 @@ def build_product_runtime(
         clock=lambda: datetime.now(UTC),
         tool_connections=tool_reader,
     )
+    host.registered_harness_ids = frozenset(agents.runtimes.registered_harness_ids())
     try:
         cp = native_runtime.create_control_plane_runtime(
             settings.control_plane_settings(),
@@ -849,10 +928,23 @@ def build_product_runtime(
         local_sessions=local_sessions,
         grants=grants,
         chat=chat,
+        configuration=ConfigurationService(
+            settings=settings,
+            store=PostgresConfigurationStore(store.engine),
+            sessions=local_sessions,
+            catalog=agents.catalog,
+        ),
+        defaults=DefaultsService(
+            settings=settings,
+            store=store,
+            sessions=local_sessions,
+            catalog=agents.catalog,
+        ),
         task_tool_connections=tool_reader,
         agent_store=agent_store,
         credential_engine=credential_engine,
         credential_catalog=catalog,
+        secret_store=secret_store,
         credential_reader=credential_reader,
         secret_reader=secrets,
         agents=agents,

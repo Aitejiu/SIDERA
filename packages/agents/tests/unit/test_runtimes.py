@@ -4,11 +4,74 @@ import time
 from uuid import uuid4
 
 import pytest
-
 import sidera_agents.runtimes as runtime_module
 from sidera_agents.contracts import ProfileDraft, RuntimeCandidate
 from sidera_agents.errors import AgentError
 from sidera_agents.harnesses import opencode_descriptor
+
+
+def test_registered_harness_ids_are_inert_sorted_public_metadata(
+    runtime_lab, monkeypatch
+):
+    def deny(*args, **kwargs):
+        pytest.fail("Descriptor metadata performed external I/O.")
+
+    monkeypatch.setattr(runtime_lab.authorizer, "require", deny)
+    monkeypatch.setattr(runtime_lab.store, "list_runtime_entries", deny)
+    monkeypatch.setattr(runtime_module.shutil, "which", deny)
+    monkeypatch.setattr(opencode_descriptor, "read_version", deny)
+    assert runtime_lab.runtimes.registered_harness_ids() == ("opencode",)
+
+
+def test_list_descriptors_authorizes_exact_workspace_before_registry(
+    runtime_lab, monkeypatch
+):
+    order = []
+    original_require = runtime_lab.authorizer.require
+    original_all = runtime_lab.registry.all
+
+    def require(grant_id, action, target):
+        order.append("authority")
+        original_require(grant_id, action, target)
+
+    def entries():
+        order.append("registry")
+        return original_all()
+
+    def deny(*args, **kwargs):
+        pytest.fail("Descriptor metadata probed a runtime or store.")
+
+    monkeypatch.setattr(runtime_lab.authorizer, "require", require)
+    monkeypatch.setattr(runtime_lab.registry, "all", entries)
+    monkeypatch.setattr(runtime_lab.store, "list_runtime_entries", deny)
+    monkeypatch.setattr(runtime_module.shutil, "which", deny)
+    monkeypatch.setattr(opencode_descriptor, "read_version", deny)
+    descriptors = runtime_lab.runtimes.list_descriptors(
+        runtime_lab.workspace_id,
+        grant_id=runtime_lab.grant_id,
+    )
+    assert tuple(item.harness_id for item in descriptors) == ("opencode",)
+    assert order == ["authority", "registry"]
+    assert runtime_lab.authorizer.calls[-1] == (
+        runtime_lab.grant_id,
+        "runtime.descriptor.list",
+        runtime_lab.workspace_id,
+    )
+
+
+@pytest.mark.parametrize("foreign", ["workspace", "grant"])
+def test_list_descriptors_denies_before_registry(runtime_lab, monkeypatch, foreign):
+    calls = []
+    monkeypatch.setattr(
+        runtime_lab.registry, "all", lambda: calls.append("registry") or ()
+    )
+    with pytest.raises(AgentError) as error:
+        runtime_lab.runtimes.list_descriptors(
+            uuid4() if foreign == "workspace" else runtime_lab.workspace_id,
+            grant_id=uuid4() if foreign == "grant" else runtime_lab.grant_id,
+        )
+    assert error.value.code == "permission_denied"
+    assert calls == []
 
 
 def _executable_script(tmp_path, body):

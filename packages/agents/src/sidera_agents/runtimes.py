@@ -112,6 +112,15 @@ class RuntimeCatalog:
         self._registry = registry or default_harness_registry()
         self._clock = clock or (lambda: datetime.now(UTC))
 
+    def registered_harness_ids(self) -> tuple[str, ...]:
+        return tuple(harness.harness_id for harness in self._registry.all())
+
+    def list_descriptors(
+        self, workspace_id: UUID, *, grant_id: UUID
+    ) -> tuple[RuntimeDescriptor, ...]:
+        self._authorizer.require(grant_id, "runtime.descriptor.list", workspace_id)
+        return tuple(harness.describe() for harness in self._registry.all())
+
     def discover(
         self, workspace_id: UUID, *, grant_id: UUID
     ) -> tuple[RuntimeCandidate, ...]:

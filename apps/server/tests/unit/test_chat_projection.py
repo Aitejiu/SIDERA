@@ -423,3 +423,593 @@ def test_only_exact_saved_product_receipt_can_make_verified_business_card(
     else:
         assert data["verified"] is False and data["outcome"] == "unknown"
         assert data["rootTaskId"] is data["planningRequestId"] is data["webUrl"] is None
+
+
+def _run_level_stop_event(event, sequence, kind, operation_id, occurred_at):
+    return event(sequence, kind, operation=operation_id).model_copy(
+        update={
+            "operation_id": operation_id,
+            "response_id": None,
+            "occurred_at": occurred_at,
+        }
+    )
+
+
+def test_confirmed_stop_projects_cancelled_with_original_response_and_stop_timestamp(
+    settings_values, tmp_path
+):
+    projection, run, turn, response, event = projection_case(settings_values, tmp_path)
+    turn = replace(turn, kind="input")
+    stop_operation = uuid4()
+    started_at = datetime(2026, 10, 6, 1, tzinfo=UTC)
+    stop_at = datetime(2026, 10, 6, 2, tzinfo=UTC)
+    events = (
+        event(1, "input.accepted"),
+        event(2, "response.started").model_copy(update={"occurred_at": started_at}),
+        event(
+            3,
+            "message",
+            {"update_type": "agent_message_chunk", "text": "partial original"},
+        ),
+        event(4, "usage", {"usage": {"input_tokens": 7, "output_tokens": 3}}),
+        event(
+            5,
+            "response.completed",
+            operation=uuid4(),
+            response_id=uuid4(),
+        ),
+        _run_level_stop_event(
+            event,
+            6,
+            "stop.accepted",
+            stop_operation,
+            datetime(2026, 10, 6, 1, 30, tzinfo=UTC),
+        ),
+        _run_level_stop_event(event, 7, "stop.stopped", stop_operation, stop_at),
+    )
+    run = run.model_copy(
+        update={
+            "state": RunState.STOPPED,
+            "input_open": False,
+            "active_response_id": None,
+            "last_event_sequence": 7,
+        }
+    )
+
+    view = projection.project_turn(turn, run, events)
+
+    assert view.status == "cancelled"
+    assert view.id == str(turn.id) and view.thread_id == str(turn.conversation_id)
+    assert view.run_id == run.run_id and view.response_id == response
+    assert view.operation_id == turn.operation_id and view.operation_state == "accepted"
+    assert view.started_at == started_at and view.completed_at == stop_at
+    assert view.final_response == "partial original"
+    assert view.items[0].data == {"text": turn.input_text}
+    assert view.items[1].id == f"{response}:assistant"
+    assert view.items[1].data == {"text": "partial original"}
+    assert view.usage == {"input_tokens": 7, "output_tokens": 3}
+    assert view.stream_available is False and view.recovery_mode is None
+    assert view.interrupt_available is False
+    assert projection.project_turn(turn, run, events) == view
+
+
+@pytest.mark.parametrize(
+    ("variant", "expected_status"),
+    [
+        ("stop_accepted_only", "in_progress"),
+        ("stop_unknown", "in_progress"),
+        ("stopped_snapshot_only", "in_progress"),
+        ("run_unknown", "queued"),
+        ("run_closing", "in_progress"),
+        ("run_running", "in_progress"),
+        ("confirmation_before_binding", "in_progress"),
+        ("input_unknown", "queued"),
+        ("mismatched_stop_operation", "in_progress"),
+    ],
+)
+def test_confirmed_stop_requires_matching_post_binding_confirmation(
+    settings_values, tmp_path, variant, expected_status
+):
+    projection, run, turn, response, event = projection_case(settings_values, tmp_path)
+    turn = replace(turn, kind="input")
+    stop_operation = uuid4()
+    other_stop_operation = uuid4()
+    stopped_at = datetime(2026, 10, 6, 2, tzinfo=UTC)
+    bound = (event(1, "input.accepted"), event(2, "response.started"))
+    stop_accepted = _run_level_stop_event(
+        event,
+        3,
+        "stop.accepted",
+        stop_operation,
+        datetime(2026, 10, 6, 1, 30, tzinfo=UTC),
+    )
+    stop_stopped = _run_level_stop_event(
+        event, 4, "stop.stopped", stop_operation, stopped_at
+    )
+    events = (*bound, stop_accepted, stop_stopped)
+    run_state = RunState.STOPPED
+
+    if variant == "stop_accepted_only":
+        events = (*bound, stop_accepted)
+    elif variant == "stop_unknown":
+        events = (
+            *bound,
+            _run_level_stop_event(
+                event,
+                3,
+                "stop.unknown",
+                stop_operation,
+                stopped_at,
+            ),
+        )
+    elif variant == "stopped_snapshot_only":
+        events = bound
+    elif variant == "run_unknown":
+        run_state = RunState.UNKNOWN
+    elif variant == "run_closing":
+        run_state = RunState.CLOSING
+    elif variant == "run_running":
+        run_state = RunState.RUNNING
+    elif variant == "confirmation_before_binding":
+        events = (
+            _run_level_stop_event(
+                event,
+                1,
+                "stop.accepted",
+                stop_operation,
+                datetime(2026, 10, 6, 1, tzinfo=UTC),
+            ),
+            _run_level_stop_event(
+                event,
+                2,
+                "stop.stopped",
+                stop_operation,
+                stopped_at,
+            ),
+            event(3, "input.accepted"),
+            event(4, "response.started"),
+        )
+    elif variant == "input_unknown":
+        events = (
+            *bound,
+            event(3, "input.unknown", {"reason_code": "input_outcome_unknown"}),
+            _run_level_stop_event(
+                event,
+                4,
+                "stop.accepted",
+                stop_operation,
+                datetime(2026, 10, 6, 1, 30, tzinfo=UTC),
+            ),
+            _run_level_stop_event(event, 5, "stop.stopped", stop_operation, stopped_at),
+        )
+    elif variant == "mismatched_stop_operation":
+        events = (
+            *bound,
+            stop_accepted,
+            _run_level_stop_event(
+                event, 4, "stop.stopped", other_stop_operation, stopped_at
+            ),
+        )
+
+    run = run.model_copy(
+        update={
+            "state": run_state,
+            "input_open": run_state is RunState.RUNNING,
+            "active_response_id": response if run_state is RunState.RUNNING else None,
+            "last_event_sequence": events[-1].sequence,
+        }
+    )
+
+    view = projection.project_turn(turn, run, events)
+
+    assert view.status == expected_status
+    assert view.completed_at is None
+    assert view.response_id == response
+
+
+@pytest.mark.parametrize("request_state", ["busy", "rejected"])
+def test_confirmed_stop_does_not_admit_non_admitted_turn(
+    settings_values, tmp_path, request_state
+):
+    projection, run, turn, response, event = projection_case(settings_values, tmp_path)
+    turn = replace(
+        turn, kind="input", request_state=request_state, reason_code="refused"
+    )
+    stop_operation = uuid4()
+    events = (
+        _run_level_stop_event(
+            event,
+            1,
+            "stop.accepted",
+            stop_operation,
+            datetime(2026, 10, 6, 1, tzinfo=UTC),
+        ),
+        _run_level_stop_event(
+            event,
+            2,
+            "stop.stopped",
+            stop_operation,
+            datetime(2026, 10, 6, 2, tzinfo=UTC),
+        ),
+    )
+    run = run.model_copy(
+        update={
+            "state": RunState.STOPPED,
+            "input_open": False,
+            "last_event_sequence": 2,
+        }
+    )
+
+    view = projection.project_turn(turn, run, events)
+
+    assert view.status == "failed" and view.response_id is None
+    assert view.completed_at is None and view.final_response is None
+
+
+def test_confirmed_stop_does_not_trust_only_a_saved_response_id(
+    settings_values, tmp_path
+):
+    projection, run, turn, response, event = projection_case(settings_values, tmp_path)
+    turn = replace(turn, kind="input", response_id=response)
+    stop_operation = uuid4()
+    events = (
+        _run_level_stop_event(
+            event,
+            1,
+            "stop.accepted",
+            stop_operation,
+            datetime(2026, 10, 6, 1, tzinfo=UTC),
+        ),
+        _run_level_stop_event(
+            event,
+            2,
+            "stop.stopped",
+            stop_operation,
+            datetime(2026, 10, 6, 2, tzinfo=UTC),
+        ),
+    )
+    run = run.model_copy(
+        update={
+            "state": RunState.STOPPED,
+            "input_open": False,
+            "last_event_sequence": 2,
+        }
+    )
+
+    view = projection.project_turn(turn, run, events)
+
+    assert view.status == "queued" and view.response_id == response
+    assert view.completed_at is None and view.recovery_mode == "poll"
+
+
+@pytest.mark.parametrize(
+    ("terminal_kind", "expected_status"),
+    [
+        ("response.completed", "completed"),
+        ("response.interrupted", "interrupted"),
+        ("response.failed", "failed"),
+    ],
+)
+def test_confirmed_stop_preserves_matching_response_terminal(
+    settings_values, tmp_path, terminal_kind, expected_status
+):
+    projection, run, turn, response, event = projection_case(settings_values, tmp_path)
+    turn = replace(turn, kind="input")
+    stop_operation = uuid4()
+    terminal_at = datetime(2026, 10, 6, 1, 20, tzinfo=UTC)
+    events = (
+        event(1, "input.accepted"),
+        event(2, "response.started"),
+        event(3, "message", {"update_type": "agent_message_chunk", "text": "prefix"}),
+        event(4, terminal_kind).model_copy(update={"occurred_at": terminal_at}),
+        _run_level_stop_event(
+            event,
+            5,
+            "stop.accepted",
+            stop_operation,
+            datetime(2026, 10, 6, 1, 30, tzinfo=UTC),
+        ),
+        _run_level_stop_event(
+            event,
+            6,
+            "stop.stopped",
+            stop_operation,
+            datetime(2026, 10, 6, 2, tzinfo=UTC),
+        ),
+    )
+    run = run.model_copy(
+        update={
+            "state": RunState.STOPPED,
+            "input_open": False,
+            "last_event_sequence": 6,
+        }
+    )
+
+    view = projection.project_turn(turn, run, events)
+
+    assert view.status == expected_status
+    assert view.completed_at == terminal_at
+    assert view.final_response == "prefix"
+    assert view.response_id == response
+
+
+def test_confirmed_stop_event_frames_use_stop_sequence_and_resume_cursor(
+    settings_values, tmp_path
+):
+    projection, run, turn, response, event = projection_case(settings_values, tmp_path)
+    turn = replace(turn, kind="input")
+    stop_operation = uuid4()
+    stop_at = datetime(2026, 10, 6, 2, tzinfo=UTC)
+    stop_sequence = 6
+    events = (
+        event(1, "input.accepted"),
+        event(2, "response.started"),
+        event(3, "message", {"update_type": "agent_message_chunk", "text": "partial"}),
+        event(4, "usage", {"usage": {"input_tokens": 7, "output_tokens": 3}}),
+        _run_level_stop_event(
+            event,
+            5,
+            "stop.accepted",
+            stop_operation,
+            datetime(2026, 10, 6, 1, 30, tzinfo=UTC),
+        ),
+        _run_level_stop_event(
+            event, stop_sequence, "stop.stopped", stop_operation, stop_at
+        ),
+    )
+    run = run.model_copy(
+        update={
+            "state": RunState.STOPPED,
+            "input_open": False,
+            "active_response_id": None,
+            "last_event_sequence": stop_sequence,
+        }
+    )
+
+    frames = projection.event_frames(turn, run, events, after=0)
+
+    assert [frame.sequence for frame in frames] == [2, 3, stop_sequence]
+    assert [frame.type for frame in frames[:-1]] == ["started", "item"]
+    terminal = frames[-1]
+    assert terminal.type == "cancelled" and terminal.sequence == stop_sequence
+    assert terminal.data["status"] == "cancelled"
+    assert terminal.data["completedAt"] == stop_at.isoformat()
+    assert terminal.data["finalResponse"] == "partial"
+    assert terminal.data["usage"] == {"input_tokens": 7, "output_tokens": 3}
+    assert [
+        frame.sequence
+        for frame in projection.event_frames(turn, run, events, after=stop_sequence - 1)
+    ] == [stop_sequence]
+    assert projection.event_frames(turn, run, events, after=stop_sequence) == ()
+
+
+@pytest.mark.parametrize("variant", ["uncertain_stop", "response_terminal"])
+def test_confirmed_stop_event_frames_never_duplicate_or_guess_terminal(
+    settings_values, tmp_path, variant
+):
+    projection, run, turn, response, event = projection_case(settings_values, tmp_path)
+    turn = replace(turn, kind="input")
+    stop_operation = uuid4()
+    events = [event(1, "input.accepted"), event(2, "response.started")]
+    if variant == "response_terminal":
+        events.append(event(3, "response.completed"))
+    stop_accepted_sequence = len(events) + 1
+    events.append(
+        _run_level_stop_event(
+            event,
+            stop_accepted_sequence,
+            "stop.accepted",
+            stop_operation,
+            datetime(2026, 10, 6, 1, 30, tzinfo=UTC),
+        )
+    )
+    if variant == "uncertain_stop":
+        pass
+    else:
+        events.append(
+            _run_level_stop_event(
+                event,
+                stop_accepted_sequence + 1,
+                "stop.stopped",
+                stop_operation,
+                datetime(2026, 10, 6, 2, tzinfo=UTC),
+            )
+        )
+    run = run.model_copy(
+        update={
+            "state": RunState.STOPPED,
+            "input_open": False,
+            "last_event_sequence": events[-1].sequence,
+        }
+    )
+
+    frames = projection.event_frames(turn, run, tuple(events), after=0)
+
+    assert all(frame.type != "cancelled" for frame in frames)
+    if variant == "response_terminal":
+        assert frames[-1].type == "completed"
+        assert frames[-1].data["status"] == "completed"
+    else:
+        assert [frame.type for frame in frames] == ["started"]
+
+
+def test_confirmed_stop_foreign_run_event_keeps_original_run_error(
+    settings_values, tmp_path
+):
+    projection, run, turn, response, event = projection_case(settings_values, tmp_path)
+    stop_operation = uuid4()
+    events = (
+        event(1, "response.started"),
+        _run_level_stop_event(
+            event,
+            2,
+            "stop.accepted",
+            stop_operation,
+            datetime(2026, 10, 6, 1, tzinfo=UTC),
+        ).model_copy(update={"run_id": uuid4()}),
+        _run_level_stop_event(
+            event,
+            3,
+            "stop.stopped",
+            stop_operation,
+            datetime(2026, 10, 6, 2, tzinfo=UTC),
+        ),
+    )
+    run = run.model_copy(update={"state": RunState.STOPPED, "last_event_sequence": 3})
+
+    with pytest.raises(projection.ProjectionError) as failure:
+        projection.project_turn(turn, run, events)
+
+    assert failure.value.code == "original_run_mismatch"
+
+
+def test_confirmed_stop_non_monotone_event_cursor_keeps_existing_error(
+    settings_values, tmp_path
+):
+    projection, run, turn, response, event = projection_case(settings_values, tmp_path)
+    stop_operation = uuid4()
+    events = (
+        event(1, "input.accepted"),
+        event(3, "response.started"),
+        _run_level_stop_event(
+            event,
+            2,
+            "stop.accepted",
+            stop_operation,
+            datetime(2026, 10, 6, 1, tzinfo=UTC),
+        ),
+        _run_level_stop_event(
+            event,
+            4,
+            "stop.stopped",
+            stop_operation,
+            datetime(2026, 10, 6, 2, tzinfo=UTC),
+        ),
+    )
+    run = run.model_copy(update={"state": RunState.STOPPED, "last_event_sequence": 4})
+
+    with pytest.raises(projection.ProjectionError) as failure:
+        projection.project_turn(turn, run, events)
+
+    assert failure.value.code == "native_cursor_invalid"
+
+
+def test_confirmed_stop_preserves_matching_input_failed(settings_values, tmp_path):
+    projection, run, turn, response, event = projection_case(settings_values, tmp_path)
+    turn = replace(turn, kind="input")
+    stop_operation = uuid4()
+    stopped_at = datetime(2026, 10, 6, 2, tzinfo=UTC)
+    events = (
+        event(1, "input.accepted"),
+        event(2, "response.started"),
+        event(3, "input.failed", {"reason_code": "input_declined"}),
+        _run_level_stop_event(
+            event,
+            4,
+            "stop.accepted",
+            stop_operation,
+            datetime(2026, 10, 6, 1, 30, tzinfo=UTC),
+        ),
+        _run_level_stop_event(event, 5, "stop.stopped", stop_operation, stopped_at),
+    )
+    run = run.model_copy(
+        update={
+            "state": RunState.STOPPED,
+            "input_open": False,
+            "last_event_sequence": 5,
+        }
+    )
+
+    view = projection.project_turn(turn, run, events)
+
+    assert view.status == "failed" and view.response_id == response
+    assert view.completed_at is None and view.final_response is None
+    assert view.error == {"code": "input_declined", "retryable": False}
+
+
+def test_confirmed_stop_cancels_queued_original_input_accepted_without_response_started(
+    settings_values, tmp_path
+):
+    projection, run, turn, response, event = projection_case(settings_values, tmp_path)
+    turn = replace(turn, kind="input")
+    stop_operation = uuid4()
+    stopped_at = datetime(2026, 10, 6, 2, tzinfo=UTC)
+    events = (
+        event(1, "input.accepted"),
+        _run_level_stop_event(
+            event,
+            2,
+            "stop.accepted",
+            stop_operation,
+            datetime(2026, 10, 6, 1, 30, tzinfo=UTC),
+        ),
+        _run_level_stop_event(event, 3, "stop.stopped", stop_operation, stopped_at),
+    )
+    run = run.model_copy(
+        update={
+            "state": RunState.STOPPED,
+            "input_open": False,
+            "active_response_id": None,
+            "last_event_sequence": 3,
+        }
+    )
+
+    view = projection.project_turn(turn, run, events)
+
+    assert view.status == "cancelled" and view.response_id == response
+    assert view.run_id == run.run_id and view.operation_id == turn.operation_id
+    assert view.started_at is None and view.completed_at == stopped_at
+    assert view.final_response is None and view.usage is None
+    assert view.stream_available is False and view.recovery_mode is None
+
+
+def test_confirmed_stop_uses_earliest_of_multiple_valid_stop_confirmations(
+    settings_values, tmp_path
+):
+    projection, run, turn, response, event = projection_case(settings_values, tmp_path)
+    turn = replace(turn, kind="input")
+    first_stop_operation = uuid4()
+    second_stop_operation = uuid4()
+    first_stop_at = datetime(2026, 10, 6, 2, tzinfo=UTC)
+    second_stop_at = datetime(2026, 10, 6, 3, tzinfo=UTC)
+    events = (
+        event(1, "input.accepted"),
+        event(2, "response.started"),
+        _run_level_stop_event(
+            event,
+            3,
+            "stop.accepted",
+            first_stop_operation,
+            datetime(2026, 10, 6, 1, 30, tzinfo=UTC),
+        ),
+        _run_level_stop_event(
+            event, 4, "stop.stopped", first_stop_operation, first_stop_at
+        ),
+        _run_level_stop_event(
+            event,
+            5,
+            "stop.accepted",
+            second_stop_operation,
+            datetime(2026, 10, 6, 2, 30, tzinfo=UTC),
+        ),
+        _run_level_stop_event(
+            event, 6, "stop.stopped", second_stop_operation, second_stop_at
+        ),
+    )
+    run = run.model_copy(
+        update={
+            "state": RunState.STOPPED,
+            "input_open": False,
+            "active_response_id": None,
+            "last_event_sequence": 6,
+        }
+    )
+
+    view = projection.project_turn(turn, run, events)
+    frames = projection.event_frames(turn, run, events, after=0)
+
+    assert view.status == "cancelled" and view.completed_at == first_stop_at
+    cancelled = tuple(frame for frame in frames if frame.type == "cancelled")
+    assert len(cancelled) == 1
+    assert cancelled[0].sequence == 4
+    assert cancelled[0].data["completedAt"] == first_stop_at.isoformat()

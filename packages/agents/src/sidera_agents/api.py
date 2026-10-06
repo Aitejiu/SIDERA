@@ -3,6 +3,7 @@ from uuid import UUID
 
 from .contracts import (
     CapabilityResourceDraft,
+    CatalogStatusTarget,
     ConfigValidation,
     EventPage,
     InputReceipt,
@@ -31,10 +32,23 @@ from .contracts import (
     StopReceipt,
 )
 
+__all__ = [
+    "AgentCatalog",
+    "AgentExecution",
+    "AgentObservations",
+    "AgentRuntimes",
+    "CatalogStatusTarget",
+]
+
 
 class AgentCatalog(Protocol):
     def create_profile(
-        self, workspace_id: UUID, draft: ProfileDraft, *, grant_id: UUID
+        self,
+        workspace_id: UUID,
+        draft: ProfileDraft,
+        *,
+        grant_id: UUID,
+        profile_id: UUID | None = None,
     ) -> ProfileRevision: ...
 
     def revise_profile(
@@ -52,7 +66,12 @@ class AgentCatalog(Protocol):
     ) -> tuple[ProfileRevision, ...]: ...
 
     def create_resource(
-        self, workspace_id: UUID, draft: CapabilityResourceDraft, *, grant_id: UUID
+        self,
+        workspace_id: UUID,
+        draft: CapabilityResourceDraft,
+        *,
+        grant_id: UUID,
+        resource_id: UUID | None = None,
     ) -> ResourceRevision: ...
 
     def revise_resource(
@@ -91,6 +110,12 @@ class AgentCatalog(Protocol):
 
 
 class AgentRuntimes(Protocol):
+    def registered_harness_ids(self) -> tuple[str, ...]: ...
+
+    def list_descriptors(
+        self, workspace_id: UUID, *, grant_id: UUID
+    ) -> tuple[RuntimeDescriptor, ...]: ...
+
     def discover(
         self, workspace_id: UUID, *, grant_id: UUID
     ) -> tuple[RuntimeCandidate, ...]: ...

@@ -11,9 +11,9 @@ describe("explicit native product proxy", () => {
     });
   });
 
-  it("routes all five native prefixes to one owner while preserving Host and Origin", () => {
+  it("routes all six native prefixes to one owner while preserving Host and Origin", () => {
     const targets = resolveBackendProxyTargets({ SIDERA_WEB_BACKEND: "native", SIDERA_WEB_PRODUCT_URL: "http://127.0.0.1:18080/" });
-    expect(Object.keys(targets)).toEqual(["/api", "/healthz", "/main-agent", "/product", "/agents"]);
+    expect(Object.keys(targets)).toEqual(["/api", "/healthz", "/main-agent", "/product", "/agents", "/model-config"]);
     for (const target of Object.values(targets)) {
       expect(target).toEqual({ target: "http://127.0.0.1:18080", changeOrigin: false });
     }

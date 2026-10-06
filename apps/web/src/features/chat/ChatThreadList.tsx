@@ -10,6 +10,7 @@ export function ChatThreadList({
   onSelect,
   onCreate,
   onRetry,
+  createDisabled = false,
 }: {
   threads: MainAgentThread[];
   activeThreadId: string | undefined;
@@ -18,6 +19,7 @@ export function ChatThreadList({
   onSelect: (threadId: string) => void;
   onCreate: () => void;
   onRetry: () => void;
+  createDisabled?: boolean;
 }) {
   return (
     <aside className="chat-thread-list" aria-label="对话列表">
@@ -30,6 +32,7 @@ export function ChatThreadList({
           className="icon-button"
           type="button"
           onClick={onCreate}
+          disabled={createDisabled}
           aria-label="新建对话"
           title="新建对话"
         >

@@ -44,6 +44,73 @@ AUTH_HEADERS = {
 }
 
 
+def test_credential_metadata_route_is_safe_scoped_and_secret_inert(
+    http_modules, monkeypatch
+):
+    rows = (
+        CredentialMetadata(
+            CredentialRef(WORKSPACE_ID, UUID(int=41)),
+            "Visible alias",
+            "env",
+            "active",
+            "DECLARED_TEST_VALUE",
+            None,
+            NOW,
+            1,
+        ),
+        CredentialMetadata(
+            CredentialRef(OTHER_WORKSPACE_ID, UUID(int=42)),
+            "Foreign alias",
+            "env",
+            "active",
+            "DECLARED_OTHER_VALUE",
+            None,
+            NOW,
+            1,
+        ),
+    )
+    with _make_harness(http_modules) as harness:
+        calls = []
+
+        def list_credentials(self, workspace_id):
+            calls.append(workspace_id)
+            return tuple(row for row in rows if row.ref.workspace_id == workspace_id)
+
+        monkeypatch.setattr(
+            RecordingCatalog, "list_credentials", list_credentials, raising=False
+        )
+        response = harness.client.get(
+            f"/model-config/v1/workspaces/{WORKSPACE_ID}/credentials",
+            headers=AUTH_HEADERS,
+        )
+        assert response.status_code == 200
+        assert response.headers["Cache-Control"] == "no-store"
+        result = response.json()
+        assert len(result) == 1 and result[0]["alias"] == "Visible alias"
+        assert set(result[0]) == {
+            "workspace_id",
+            "credential_id",
+            "alias",
+            "source",
+            "status",
+            "version",
+            "replaces_id",
+        }
+        assert calls == [WORKSPACE_ID]
+        assert harness.store.calls == []
+        assert "DECLARED_TEST_VALUE" not in response.text
+        for workspace_id, headers, expected in (
+            (WORKSPACE_ID, {}, 401),
+            (OTHER_WORKSPACE_ID, AUTH_HEADERS, 403),
+        ):
+            denied = harness.client.get(
+                f"/model-config/v1/workspaces/{workspace_id}/credentials",
+                headers=headers,
+            )
+            assert denied.status_code == expected
+        assert calls == [WORKSPACE_ID] and harness.store.calls == []
+
+
 @pytest.fixture(scope="module")
 def http_modules() -> Any:
     importlib.import_module("sidera_model_connections.http")
@@ -62,6 +129,7 @@ class RecordingCatalog:
         {
             "get_connection",
             "get_credential",
+            "list_credentials",
             "list_connections",
             "create_connection",
             "append_connection",

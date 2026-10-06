@@ -1,3 +1,7 @@
+import type { components } from "@/shared/api/product-schema";
+
+export type ThreadStop = components["schemas"]["ThreadStopView"];
+
 export type TurnStatus =
   | "queued"
   | "in_progress"

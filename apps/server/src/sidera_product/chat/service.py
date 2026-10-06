@@ -46,6 +46,7 @@ from .contracts import (
     CreateThreadBody,
     RequestState,
     StartTurnBody,
+    ThreadStopView,
     ThreadView,
     TurnItem,
     TurnView,
@@ -734,6 +735,26 @@ class ChatService:
             if self._closing:
                 raise ChatError("shutdown_pending")
             self._used = True
+
+    def stop_thread(
+        self, identity: ControlPlaneIdentity, conversation_id: UUID
+    ) -> ThreadStopView:
+        conversation = self.read_thread(identity, conversation_id)
+        with self._condition:
+            self._invocations += 1
+        try:
+            confirmed = self._close_conversation(conversation)
+            current = self.read_thread(identity, conversation_id)
+            return ThreadStopView(
+                conversation_id=current.id,
+                cleanup_confirmed=confirmed,
+                stop_state=current.stop_state,
+                reason_code=None if confirmed else "cleanup_pending",
+            )
+        finally:
+            with self._condition:
+                self._invocations -= 1
+                self._condition.notify_all()
 
     def begin_close(self) -> None:
         with self._condition:

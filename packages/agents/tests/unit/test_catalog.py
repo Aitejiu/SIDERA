@@ -9,9 +9,119 @@ from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
-
 from sidera_agents.contracts import CredentialRef, ResourceRef, SecretBinding
 from sidera_agents.errors import AgentError
+
+
+@pytest.mark.parametrize("entity", ["profile", "resource"])
+def test_explicit_create_identity_is_preserved_and_never_overwritten(
+    catalog_lab, entity
+):
+    identity = uuid4()
+    catalog = catalog_lab.catalog
+    create = getattr(catalog, "create_" + entity)
+    draft = catalog_lab.draft if entity == "profile" else catalog_lab.skill_draft
+    kwargs = {entity + "_id": identity, "grant_id": catalog_lab.grant_id}
+
+    saved = create(catalog_lab.workspace_id, draft, **kwargs)
+    assert getattr(saved.ref, entity + "_id") == identity
+    assert saved.ref.revision == 1
+    with pytest.raises(AgentError) as error:
+        create(
+            catalog_lab.workspace_id,
+            draft.model_copy(update={"name": "other"}),
+            **kwargs,
+        )
+    assert error.value.code == "operation_conflict"
+    assert (
+        getattr(catalog, "get_" + entity)(saved.ref, grant_id=catalog_lab.grant_id)
+        == saved
+    )
+
+
+@pytest.mark.parametrize("entity", ["profile", "resource"])
+@pytest.mark.parametrize("identity", ["not-a-uuid", 1, True])
+def test_explicit_create_identity_is_validated_before_store(
+    catalog_lab, entity, identity, monkeypatch
+):
+    writes = []
+    monkeypatch.setattr(
+        catalog_lab.catalog._store,
+        "create_" + entity,
+        lambda *args: writes.append(args),
+    )
+    draft = catalog_lab.draft if entity == "profile" else catalog_lab.skill_draft
+
+    with pytest.raises(AgentError) as error:
+        getattr(catalog_lab.catalog, "create_" + entity)(
+            catalog_lab.workspace_id,
+            draft,
+            grant_id=catalog_lab.grant_id,
+            **{entity + "_id": identity},
+        )
+    assert error.value.code == "configuration_invalid"
+    assert writes == []
+
+
+@pytest.mark.parametrize("entity", ["profile", "resource"])
+def test_explicit_create_denial_happens_before_store(catalog_lab, entity, monkeypatch):
+    writes = []
+    monkeypatch.setattr(
+        catalog_lab.catalog._store,
+        "create_" + entity,
+        lambda *args: writes.append(args),
+    )
+    draft = catalog_lab.draft if entity == "profile" else catalog_lab.skill_draft
+
+    with pytest.raises(AgentError) as error:
+        getattr(catalog_lab.catalog, "create_" + entity)(
+            catalog_lab.workspace_id,
+            draft,
+            grant_id=uuid4(),
+            **{entity + "_id": uuid4()},
+        )
+    assert error.value.code == "permission_denied"
+    assert writes == []
+
+
+@pytest.mark.parametrize("entity", ["profile", "resource"])
+def test_omitted_create_identity_still_generates_independent_ids(catalog_lab, entity):
+    create = getattr(catalog_lab.catalog, "create_" + entity)
+    draft = catalog_lab.draft if entity == "profile" else catalog_lab.skill_draft
+    first = create(catalog_lab.workspace_id, draft, grant_id=catalog_lab.grant_id)
+    second = create(catalog_lab.workspace_id, draft, grant_id=catalog_lab.grant_id)
+    assert first.ref != second.ref
+    assert first.ref.revision == second.ref.revision == 1
+
+
+@pytest.mark.parametrize("entity", ["profile", "resource"])
+def test_status_authorization_uses_public_typed_target(catalog_lab, entity):
+    from sidera_agents import api, contracts
+
+    target_type = getattr(contracts, "CatalogStatusTarget", None)
+    assert target_type is not None
+    assert getattr(api, "CatalogStatusTarget", None) is target_type
+    draft = catalog_lab.draft if entity == "profile" else catalog_lab.skill_draft
+    saved = getattr(catalog_lab.catalog, "create_" + entity)(
+        catalog_lab.workspace_id,
+        draft,
+        grant_id=catalog_lab.grant_id,
+    )
+    identity = getattr(saved.ref, entity + "_id")
+    getattr(catalog_lab.catalog, "set_" + entity + "_enabled")(
+        catalog_lab.workspace_id,
+        identity,
+        False,
+        1,
+        grant_id=catalog_lab.grant_id,
+    )
+    assert catalog_lab.authorizer.calls[-1] == (
+        catalog_lab.grant_id,
+        entity + ".disable",
+        target_type(
+            workspace_id=catalog_lab.workspace_id, entity=entity, entity_id=identity
+        ),
+    )
 
 
 def test_profile_pins_resource_revision(catalog_lab) -> None:

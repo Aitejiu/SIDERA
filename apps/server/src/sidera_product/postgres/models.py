@@ -218,3 +218,41 @@ class ChatTurnRow(Base):
     cached_view: Mapped[dict[str, JsonValue] | None] = mapped_column(JSONB)
     interrupt_operation_id: Mapped[UUID | None]
     interrupt_state: Mapped[str | None] = mapped_column(String(16))
+
+
+class ConfigurationRequestRow(Base):
+    __tablename__ = "configuration_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('profile.create', 'profile.revise', 'resource.create', 'resource.revise')",
+            name="configuration_action",
+        ),
+        CheckConstraint(
+            "state IN ('claimed', 'dispatching', 'succeeded', 'reconciled', 'rejected', 'unknown')",
+            name="configuration_state",
+        ),
+        CheckConstraint("version > 0", name="configuration_version_positive"),
+        CheckConstraint(
+            "request_fingerprint ~ '^[0-9a-f]{64}$' AND draft_fingerprint ~ '^[0-9a-f]{64}$'",
+            name="configuration_fingerprints",
+        ),
+    )
+
+    workspace_id: Mapped[UUID] = mapped_column(primary_key=True)
+    principal_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    operation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    action: Mapped[str] = mapped_column(String(32))
+    request_fingerprint: Mapped[str] = mapped_column(String(64))
+    draft_fingerprint: Mapped[str] = mapped_column(String(64))
+    target_ref: Mapped[dict[str, JsonValue]] = mapped_column(JSONB)
+    expected_ref: Mapped[dict[str, JsonValue] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
+    state: Mapped[str] = mapped_column(String(16))
+    version: Mapped[int]
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reason_code: Mapped[str | None] = mapped_column(String(100))
+    result_ref: Mapped[dict[str, JsonValue] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )

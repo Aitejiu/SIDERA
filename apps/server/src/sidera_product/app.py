@@ -27,7 +27,15 @@ from sidera_control_plane.composition.native_runtime import (
 from sidera_control_plane.domain.errors import DomainError
 from sidera_control_plane.domain.planning_profiles import PlanningBudgetPolicy
 from sidera_control_plane.domain.result_integration import CheckSpecV1
+from sidera_model_connections.connections import ConnectionService
+from sidera_model_connections.credentials import CredentialService
+from sidera_model_connections.errors import (
+    ConfigurationError as CredentialConfigurationError,
+)
+from sidera_model_connections.http import ManagementPrincipal, create_management_router
 
+from .agents.routes import agents_router, product_management_router
+from .agents.schemas import BootstrapSessionView, LocalSessionView, LogoutView
 from .auth.local_session import (
     CSRF_COOKIE,
     CSRF_HEADER,
@@ -148,9 +156,22 @@ def create_app(
     async def validation_error(request: Request, error: RequestValidationError):
         if request.url.path.startswith("/main-agent/v1/"):
             return JSONResponse(error_envelope("validation_error"), status_code=422)
+        if request.url.path.startswith("/agents/v1/") or (
+            request.url.path.startswith("/product/v1/workspaces/")
+            and request.url.path.endswith(("/defaults", "/configuration-requests"))
+        ):
+            return JSONResponse(
+                {"detail": {"code": "validation_error"}},
+                status_code=422,
+                headers={"Cache-Control": "no-store"},
+            )
         return await request_validation_exception_handler(request, error)
 
-    @app.post("/product/v1/session/bootstrap")
+    @app.post(
+        "/product/v1/session/bootstrap",
+        response_model=BootstrapSessionView,
+        operation_id="exchangeLocalBootstrap",
+    )
     async def exchange_bootstrap(request: Request) -> JSONResponse:
         owner.local_sessions.require_browser_boundary(request)
         if SESSION_COOKIE in request.cookies or "authorization" in request.headers:
@@ -194,7 +215,11 @@ def create_app(
             raise HTTPException(401, detail={"code": "local_session_required"})
         return identity
 
-    @app.get("/product/v1/session")
+    @app.get(
+        "/product/v1/session",
+        response_model=LocalSessionView,
+        operation_id="readLocalSession",
+    )
     async def session_status(request: Request) -> dict[str, str]:
         identity = await anyio.to_thread.run_sync(current_session, request)
         row = await anyio.to_thread.run_sync(
@@ -209,7 +234,11 @@ def create_app(
             "expires_at": row.expires_at.isoformat(),
         }
 
-    @app.post("/product/v1/session/logout")
+    @app.post(
+        "/product/v1/session/logout",
+        response_model=LogoutView,
+        operation_id="logoutLocalSession",
+    )
     async def logout(request: Request) -> JSONResponse:
         identity = await anyio.to_thread.run_sync(current_session, request)
         await anyio.to_thread.run_sync(owner.local_sessions.revoke, identity.grant_id)
@@ -332,9 +361,35 @@ def create_app(
             "managed_credentials_enabled": owner.settings.managed_credentials_enabled,
         }
 
-    @app.api_route("/agents/v1/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+    app.include_router(agents_router(owner))
+    app.include_router(product_management_router(owner))
+
+    def authorize_management(request: Request) -> ManagementPrincipal:
+        identity = owner.local_sessions.authenticate_request(request)
+        if (
+            identity is None
+            or identity.actor_type != "user"
+            or identity.principal_id != owner.settings.local_principal_id
+            or owner.local_sessions.identity_for_grant(identity.grant_id) != identity
+        ):
+            raise CredentialConfigurationError("management_unauthorized")
+        return ManagementPrincipal(
+            identity.principal_id, frozenset({owner.settings.workspace_id})
+        )
+
+    app.include_router(
+        create_management_router(
+            ConnectionService(owner.credential_catalog),
+            CredentialService(owner.credential_catalog, owner.secret_store),
+            owner.credential_catalog,
+            authorize_management=authorize_management,
+        )
+    )
+
     @app.api_route(
-        "/product/v1/workspaces/{path:path}", methods=["GET", "POST", "PUT", "DELETE"]
+        "/product/v1/workspaces/{path:path}",
+        methods=["GET", "POST", "PUT", "DELETE"],
+        include_in_schema=False,
     )
     async def protected_unavailable(request: Request) -> None:
         await anyio.to_thread.run_sync(authenticated, request)

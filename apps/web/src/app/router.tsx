@@ -33,6 +33,9 @@ import { PlanningPage } from "@/features/planning/PlanningPage";
 import { PlanRevisionPage } from "@/features/planning/PlanRevisionPage";
 import { ContextPackagePage } from "@/features/context/ContextPackagePage";
 import { CollaborationDetailPage } from "@/features/collaboration/CollaborationDetailPage";
+import { AgentListPage } from "@/features/agents/AgentListPage";
+import { AgentDetailPage } from "@/features/agents/AgentDetailPage";
+import { RuntimeSettings } from "@/features/agents/RuntimeSettings";
 
 export const routes: RouteObject[] = [
   {
@@ -42,6 +45,22 @@ export const routes: RouteObject[] = [
   {
     element: <App />,
     children: [
+      {
+        path: "/workspaces/:workspaceId/agents",
+        element: <AgentListPage />,
+      },
+      {
+        path: "/workspaces/:workspaceId/agents/:profileId",
+        element: <AgentDetailPage />,
+      },
+      {
+        path: "/workspaces/:workspaceId/runtimes",
+        element: <RuntimeSettings />,
+      },
+      {
+        path: "/workspaces/:workspaceId/runtimes/:runtimeId",
+        element: <RuntimeSettings />,
+      },
       {
         path: "/workspaces/:workspaceId/tasks",
         element: <TaskListPage />,

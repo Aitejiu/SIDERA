@@ -11,6 +11,9 @@ import {
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { AgentApiProblem, readDefaults, readProfile } from "@/features/agents/api";
+import type { ProfileView } from "@/features/agents/types";
+import { LocalSessionButton } from "@/features/local-session/LocalSessionDialog";
 import {
   createThread,
   getHealth,
@@ -30,7 +33,7 @@ import { ChatThreadList } from "./ChatThreadList";
 import { ChatTranscript, getTurnInput } from "./ChatTranscript";
 import { parseToolResult } from "./ToolResultCard";
 import { subscribeTurnEvents } from "./turnStream";
-import type { JsonValue, MainAgentItem, MainAgentTurn } from "./types";
+import type { ChatProfileRef, JsonValue, MainAgentItem, MainAgentTurn } from "./types";
 
 const DEFAULT_WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 const NEW_THREAD_SCOPE = "__new__";
@@ -91,10 +94,24 @@ export function ChatPage() {
     queryFn: ({ signal }) => getThread(threadId ?? "", signal),
     enabled: threadId !== undefined,
   });
+  const native = healthQuery.data?.service === "sidera-product";
+  const newNative = native && threadId === undefined;
+  const authErrors = [healthQuery.error, threadsQuery.error, threadQuery.error];
+  const sessionRequired = authErrors.some(error => error instanceof MainAgentApiProblem && error.status === 401 && error.code === "local_session_required");
+  const authDenied = authErrors.some(error => error instanceof MainAgentApiProblem && [401, 403].includes(error.status));
+  const sessionAuthorized = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: mainAgentHealthQueryKey(workspaceId) });
+    void queryClient.invalidateQueries({ queryKey: mainAgentThreadsQueryKey(workspaceId) });
+    if (threadId !== undefined) void queryClient.invalidateQueries({ queryKey: mainAgentThreadQueryKey(workspaceId, threadId) });
+  }, [queryClient, workspaceId, threadId]);
 
   const createMutation = useMutation({
-    mutationFn: () => createThread({ contextRefs: [], title: "新对话" }),
-    onSuccess: (thread) => {
+    mutationFn: (profileRef?: ChatProfileRef) => createThread({ contextRefs: [], title: "新对话", ...(profileRef ? { profileRef } : {}) }),
+    onSuccess: (thread, profileRef) => {
+      if (profileRef && !isNativeEmptyThread(thread, profileRef)) {
+        setErrorMessage("新对话创建结果未确认");
+        return;
+      }
       queryClient.setQueryData(mainAgentThreadQueryKey(workspaceId, thread.id), thread);
       void queryClient.invalidateQueries({ queryKey: mainAgentThreadsQueryKey(workspaceId) });
       navigate(`/workspaces/${workspaceId}/chat/${encodeURIComponent(thread.id)}`);
@@ -242,7 +259,7 @@ export function ChatPage() {
     navigate(`/workspaces/${workspaceId}/chat/${encodeURIComponent(nextThreadId)}`);
   };
 
-  const send = async (input: string, options: { freshOperation?: boolean; operationId?: string } = {}) => {
+  const send = async (input: string, options: { freshOperation?: boolean; operationId?: string; profileRef?: ChatProfileRef } = {}) => {
     const normalizedInput = options.operationId === undefined ? input.trim() : input;
     if (activeTurn !== undefined || normalizedInput.trim() === "" || sendPending) return;
     setErrorMessage(null);
@@ -252,12 +269,18 @@ export function ChatPage() {
 
     if (threadId === undefined) {
       if (pendingContextRef === null || contextSendPending) return;
+      if (newNative && options.profileRef === undefined) return;
       setContextSendPending(true);
       try {
         const created = await createThread({
           contextRefs: [pendingContextRef],
           title: "上下文讨论",
+          ...(options.profileRef ? { profileRef: options.profileRef } : {}),
         });
+        if (newNative && options.profileRef !== undefined && !isNativeEmptyThread(created, options.profileRef)) {
+          setErrorMessage("新对话创建结果未确认");
+          return;
+        }
         queryClient.setQueryData(mainAgentThreadQueryKey(workspaceId, created.id), created);
         void queryClient.invalidateQueries({ queryKey: mainAgentThreadsQueryKey(workspaceId) });
         setDrafts((current) => ({ ...current, [created.id]: normalizedInput }));
@@ -372,8 +395,10 @@ export function ChatPage() {
         <div>
           <span className="eyebrow">MAIN AGENT / CHAT</span>
           <h1 id="chat-page-title">{pageTitle}</h1>
+          {selectedThread?.profileRef ? <span className="agent-identity">Profile R{selectedThread.profileRef.revision}</span> : null}
         </div>
         <div className="chat-page__status">
+          {sessionRequired ? <LocalSessionButton workspaceId={workspaceId} onAuthorized={sessionAuthorized} /> : null}
           {unavailable ? <CircleAlert size={15} aria-hidden="true" /> : <CircleCheck size={15} aria-hidden="true" />}
           <span>{unavailable ? "Gateway offline" : "Gateway ready"}</span>
         </div>
@@ -386,7 +411,8 @@ export function ChatPage() {
           isLoading={threadsQuery.isPending}
           isError={threadsQuery.isError}
           onSelect={selectThread}
-          onCreate={() => createMutation.mutate()}
+          onCreate={() => { if (native) navigate(`/workspaces/${workspaceId}/chat`); else createMutation.mutate(undefined); }}
+          createDisabled={newNative || authDenied || createMutation.isPending}
           onRetry={() => void threadsQuery.refetch()}
         />
 
@@ -440,7 +466,7 @@ export function ChatPage() {
               <strong>Main Agent 暂不可用</strong>
               <span>任务控制面仍可继续查看。</span>
             </div>
-          ) : threadId === undefined && pendingContextRef !== null ? (
+          ) : newNative ? <NativeProfileSelection workspaceId={workspaceId} selectedId={searchParams.get("profile_id")} selectedRevision={searchParams.get("profile_revision")} creating={createMutation.isPending || contextSendPending} errorMessage={errorMessage} onCreate={ref => createMutation.mutate(ref)} contextRef={pendingContextRef} draft={draft} onDraft={value => { setDrafts(current => ({ ...current, [scope]: value })); setErrorMessage(null); }} onSend={ref => void send(draft, { profileRef: ref })} /> : threadId === undefined && pendingContextRef !== null ? (
             <div className="chat-main__draft">
               <div className="chat-main__draft-card">
                 <span className="eyebrow">CONTEXT DRAFT</span>
@@ -466,7 +492,7 @@ export function ChatPage() {
             <div className="chat-main__empty">
               <span className="eyebrow">NO THREAD SELECTED</span>
               <h2>选择一个对话</h2>
-              <button className="quiet-button" type="button" onClick={() => createMutation.mutate()}>
+              <button className="quiet-button" type="button" onClick={() => createMutation.mutate(undefined)}>
                 新建对话
               </button>
             </div>
@@ -512,6 +538,68 @@ export function ChatPage() {
       </div>
     </section>
   );
+}
+
+function isNativeEmptyThread(thread: unknown, profileRef: ChatProfileRef): boolean {
+  if (typeof thread !== "object" || thread === null
+    || !("id" in thread) || typeof thread.id !== "string" || thread.id.trim() === ""
+    || !("turns" in thread) || !Array.isArray(thread.turns) || thread.turns.length !== 0
+    || ("runId" in thread && thread.runId !== null && thread.runId !== undefined)
+    || !("profileRef" in thread)) return false;
+  const ref = thread.profileRef;
+  return typeof ref === "object" && ref !== null
+    && "workspace_id" in ref && ref.workspace_id === profileRef.workspace_id
+    && "profile_id" in ref && ref.profile_id === profileRef.profile_id
+    && "revision" in ref && ref.revision === profileRef.revision;
+}
+
+function NativeProfileSelection({ workspaceId, selectedId, selectedRevision, ...actions }: {
+  workspaceId: string; selectedId: string | null; selectedRevision: string | null;
+  creating: boolean; errorMessage: string | null; onCreate: (ref: ChatProfileRef) => void;
+  contextRef: string | null; draft: string; onDraft: (value: string) => void; onSend: (ref: ChatProfileRef) => void;
+}) {
+  const [intent] = useState(() => crypto.randomUUID());
+  const profile = useQuery({
+    queryKey: ["main-agent", workspaceId, "new-profile", intent, selectedId, selectedRevision],
+    retry: false, refetchOnWindowFocus: false, refetchOnReconnect: false,
+    queryFn: async () => {
+      let id: string, revision: number | undefined;
+      if (selectedId !== null || selectedRevision !== null) {
+        const parsed = Number(selectedRevision);
+        if (selectedId === null || selectedRevision === null || !/^[1-9][0-9]*$/.test(selectedRevision) || !Number.isSafeInteger(parsed)) throw new AgentApiProblem(422, "invalid_profile_selection");
+        id = selectedId; revision = parsed;
+      } else {
+        const defaults = await readDefaults(workspaceId);
+        if (defaults.workspace_id !== workspaceId) throw new AgentApiProblem(403, "permission_denied");
+        if (defaults.main_profile_id === null) throw new AgentApiProblem(409, "main_default_missing");
+        id = defaults.main_profile_id;
+      }
+      const current = await readProfile(workspaceId, id, revision);
+      const ref = current.profile.ref;
+      if (ref.workspace_id !== workspaceId || ref.profile_id !== id || !Number.isSafeInteger(ref.revision) || ref.revision < 1 || (revision !== undefined && ref.revision !== revision) || current.status.profile_id !== id || current.status.enabled !== true) throw new AgentApiProblem(409, "profile_unavailable");
+      return current;
+    },
+  });
+  if (profile.isPending) return <p role="status">正在读取新对话 Profile</p>;
+  if (profile.isError) return <p role="alert">{profile.error instanceof AgentApiProblem && profile.error.code === "main_default_missing" ? "Main 默认 Profile 未设置" : "新对话 Profile 不可用"}</p>;
+  return <ReviewedNativeProfile key={`${intent}:${selectedId ?? "default"}:${selectedRevision ?? "head"}`} initial={profile.data} explicit={selectedId !== null} {...actions} />;
+}
+
+function ReviewedNativeProfile({ initial, explicit, creating, errorMessage, onCreate, contextRef, draft, onDraft, onSend }: {
+  initial: ProfileView; explicit: boolean; creating: boolean; errorMessage: string | null;
+  onCreate: (ref: ChatProfileRef) => void; contextRef: string | null; draft: string;
+  onDraft: (value: string) => void; onSend: (ref: ChatProfileRef) => void;
+}) {
+  const [profile] = useState(initial), [attempted, setAttempted] = useState(false);
+  const submitted = useRef(false);
+  const ref = profile.profile.ref;
+  return <div className="chat-main__empty">
+    <p>{explicit ? "已选 Profile" : "Main 默认 Profile"} · {profile.profile.draft.name} · R{ref.revision}</p>
+    <span className="mono-label">{ref.profile_id}</span>
+    {contextRef === null ? <button className="quiet-button" disabled={creating || attempted} onClick={() => { if (submitted.current) return; submitted.current = true; setAttempted(true); onCreate(ref); }}>使用该 Profile 新建对话</button>
+      : <><code>{contextRef}</code><ChatComposer value={draft} active={false} interruptAvailable={false} interruptReasonCode={null} disabled={creating || attempted} errorMessage={errorMessage} onChange={onDraft} onSend={() => { if (submitted.current || !draft.trim()) return; submitted.current = true; setAttempted(true); onSend(ref); }} onInterrupt={() => {}} /></>}
+    {contextRef === null && errorMessage ? <p role="alert">{errorMessage}</p> : null}
+  </div>;
 }
 
 async function startTurnWithBusyRetry(

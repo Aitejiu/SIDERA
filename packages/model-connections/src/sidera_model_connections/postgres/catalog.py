@@ -167,6 +167,17 @@ class PostgresConnectionCatalog:
                 raise ConfigurationError("credential_not_found")
             return _to_credential(row)
 
+    def list_credentials(self, workspace_id: UUID) -> tuple[CredentialMetadata, ...]:
+        statement = (
+            select(CredentialRow)
+            .where(CredentialRow.workspace_id == workspace_id)
+            .order_by(CredentialRow.created_at, CredentialRow.id)
+        )
+        with self._session_factory() as session:
+            return tuple(
+                _to_credential(row) for row in session.scalars(statement).all()
+            )
+
     @contextmanager
     def credential_read_lease(self, ref: CredentialRef) -> Iterator[CredentialMetadata]:
         with self._session_factory() as session, session.begin():

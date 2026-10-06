@@ -152,10 +152,14 @@ def test_chat_rows_are_owned_journals_not_a_native_event_or_execution_store():
 def test_chat_forward_migration_is_after_accepted_local_authority_head():
     config = Config(str(PostgresProductStore.alembic_config_path()))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0003_conversations"]
+    assert scripts.get_heads() == ["0004_configuration_requests"]
     assert (
         scripts.get_revision("0003_conversations").down_revision
         == "0002_local_authority_tools"
+    )
+    assert (
+        scripts.get_revision("0004_configuration_requests").down_revision
+        == "0003_conversations"
     )
 
 

@@ -4,9 +4,8 @@ from typing import get_type_hints
 from uuid import uuid4
 
 import pytest
-from pydantic import SecretStr, ValidationError
-
 import sidera_agents
+from pydantic import SecretStr, ValidationError
 from sidera_agents.api import (
     AgentCatalog,
     AgentExecution,
@@ -46,6 +45,25 @@ from sidera_agents.ports import (
     DenyToolConnectionReader,
     ToolConnection,
 )
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"entity": "execution"},
+        {"workspace_id": "not-a-uuid"},
+        {"entity_id": "not-a-uuid"},
+        {"entity_id": 1},
+        {"entity_id": True},
+    ],
+)
+def test_public_catalog_status_target_rejects_malformed_fields(fields):
+    from sidera_agents.api import CatalogStatusTarget
+
+    values = {"workspace_id": uuid4(), "entity": "profile", "entity_id": uuid4()}
+    values.update(fields)
+    with pytest.raises(ValidationError):
+        CatalogStatusTarget(**values)
 
 
 def _profile_draft(**overrides: object) -> ProfileDraft:

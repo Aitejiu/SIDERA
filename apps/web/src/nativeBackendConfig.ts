@@ -26,7 +26,7 @@ export function resolveBackendProxyTargets(environment: E2eEnvironment): Record<
   if (mode !== "legacy" && mode !== "native") throw new Error("SIDERA_WEB_BACKEND must be legacy or native");
   if (mode === "native") {
     const target = nativeTarget(environment.SIDERA_WEB_PRODUCT_URL);
-    return Object.fromEntries(["/api", "/healthz", "/main-agent", "/product", "/agents"]
+    return Object.fromEntries(["/api", "/healthz", "/main-agent", "/product", "/agents", "/model-config"]
       .map((prefix) => [prefix, { target, changeOrigin: false }]));
   }
   const { controlPlanePort, mainAgentPort } = resolveE2eRuntime(environment);

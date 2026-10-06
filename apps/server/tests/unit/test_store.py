@@ -33,6 +33,7 @@ def test_owned_schema_has_no_foundation_rows_or_cross_schema_foreign_keys():
         "product.tool_receipts",
         "product.conversations",
         "product.chat_turns",
+        "product.configuration_requests",
     }
     defaults = base.metadata.tables["product.product_defaults"]
     assert set(defaults.columns.keys()) == {
@@ -68,7 +69,7 @@ def test_owned_forward_migration_resources_match_readiness_head():
     config_path = store_class.alembic_config_path()
     config = Config(str(config_path))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0003_conversations"]
+    assert scripts.get_heads() == ["0004_configuration_requests"]
     assert Path(config_path).is_file()
 
 

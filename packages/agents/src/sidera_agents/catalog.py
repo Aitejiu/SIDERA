@@ -4,7 +4,6 @@ import hashlib
 import json
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Protocol
@@ -13,6 +12,7 @@ from uuid import UUID, uuid4
 
 from .contracts import (
     CapabilityResourceDraft,
+    CatalogStatusTarget,
     ProfileDraft,
     ProfileRef,
     ProfileRevision,
@@ -96,13 +96,6 @@ class AgentStore(Protocol):
         enabled: bool,
         expected_version: int,
     ) -> ResourceStatus: ...
-
-
-@dataclass(frozen=True)
-class _CatalogTarget:
-    workspace_id: UUID
-    entity: str
-    entity_id: UUID
 
 
 _SECRET_KEY = re.compile(
@@ -394,16 +387,25 @@ class ProfileCatalog:
         self._clock = clock
 
     def create_profile(
-        self, workspace_id: UUID, draft: ProfileDraft, *, grant_id: UUID
+        self,
+        workspace_id: UUID,
+        draft: ProfileDraft,
+        *,
+        grant_id: UUID,
+        profile_id: UUID | None = None,
     ) -> ProfileRevision:
         self._authorizer.require(grant_id, "profile.create", workspace_id)
+        if profile_id is not None and type(profile_id) is not UUID:
+            raise AgentError(
+                "configuration_invalid", "Profile ID is invalid.", "profile_id"
+            )
         normalized = _normalize_profile_draft(draft)
         resource_hashes = self._validate_profile_draft(
             workspace_id, normalized, grant_id
         )
         return self._store.create_profile(
             workspace_id,
-            uuid4(),
+            profile_id if profile_id is not None else uuid4(),
             normalized,
             self._profile_hash(normalized, resource_hashes),
             self._clock(),
@@ -449,13 +451,18 @@ class ProfileCatalog:
         draft: CapabilityResourceDraft,
         *,
         grant_id: UUID,
+        resource_id: UUID | None = None,
     ) -> ResourceRevision:
         self._authorizer.require(grant_id, "resource.create", workspace_id)
+        if resource_id is not None and type(resource_id) is not UUID:
+            raise AgentError(
+                "configuration_invalid", "Resource ID is invalid.", "resource_id"
+            )
         normalized = _normalize_resource_draft(draft)
         self._validate_resource_draft(workspace_id, normalized)
         return self._store.create_resource(
             workspace_id,
-            uuid4(),
+            resource_id if resource_id is not None else uuid4(),
             normalized,
             _canonical_hash(normalized.model_dump(mode="json")),
             self._clock(),
@@ -507,7 +514,11 @@ class ProfileCatalog:
         self._validate_status_input(enabled, expected_version)
         action = "profile.enable" if enabled else "profile.disable"
         self._authorizer.require(
-            grant_id, action, _CatalogTarget(workspace_id, "profile", profile_id)
+            grant_id,
+            action,
+            CatalogStatusTarget(
+                workspace_id=workspace_id, entity="profile", entity_id=profile_id
+            ),
         )
         return self._store.set_profile_enabled(
             workspace_id, profile_id, enabled, expected_version
@@ -525,7 +536,11 @@ class ProfileCatalog:
         self._validate_status_input(enabled, expected_version)
         action = "resource.enable" if enabled else "resource.disable"
         self._authorizer.require(
-            grant_id, action, _CatalogTarget(workspace_id, "resource", resource_id)
+            grant_id,
+            action,
+            CatalogStatusTarget(
+                workspace_id=workspace_id, entity="resource", entity_id=resource_id
+            ),
         )
         return self._store.set_resource_enabled(
             workspace_id, resource_id, enabled, expected_version

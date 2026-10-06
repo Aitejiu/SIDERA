@@ -61,6 +61,71 @@ def _matching(
     return tuple(matching)
 
 
+def _confirmed_stop_event(
+    turn: ChatTurn,
+    run: RunSnapshot,
+    response_id: UUID | None,
+    events: tuple[RunEvent, ...],
+    matching: tuple[RunEvent, ...],
+    *,
+    input_unknown: bool,
+) -> RunEvent | None:
+    if (
+        run.state is not RunState.STOPPED
+        or turn.request_state in ("busy", "rejected")
+        or response_id is None
+        or input_unknown
+        or any(
+            event.kind
+            in (
+                "response.completed",
+                "response.interrupted",
+                "response.failed",
+                "input.failed",
+            )
+            for event in matching
+        )
+    ):
+        return None
+
+    bindings = tuple(
+        event
+        for event in events
+        if event.operation_id == turn.native_operation_id
+        and event.response_id == response_id
+        and event.kind in ("input.accepted", "response.started")
+    )
+    if not bindings:
+        return None
+    first_binding_sequence = min(event.sequence for event in bindings)
+    accepted_operations = {
+        event.operation_id
+        for event in events
+        if event.kind == "stop.accepted"
+        and event.response_id is None
+        and event.operation_id is not None
+        and event.operation_id != turn.native_operation_id
+    }
+    confirmations = tuple(
+        event
+        for event in events
+        if event.kind == "stop.stopped"
+        and event.response_id is None
+        and event.operation_id in accepted_operations
+        and event.sequence > first_binding_sequence
+        and any(
+            accepted.kind == "stop.accepted"
+            and accepted.response_id is None
+            and accepted.operation_id == event.operation_id
+            and accepted.sequence < event.sequence
+            for accepted in events
+        )
+    )
+    return (
+        min(confirmations, key=lambda event: event.sequence) if confirmations else None
+    )
+
+
 def project_turn(
     turn: ChatTurn, run: RunSnapshot, events: tuple[RunEvent, ...]
 ) -> TurnView:
@@ -175,6 +240,17 @@ def project_turn(
             "code": run.reason_code or "native_run_unknown",
             "retryable": False,
         }
+    stop_event = _confirmed_stop_event(
+        turn,
+        run,
+        response_id,
+        events,
+        selected,
+        input_unknown=input_unknown,
+    )
+    if completed is None and stop_event is not None:
+        completed = stop_event.occurred_at
+        status = "cancelled"
     current = (
         run.state is RunState.RUNNING
         and response_id is not None
@@ -214,8 +290,22 @@ def event_frames(
 ) -> tuple[ChatEvent, ...]:
     response_id = response_binding(turn, events)
     selected = _matching(turn, response_id, events)
+    input_unknown = any(event.kind == "input.unknown" for event in selected)
+    stop_event = _confirmed_stop_event(
+        turn,
+        run,
+        response_id,
+        events,
+        selected,
+        input_unknown=input_unknown,
+    )
+    framed = (
+        selected
+        if stop_event is None
+        else tuple(sorted((*selected, stop_event), key=lambda item: item.sequence))
+    )
     frames: list[ChatEvent] = []
-    for event in selected:
+    for event in framed:
         if event.sequence <= after:
             continue
         view = project_turn(
@@ -249,6 +339,18 @@ def event_frames(
             kind = view.status
             data = {
                 "status": view.status,
+                "finalResponse": view.final_response,
+                "usage": view.usage,
+                "completedAt": event.occurred_at.isoformat(),
+            }
+        elif (
+            event.kind == "stop.stopped"
+            and stop_event is not None
+            and event.sequence == stop_event.sequence
+        ):
+            kind = "cancelled"
+            data = {
+                "status": "cancelled",
                 "finalResponse": view.final_response,
                 "usage": view.usage,
                 "completedAt": event.occurred_at.isoformat(),

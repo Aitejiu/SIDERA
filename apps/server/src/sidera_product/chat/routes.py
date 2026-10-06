@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
 import anyio
-from fastapi import APIRouter, Header, Query, Request
+from fastapi import APIRouter, Header, Query, Request, Response
 from sidera_agents.errors import AgentError
 from sidera_control_plane.composition.native_runtime import ControlPlaneIdentity
 from starlette.responses import StreamingResponse
@@ -17,6 +17,7 @@ from .contracts import (
     CreateThreadBody,
     StartTurnBody,
     ThreadListView,
+    ThreadStopView,
     ThreadView,
     TurnView,
 )
@@ -112,6 +113,20 @@ def chat_router(owner: ProductRuntime) -> APIRouter:
     async def read_thread(thread_id: UUID, request: Request) -> ThreadView:
         identity = await call(lambda: authenticate(request))
         return await call(lambda: owner.chat.read_thread_view(identity, thread_id))
+
+    @router.post(
+        "/threads/{thread_id}/stop",
+        response_model=ThreadStopView,
+        responses={202: {"model": ThreadStopView}},
+    )
+    async def stop_thread(
+        thread_id: UUID, request: Request, response: Response
+    ) -> ThreadStopView:
+        identity = await call(lambda: authenticate(request))
+        result = await call(lambda: owner.chat.stop_thread(identity, thread_id))
+        if not result.cleanup_confirmed:
+            response.status_code = 202
+        return result
 
     @router.post("/threads/{thread_id}/turns", response_model=TurnView, status_code=202)
     async def start_turn(

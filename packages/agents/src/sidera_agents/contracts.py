@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import Annotated, Protocol
+from typing import Annotated, Literal, Protocol
 from uuid import UUID
 
 from pydantic import (
@@ -90,6 +90,12 @@ ContractVersion = Annotated[int, Field(strict=True, ge=1, le=1)]
 
 class ContractModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class CatalogStatusTarget(ContractModel):
+    workspace_id: Annotated[UUID, Field(strict=True)]
+    entity: Literal["profile", "resource"]
+    entity_id: Annotated[UUID, Field(strict=True)]
 
 
 class ResourceKind(StrEnum):

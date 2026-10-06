@@ -25,6 +25,7 @@ from sidera_control_plane_client import (
     ControlPlaneClientConfig,
 )
 from sidera_model_connections.native_access import NativeCredentialReader
+from sidera_model_connections.ports import SecretStore
 from sidera_model_connections.postgres import PostgresConnectionCatalog
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
@@ -37,6 +38,7 @@ from .postgres import PostgresProductStore
 from .postgres.authority_store import PostgresAuthorityStore
 
 if TYPE_CHECKING:
+    from .agents.configuration import ConfigurationService
     from .chat.service import ChatService
     from .composition import (
         AgentSecretReader,
@@ -44,6 +46,7 @@ if TYPE_CHECKING:
         ProductRequestAuthorizer,
         SourceRouter,
     )
+    from .defaults import DefaultsService
 
 
 class OwnedAgentStore(Protocol):
@@ -93,10 +96,13 @@ class ProductRuntime:
         local_sessions: LocalSessions,
         grants: ProductGrants,
         chat: ChatService,
+        configuration: ConfigurationService,
+        defaults: DefaultsService,
         task_tool_connections: ToolConnectionResolver,
         agent_store: OwnedAgentStore,
         credential_engine: Engine,
         credential_catalog: PostgresConnectionCatalog,
+        secret_store: SecretStore,
         credential_reader: NativeCredentialReader,
         secret_reader: AgentSecretReader,
         agents: AgentService,
@@ -112,10 +118,13 @@ class ProductRuntime:
         self.local_sessions = local_sessions
         self.grants = grants
         self.chat = chat
+        self.configuration = configuration
+        self.defaults = defaults
         self.task_tool_connections = task_tool_connections
         self.agent_store = agent_store
         self.credential_engine = credential_engine
         self.credential_catalog = credential_catalog
+        self.secret_store = secret_store
         self.credential_reader = credential_reader
         self.secret_reader = secret_reader
         self.agents = agents
@@ -130,6 +139,7 @@ class ProductRuntime:
         self._state = "constructed"
         self._admission = False
         self._execution_available = False
+        self._availability_generation = 0
         self._cp_closed = False
         self._chat_closed = False
         self._agents_closed = False
@@ -287,6 +297,37 @@ class ProductRuntime:
             raise AgentError(
                 "product_unavailable", "Product write admission is unavailable."
             )
+
+    def refresh_execution_availability(self) -> bool:
+        with self._lock:
+            if (
+                self._shutdown_requested.is_set()
+                or not self._admission
+                or self._state != "ready"
+            ):
+                return False
+            self._availability_generation += 1
+            observation = self._availability_generation
+        try:
+            runtimes = self.agents.runtimes.list_runtimes(
+                self.settings.workspace_id,
+                grant_id=self.background_identity.grant_id,
+            )
+            available = any(
+                runtime.installed and runtime.enabled for runtime in runtimes
+            )
+        except Exception:  # noqa: BLE001 - metadata failure is unavailable, never optimistic admission
+            available = False
+        with self._lock:
+            if (
+                self._shutdown_requested.is_set()
+                or not self._admission
+                or self._state != "ready"
+            ):
+                return False
+            if observation == self._availability_generation:
+                self._execution_available = available
+            return self._execution_available
 
     def status(self) -> dict[str, JsonValue]:
         execution_ready = (

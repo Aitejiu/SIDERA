@@ -25,6 +25,7 @@ from sidera_control_plane.adapters.planning_workspace import (
     PrivatePlanningWorkspaceProvider,
 )
 from sidera_control_plane.api.app import _build_app
+from sidera_control_plane.api.assignment_queries import get_assignment_reads
 from sidera_control_plane.api.dependencies import (
     get_assignment_agent_catalog,
     get_assignment_agent_runtimes,
@@ -33,6 +34,7 @@ from sidera_control_plane.api.dependencies import (
     get_trusted_assignment_identity,
 )
 from sidera_control_plane.application.agent_worker_adapter import NativeWorkerServices
+from sidera_control_plane.application.assignment_queries import AssignmentQueryService
 from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.application.execution_authority import (
     ExecutionAuthorityReader,
@@ -58,6 +60,16 @@ from sidera_control_plane.domain.agent_tools import (
     ControlPlaneToolScope,
     WorkerProgressTarget,
 )
+from sidera_control_plane.domain.assignment_views import (
+    AgentBindingView,
+    AgentExecutionView,
+    AssignmentKind,
+    NativeRunSummary,
+    ProfileWorkKind,
+    ProfileWorkPage,
+    ProfileWorkRunTarget,
+    ProfileWorkTarget,
+)
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.errors import VersionConflict
 from sidera_control_plane.domain.execution import ExecutionSessionStatus
@@ -69,6 +81,9 @@ from sidera_control_plane.domain.native_setup import (
 )
 from sidera_control_plane.gateway_owner import GatewayOwner, build_gateway_owner
 from sidera_control_plane.notification_worker import build_notification_worker
+from sidera_control_plane.persistence.assignment_read_store import (
+    PostgresAssignmentReadStore,
+)
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.migration_resources import (
     migrate_database,
@@ -92,12 +107,20 @@ from sidera_control_plane.result_worker import build_result_worker
 from sidera_control_plane.scheduler_worker import build_scheduler
 
 __all__ = [
+    "AgentBindingView",
+    "AgentExecutionView",
+    "AssignmentKind",
     "ControlPlaneIdentity",
     "ControlPlaneRequestAuthorizer",
     "ControlPlaneRequestTarget",
     "ControlPlaneRuntime",
     "ControlPlaneToolScope",
+    "NativeRunSummary",
     "PlanningPolicyRef",
+    "ProfileWorkKind",
+    "ProfileWorkPage",
+    "ProfileWorkRunTarget",
+    "ProfileWorkTarget",
     "WorkerProgressTarget",
     "WorkspaceSetupReceipt",
     "WorkspaceSetupRequest",
@@ -233,6 +256,7 @@ class ControlPlaneRuntime:
         self.app.dependency_overrides[get_native_worker_services] = lambda: (
             self._services
         )
+        self.app.dependency_overrides[get_assignment_reads] = lambda: self
 
     @property
     def execution_authorizer(self) -> ExecutionAuthorizer:
@@ -1223,6 +1247,91 @@ class ControlPlaneRuntime:
             if owner_check is None or not owner_check():
                 return False
         return schema_ready(self._database)
+
+    @contextmanager
+    def _assignment_queries(
+        self, workspace_id: UUID, grant_id: UUID
+    ) -> Iterator[AssignmentQueryService]:
+        with self._condition:
+            if self._closed or self._closing:
+                raise AgentError("control_plane_closed", "Control plane is closed")
+            self._active_work += 1
+            self._regular_work += 1
+        try:
+            authorizer = self._request_authorizer
+            current = (
+                None
+                if authorizer is None or type(grant_id) is not UUID
+                else authorizer.identity_for_grant(grant_id)
+            )
+            if (
+                authorizer is None
+                or not isinstance(current, ControlPlaneIdentity)
+                or current.grant_id != grant_id
+                or current.actor_type != "user"
+                or self._settings.local_actor_type != "user"
+                or current.principal_id != self._settings.local_actor_id
+            ):
+                raise AgentError("permission_denied", "Work read denied.")
+            yield AssignmentQueryService(
+                store=PostgresAssignmentReadStore(self._database.session),
+                execution=self._execution,
+                authorizer=authorizer,
+                identity=current,
+                principal_id=self._settings.local_actor_id,
+                workspace_id=workspace_id,
+            )
+        finally:
+            with self._condition:
+                self._active_work -= 1
+                self._regular_work -= 1
+                self._drained.clear()
+                self._condition.notify_all()
+
+    def read_assignment(
+        self,
+        workspace_id: UUID,
+        target_type: AssignmentKind,
+        target_id: UUID,
+        *,
+        grant_id: UUID,
+    ) -> AgentBindingView | None:
+        with self._assignment_queries(workspace_id, grant_id) as queries:
+            return queries.read_assignment(workspace_id, target_type, target_id)
+
+    def read_agent_execution(
+        self, workspace_id: UUID, execution_id: UUID, *, grant_id: UUID
+    ) -> AgentExecutionView:
+        with self._assignment_queries(workspace_id, grant_id) as queries:
+            return queries.read_agent_execution(workspace_id, execution_id)
+
+    def list_profile_work(
+        self,
+        workspace_id: UUID,
+        profile_id: UUID,
+        *,
+        grant_id: UUID,
+        after: str | None = None,
+        limit: int = 50,
+    ) -> ProfileWorkPage:
+        with self._assignment_queries(workspace_id, grant_id) as queries:
+            return queries.list_profile_work(
+                workspace_id, profile_id, after=after, limit=limit
+            )
+
+    def read_profile_work_run(
+        self,
+        workspace_id: UUID,
+        kind: ProfileWorkKind,
+        work_id: UUID,
+        *,
+        grant_id: UUID,
+        target_type: AssignmentKind | None = None,
+    ) -> NativeRunSummary:
+        with self._assignment_queries(workspace_id, grant_id) as queries:
+            return queries.read_profile_work_run(
+                workspace_id, kind, work_id, target_type=target_type
+            )
 
     def read_task_tool_scope(
         self, *, grant_id: UUID, connection_id: UUID
