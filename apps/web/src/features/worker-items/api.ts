@@ -4,6 +4,12 @@ import {
   createCommandIdentity,
 } from "@/shared/api/client";
 import type { paths } from "@/shared/api/schema";
+import {
+  isLegacyHandoffProposal,
+  isLegacyHandoffTransition,
+  isNativeHandoffProposal,
+  isNativeHandoffTransition,
+} from "./types";
 
 import type {
   ActiveHandoff,
@@ -15,6 +21,8 @@ import type {
   HandoffProposal,
   HandoffTransition,
   PrepareWorkerHandoffPayload,
+  PublicHandoffProposal,
+  PublicHandoffTransition,
   RecoverWorkerHandoffPayload,
   RecoverWorkerTransitionPayload,
   WorkerActivityPage,
@@ -44,6 +52,15 @@ export function handoffTransitionQueryKey(workspaceId: string, transitionId: str
 
 export function workerHandoffQueryKey(workspaceId: string, workerItemId: string) {
   return ["worker-item-handoff", workspaceId, workerItemId] as const;
+}
+
+export class HandoffReadUnavailableError extends Error {
+  readonly code = "handoff_read_unavailable";
+
+  constructor() {
+    super("Handoff data is unavailable.");
+    this.name = "HandoffReadUnavailableError";
+  }
 }
 
 export async function getWorkerItemWorkspace(
@@ -98,28 +115,46 @@ export async function getHandoffProposal(
   workspaceId: string,
   proposalId: string,
   signal?: AbortSignal,
-): Promise<HandoffProposal> {
+): Promise<PublicHandoffProposal> {
   const path = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/handoff-proposals/${encodeURIComponent(proposalId)}`;
   const init = signal === undefined ? undefined : { signal };
-  return apiGetAt(
+  const response: unknown = await apiGetAt(
     path,
     "/api/v1/workspaces/{workspace_id}/handoff-proposals/{proposal_id}" as keyof paths,
     init,
   );
+  if (isNativeHandoffProposal(response)) {
+    if (response.workspace_id === workspaceId && response.id === proposalId) return response;
+    throw new HandoffReadUnavailableError();
+  }
+  if (isLegacyHandoffProposal(response)
+    && response.workspace_id === workspaceId && response.id === proposalId) {
+    return response;
+  }
+  throw new HandoffReadUnavailableError();
 }
 
 export async function getHandoffTransition(
   workspaceId: string,
   transitionId: string,
   signal?: AbortSignal,
-): Promise<HandoffTransition> {
+): Promise<PublicHandoffTransition> {
   const path = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/handoff-transitions/${encodeURIComponent(transitionId)}`;
   const init = signal === undefined ? undefined : { signal };
-  return apiGetAt(
+  const response: unknown = await apiGetAt(
     path,
     "/api/v1/workspaces/{workspace_id}/handoff-transitions/{transition_id}" as keyof paths,
     init,
   );
+  if (isNativeHandoffTransition(response)) {
+    if (response.workspace_id === workspaceId && response.id === transitionId) return response;
+    throw new HandoffReadUnavailableError();
+  }
+  if (isLegacyHandoffTransition(response)
+    && response.workspace_id === workspaceId && response.id === transitionId) {
+    return response;
+  }
+  throw new HandoffReadUnavailableError();
 }
 
 export async function getWorkerHandoff(

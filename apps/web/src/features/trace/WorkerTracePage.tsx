@@ -3,18 +3,18 @@ import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
+import { LocalSessionDialog } from "@/features/local-session/LocalSessionDialog";
 import {
-  executionQueryKey,
-  executionSessionQueryKey,
-  getExecution,
-  getExecutionSession,
   getWorkspaceCapabilities,
   getWorkerTrace,
   workerTraceQueryKey,
 } from "./api";
 import { TraceReader } from "./TraceReader";
 import { TraceSummary } from "./TraceSummary";
-import type { WorkerTraceEvent } from "./types";
+import { NativeTraceReadState, NativeTraceView } from "./NativeTraceView";
+import { nativeTracePinKey, type TraceSelectionAddress } from "./nativeTrace";
+import { useWorkerTraceSelection } from "./useWorkerTraceSelection";
+import type { Execution, WorkerTraceEvent } from "./types";
 
 export function WorkerTracePage({ embedded = false }: { embedded?: boolean } = {}) {
   const {
@@ -23,11 +23,55 @@ export function WorkerTracePage({ embedded = false }: { embedded?: boolean } = {
     executionId = "",
     sessionId = "",
   } = useParams<{ workspaceId: string; rootTaskId: string; executionId: string; sessionId: string }>();
+  const address = { rootTaskId, executionId, sessionId: sessionId && sessionId !== "unknown" ? sessionId : null };
+  return (
+    <section className={`worker-trace-page${embedded ? " worker-trace-page--embedded" : ""}`} aria-label="Worker Trace 页面">
+      {!embedded ? <div className="breadcrumb trace-breadcrumb">
+        <Link to={`/workspaces/${workspaceId}/tasks`}><ArrowLeft size={13} aria-hidden="true" />任务</Link>
+        <span>/</span><Link to={`/workspaces/${workspaceId}/tasks/${rootTaskId}`}>Root Task</Link>
+        <span>/</span><span>WorkItem</span><span>/</span><span>Execution</span><span>/</span><span>Session</span>
+      </div> : null}
+      <header className="trace-page-heading">
+        <div><h1 id="worker-trace-title">Worker 轨迹</h1></div>
+        <Link className="quiet-button" to={`/workspaces/${workspaceId}/tasks/${rootTaskId}/executions/${executionId}/sessions/${sessionId}`}>返回执行步骤</Link>
+      </header>
+      <SelectedTracePage key={JSON.stringify([workspaceId, address])} workspaceId={workspaceId} address={address} />
+    </section>
+  );
+}
+
+function SelectedTracePage({ workspaceId, address }: { workspaceId: string; address: TraceSelectionAddress }) {
+  const selected = useWorkerTraceSelection({ workspaceId, address });
+  const [authorizationOpen, setAuthorizationOpen] = useState(false);
+  const selection = selected.selection;
+  return <>
+    <NativeTraceReadState loading={selected.loading} error={selected.error} onRetry={() => void selected.retry()}
+      {...(selected.authorizationRequired ? { onAuthorize: () => setAuthorizationOpen(true) } : {})} />
+    {selection?.mode === "native" ? <NativeTraceView key={`${selected.scopeKey}:${nativeTracePinKey(selection.pin)}`}
+      pin={selection.pin} executionStatus={selected.execution?.status} />
+      : selection?.mode === "legacy" && selected.execution ? <LegacyTracePage
+        key={`${selected.scopeKey}:legacy`} workspaceId={workspaceId} rootTaskId={address.rootTaskId}
+        executionId={address.executionId} sessionId={selection.session.id} sessionVersion={selection.session.version}
+        principalId={selected.localSession?.principal_id ?? ""} execution={selected.execution} /> : null}
+    {authorizationOpen ? <LocalSessionDialog workspaceId={workspaceId} onClose={() => setAuthorizationOpen(false)}
+      onAuthorized={() => { setAuthorizationOpen(false); void selected.retry(); }} /> : null}
+  </>;
+}
+
+function LegacyTracePage({ workspaceId, rootTaskId, executionId, sessionId, principalId, execution, sessionVersion }: {
+  workspaceId: string;
+  rootTaskId: string;
+  executionId: string;
+  sessionId: string;
+  principalId: string;
+  execution: Execution;
+  sessionVersion: number;
+}) {
   const [selectedSequence, setSelectedSequence] = useState<number | null>(null);
   const [followTail, setFollowTail] = useState(true);
 
   const traceQuery = useInfiniteQuery({
-    queryKey: workerTraceQueryKey(workspaceId, executionId, sessionId, rootTaskId),
+    queryKey: [...workerTraceQueryKey(workspaceId, executionId, sessionId, rootTaskId), principalId, "legacy"],
     initialPageParam: undefined as number | undefined,
     queryFn: ({ signal, pageParam }) => getWorkerTrace(workspaceId, rootTaskId, executionId, sessionId, {
       ...(pageParam === undefined ? {} : { beforeSequence: pageParam }),
@@ -36,16 +80,6 @@ export function WorkerTracePage({ embedded = false }: { embedded?: boolean } = {
     getNextPageParam: () => undefined,
     getPreviousPageParam: (firstPage) => firstPage.previous_before_sequence ?? undefined,
     enabled: Boolean(workspaceId && rootTaskId && executionId && sessionId && sessionId !== "unknown"),
-  });
-  const sessionQuery = useQuery({
-    queryKey: executionSessionQueryKey(workspaceId, sessionId),
-    queryFn: ({ signal }) => getExecutionSession(workspaceId, sessionId, signal),
-    enabled: Boolean(workspaceId && sessionId && sessionId !== "unknown"),
-  });
-  const executionQuery = useQuery({
-    queryKey: executionQueryKey(workspaceId, executionId),
-    queryFn: ({ signal }) => getExecution(workspaceId, executionId, signal),
-    enabled: Boolean(workspaceId && executionId),
   });
   const trace = useMemo(() => {
     const pages = traceQuery.data?.pages ?? [];
@@ -59,7 +93,7 @@ export function WorkerTracePage({ embedded = false }: { embedded?: boolean } = {
   }, [followTail, selectedSequence, trace]);
   const escalationRequested = selectedEvent !== null && `${selectedEvent.title} ${selectedEvent.summary}`.includes("scope_escalation_requested");
   const capabilitiesQuery = useQuery({
-    queryKey: ["workspace-capabilities", workspaceId],
+    queryKey: ["workspace-capabilities", workspaceId, principalId],
     queryFn: ({ signal }) => getWorkspaceCapabilities(workspaceId, signal),
     enabled: escalationRequested,
   });
@@ -79,31 +113,18 @@ export function WorkerTracePage({ embedded = false }: { embedded?: boolean } = {
   };
 
   return (
-    <section className={`worker-trace-page${embedded ? " worker-trace-page--embedded" : ""}`} aria-label="Worker Trace 页面">
-      {!embedded ? <div className="breadcrumb trace-breadcrumb">
-        <Link to={`/workspaces/${workspaceId}/tasks`}><ArrowLeft size={13} aria-hidden="true" />任务</Link>
-        <span>/</span><Link to={`/workspaces/${workspaceId}/tasks/${rootTaskId}`}>Root Task</Link>
-        <span>/</span><span>WorkItem</span><span>/</span><span>Execution</span><span>/</span><span>Session</span>
-      </div> : null}
-
-      <header className="trace-page-heading">
-        <div>
-          <h1 id="worker-trace-title">Worker 轨迹</h1>
-        </div>
-        <Link className="quiet-button" to={`/workspaces/${workspaceId}/tasks/${rootTaskId}/executions/${executionId}/sessions/${sessionId}`}>返回执行步骤</Link>
-      </header>
-
+    <>
       {traceQuery.isError ? (
         <div className="trace-provider-warning" role="alert">
           <AlertTriangle size={17} aria-hidden="true" />
-          <div><strong>Trace Provider 暂不可用</strong><span>当前 Task 状态仍来自 SIDERA Execution：{executionQuery.data?.status ?? "读取中"}。已知 trace 范围暂不可用。</span></div>
+          <div><strong>Trace Provider 暂不可用</strong><span>当前 Task 状态仍来自 SIDERA Execution：{execution.status}。已知 trace 范围暂不可用。</span></div>
           <button className="quiet-button" type="button" onClick={() => void traceQuery.refetch()}><RefreshCcw size={14} aria-hidden="true" />重试</button>
         </div>
       ) : null}
 
       {trace ? (
         <>
-          <TraceSummary trace={trace} executionStatus={executionQuery.data?.status} sessionVersion={sessionQuery.data?.version} rootTaskId={rootTaskId} />
+          <TraceSummary trace={trace} executionStatus={execution.status} sessionVersion={sessionVersion} rootTaskId={rootTaskId} />
           {escalationRequested ? (
             <div className="scope-escalation" role="status">
               <CircleDot size={16} aria-hidden="true" />
@@ -127,7 +148,7 @@ export function WorkerTracePage({ embedded = false }: { embedded?: boolean } = {
       ) : traceQuery.isPending ? (
         <div className="trace-loading" role="status"><RefreshCcw size={16} />读取 Worker trace</div>
       ) : null}
-    </section>
+    </>
   );
 }
 

@@ -19,7 +19,15 @@ import {
   handoffTransitionQueryKey,
   recoverWorkerHandoff,
 } from "./api";
-import type { ActiveHandoff, HandoffTransition, RecoverWorkerHandoffPayload } from "./types";
+import { isLegacyHandoffTransition, isNativeHandoffTransition } from "./types";
+import { NativeHandoffProgress } from "./NativeHandoffProgress";
+import type {
+  ActiveHandoff,
+  HandoffTraceDescriptor,
+  HandoffTransition,
+  PublicHandoffTransition,
+  RecoverWorkerHandoffPayload,
+} from "./types";
 
 const HANDOFF_PHASES = [
   "checkpoint_source",
@@ -42,12 +50,14 @@ export function HandoffProgress({
   workspaceId,
   transitionId,
   fallback,
+  traceDescriptor,
   onRefresh,
   onClose,
 }: {
   workspaceId: string;
   transitionId: string;
   fallback?: ActiveHandoff | null | undefined;
+  traceDescriptor?: HandoffTraceDescriptor | null | undefined;
   onRefresh: () => Promise<void>;
   onClose?: (() => void) | undefined;
 }) {
@@ -87,6 +97,32 @@ export function HandoffProgress({
     return <FallbackProgress fallback={fallback} onClose={onClose} />;
   }
 
+  if (isNativeHandoffTransition(transition)) {
+    return (
+      <NativeHandoffProgress
+        workspaceId={workspaceId}
+        transition={transition}
+        traceDescriptor={traceDescriptor ?? null}
+        onRefresh={async () => {
+          await Promise.all([transitionQuery.refetch(), onRefresh()]);
+        }}
+        onClose={onClose}
+      />
+    );
+  }
+
+  if (!isLegacyHandoffTransition(transition)) {
+    return (
+      <div className="handoff-progress handoff-progress--error" role="alert">
+        <CircleAlert size={16} aria-hidden="true" />
+        <strong>交接进度格式暂不可用</strong>
+        <button className="quiet-button" type="button" onClick={() => void transitionQuery.refetch()}>
+          <RefreshCcw size={14} aria-hidden="true" />重试
+        </button>
+      </div>
+    );
+  }
+
   return (
     <HandoffProgressView
       workspaceId={workspaceId}
@@ -107,7 +143,7 @@ function HandoffProgressView({
 }: {
   workspaceId: string;
   transition: HandoffTransition;
-  transitionQuery: UseQueryResult<HandoffTransition>;
+  transitionQuery: UseQueryResult<PublicHandoffTransition>;
   onRefresh: () => Promise<void>;
   onClose?: (() => void) | undefined;
 }) {

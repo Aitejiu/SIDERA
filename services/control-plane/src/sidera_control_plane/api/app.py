@@ -39,6 +39,9 @@ from sidera_control_plane.api.execution_queries import (
 from sidera_control_plane.api.gateway_queries import router as gateway_queries_router
 from sidera_control_plane.api.handoff_queries import router as handoff_queries_router
 from sidera_control_plane.api.module_queries import router as module_queries_router
+from sidera_control_plane.api.native_worker_queries import (
+    router as native_worker_queries_router,
+)
 from sidera_control_plane.api.notification_delivery import (
     router as notification_delivery_router,
 )
@@ -217,7 +220,9 @@ def _build_app(
         title="SIDERA Control Plane",
         version="0.1.0",
         lifespan=lifespan,
-        dependencies=[Depends(protect_native_target, scope="request")] if native else None,
+        dependencies=[Depends(protect_native_target, scope="request")]
+        if native
+        else None,
     )
     app.add_middleware(
         CORSMiddleware,
@@ -288,6 +293,7 @@ def _build_app(
         install_native_http_error_handler(app)
     app.include_router(agent_context_queries_router)
     app.include_router(assignment_queries_router)
+    app.include_router(native_worker_queries_router)
     app.include_router(task_commands_router)
     app.include_router(command_queries_router)
     app.include_router(collaboration_queries_router)

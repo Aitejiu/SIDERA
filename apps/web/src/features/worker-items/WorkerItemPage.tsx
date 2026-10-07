@@ -5,6 +5,7 @@ import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { useWorkspaceStreamOptional } from "@/app/WorkspaceStreamProvider";
 import { useWorkerTimelineState } from "@/app/WorkspaceViewState";
+import { readLocalSession } from "@/features/local-session/api";
 import { AsyncState } from "@/shared/ui/AsyncState";
 import { StatusMark } from "@/shared/ui/StatusMark";
 
@@ -42,6 +43,7 @@ import {
   workerActivityQueryKey,
   workerWorkspaceQueryKey,
 } from "./api";
+import { NativeWorkerComposer } from "./NativeWorkerComposer";
 import { WorkerComposer } from "./WorkerComposer";
 import { HandoffDialog } from "./HandoffDialog";
 import { HandoffProgress } from "./HandoffProgress";
@@ -49,6 +51,16 @@ import { WorkerSidebar } from "./WorkerSidebar";
 import { WorkerTimeline } from "./WorkerTimeline";
 import { WorkerTraceDialog } from "./WorkerTraceDialog";
 import type { Execution } from "../trace/types";
+import type { TraceSelectionAddress } from "../trace/nativeTrace";
+import { ProfileHandoffDialog } from "../assignments/ProfileHandoffDialog";
+import type { AssigneeValue, NativeWorkerContextView } from "../assignments/types";
+import {
+  assignmentQueryKey,
+  nativeWorkerContextQueryKey,
+  readAssignment,
+  readNativeWorkerContext,
+} from "../assignments/api";
+import { reviewAppointmentFacts } from "../assignments/assigneeAppointmentState";
 import type { HandoffCandidateList, RecoverWorkerTransitionPayload, WorkerActivity, WorkerWorkspace } from "./types";
 
 export function WorkerItemPage() {
@@ -65,12 +77,62 @@ export function WorkerItemPage() {
     queryFn: ({ signal }) => getWorkerItemWorkspace(workspaceId, workerItemId, signal),
     enabled: Boolean(workspaceId && workerItemId),
   });
+  const sessionQueryKey = ["appointment-session", workspaceId, "worker_item", workerItemId] as const;
+  const appointmentSessionQuery = useQuery({
+    queryKey: sessionQueryKey,
+    queryFn: ({ signal }) => readLocalSession(signal),
+    enabled: Boolean(workspaceId && workerItemId),
+    retry: false,
+  });
+  const session = appointmentSessionQuery.data;
+  const hasAppointmentIdentity = session !== undefined
+    && session.workspace_id === workspaceId
+    && session.session_id.trim().length > 0
+    && session.principal_id.trim().length > 0;
+  const appointmentScope = hasAppointmentIdentity ? {
+    workspace_id: workspaceId,
+    principal_id: session.principal_id,
+    target_kind: "worker_item" as const,
+    target_id: workerItemId,
+  } : null;
+  const appointmentAssignmentKey = appointmentScope === null
+    ? [...assignmentQueryKey(workspaceId, "worker_item", workerItemId), ""] as const
+    : [...assignmentQueryKey(workspaceId, "worker_item", workerItemId), appointmentScope.principal_id] as const;
+  const appointmentAssignmentQuery = useQuery({
+    queryKey: appointmentAssignmentKey,
+    queryFn: ({ signal }) => readAssignment(workspaceId, "worker_item", workerItemId, signal),
+    enabled: appointmentScope !== null,
+    retry: false,
+  });
+  const appointmentContextKey = appointmentScope === null
+    ? [...nativeWorkerContextQueryKey(workspaceId, workerItemId), ""] as const
+    : [...nativeWorkerContextQueryKey(workspaceId, workerItemId), appointmentScope.principal_id] as const;
+  const appointmentContextQuery = useQuery({
+    queryKey: appointmentContextKey,
+    queryFn: ({ signal }) => readNativeWorkerContext(workspaceId, workerItemId, signal),
+    enabled: appointmentScope !== null,
+    retry: false,
+  });
+  const responsibilityReview = appointmentScope !== null
+    && appointmentAssignmentQuery.isSuccess
+    && appointmentContextQuery.isSuccess
+    && workspaceQuery.data !== undefined
+    ? reviewAppointmentFacts({
+      scope: appointmentScope,
+      binding: appointmentAssignmentQuery.data,
+      workerWorkspace: workspaceQuery.data,
+      nativeContext: appointmentContextQuery.data,
+    })
+    : null;
+  const legacyExecutionEligible = responsibilityReview?.ok === false
+    && responsibilityReview.action === "legacy";
   const handoffCandidatesEnabled = Boolean(
     workspaceId
       && workerItemId
       && workspaceQuery.data?.can_intervene
       && workspaceQuery.data.current_runtime?.session_id
-      && workspaceQuery.data.active_handoff == null,
+      && workspaceQuery.data.active_handoff == null
+      && legacyExecutionEligible,
   );
   const handoffCandidatesQuery = useQuery({
     queryKey: handoffCandidatesQueryKey(workspaceId, workerItemId),
@@ -156,7 +218,13 @@ export function WorkerItemPage() {
     }
     if (executionId) queryKeys.push(executionQueryKey(workspaceId, executionId));
     if (handoffCandidatesEnabled) queryKeys.push(handoffCandidatesQueryKey(workspaceId, workerItemId));
-    await Promise.all(queryKeys.map((queryKey) => queryClient.invalidateQueries({ queryKey })));
+    await Promise.all([
+      ...queryKeys.map((queryKey) => queryClient.invalidateQueries({ queryKey })),
+      ...(appointmentScope === null ? [] : [
+        queryClient.invalidateQueries({ queryKey: appointmentAssignmentKey, exact: true }),
+        queryClient.invalidateQueries({ queryKey: appointmentContextKey, exact: true }),
+      ]),
+    ]);
   };
 
   return (
@@ -170,8 +238,10 @@ export function WorkerItemPage() {
       >
         {workspaceQuery.data ? (
           <WorkerItemContent
-            key={workspaceQuery.data.worker_item.id}
+            key={`${workspaceId}:${workspaceQuery.data.worker_item.id}`}
             workspace={workspaceQuery.data}
+            legacyExecutionEligible={legacyExecutionEligible}
+            nativeContext={appointmentContextQuery.isSuccess ? appointmentContextQuery.data : undefined}
             activity={activity.items}
             hasMore={activity.nextCursor !== null}
             isLoadingMore={activityQuery.isFetchingNextPage}
@@ -217,8 +287,14 @@ export function WorkerItemPage() {
   );
 }
 
+type TraceEntry =
+  | { descriptor: NonNullable<WorkerActivity["trace_descriptor"]>; selection?: never }
+  | { descriptor?: never; selection: TraceSelectionAddress };
+
 function WorkerItemContent({
   workspace,
+  legacyExecutionEligible,
+  nativeContext,
   activity,
   hasMore,
   isLoadingMore,
@@ -247,6 +323,8 @@ function WorkerItemContent({
   onOpenArtifact,
 }: {
   workspace: WorkerWorkspace;
+  legacyExecutionEligible: boolean;
+  nativeContext: NativeWorkerContextView | undefined;
   activity: readonly WorkerActivity[];
   hasMore: boolean;
   isLoadingMore: boolean;
@@ -274,8 +352,29 @@ function WorkerItemContent({
   onOpenWorkerItem: (workerItemId: string) => void;
   onOpenArtifact: (artifactId: string) => void;
 }) {
-  const [traceDescriptor, setTraceDescriptor] = useState<NonNullable<WorkerActivity["trace_descriptor"]> | null>(null);
+  const [traceEntry, setTraceEntry] = useState<TraceEntry | null>(null);
+  const savedExecution = nativeContext?.execution;
+  const nativeTraceAddress: TraceSelectionAddress | null = nativeContext?.execution_mode === "native_profile"
+    && savedExecution != null
+    && savedExecution.workspace_id === workspace.workspace_id
+    && savedExecution.worker_item_id === workspace.worker_item.id
+    && savedExecution.root_task_id === workspace.worker_item.root_task_id
+    && savedExecution.profile_ref !== null && savedExecution.run_id !== null
+    && savedExecution.binding_version !== null && savedExecution.binding_version > 0
+    ? {
+      rootTaskId: savedExecution.root_task_id,
+      executionId: savedExecution.execution_id,
+      sessionId: nativeContext.context?.execution_id === savedExecution.execution_id
+        ? nativeContext.context.session_id
+        : workspace.current_runtime?.execution_id === savedExecution.execution_id
+          ? workspace.current_runtime.session_id
+          : workspace.execution_history.find((item) => item.execution_id === savedExecution.execution_id)?.session_id ?? null,
+    } : null;
+  const currentTraceEntry: TraceEntry | null = nativeTraceAddress ? { selection: nativeTraceAddress }
+    : workspace.trace_descriptor ? { descriptor: workspace.trace_descriptor } : null;
   const [handoffOpen, setHandoffOpen] = useState(false);
+  const [nativeHandoffOpen, setNativeHandoffOpen] = useState(false);
+  const [nativeHandoffTarget, setNativeHandoffTarget] = useState<AssigneeValue | null>(null);
   const timelineState = useWorkerTimelineState(workspace.worker_item.id);
   const [resultInputActionState, setResultInputActionState] = useState<{
     status: "idle" | "submitting" | "success" | "error";
@@ -287,8 +386,10 @@ function WorkerItemContent({
     [activity, workspace],
   );
   const handoffAvailable = workspace.active_handoff == null
+    && legacyExecutionEligible
     && workspace.can_intervene
     && handoffCandidates?.candidates.some((candidate) => candidate.eligible) === true;
+  const legacyDialogVisible = handoffOpen && legacyExecutionEligible;
   const handleResultInputAction = async (action: ResultInputAction) => {
     if (resultInputActionState.status === "submitting") return;
     setResultInputActionState({ status: "submitting", message: null });
@@ -337,11 +438,12 @@ function WorkerItemContent({
               <p className="worker-item-progress__waiting"><CircleAlert size={14} aria-hidden="true" />{workspace.collaboration.waiting_summary}</p>
             ) : null}
           </section>
-          {workspace.active_handoff && !handoffOpen ? (
+          {workspace.active_handoff && !legacyDialogVisible ? (
             <HandoffProgress
               workspaceId={workspace.workspace_id}
               transitionId={workspace.active_handoff.transition_id}
               fallback={workspace.active_handoff}
+              traceDescriptor={workspace.trace_descriptor}
               onRefresh={onRefresh}
             />
           ) : null}
@@ -361,26 +463,47 @@ function WorkerItemContent({
               hasMore={hasMore}
               isLoadingMore={isLoadingMore}
               onLoadMore={onLoadMore}
-              onOpenTrace={(activityItem) => setTraceDescriptor(activityItem.trace_descriptor)}
-              onOpenCurrentTrace={workspace.trace_descriptor ? () => setTraceDescriptor(workspace.trace_descriptor) : undefined}
+              onOpenTrace={(activityItem) => setTraceEntry(activityItem.trace_descriptor ? { descriptor: activityItem.trace_descriptor } : null)}
+              onOpenCurrentTrace={currentTraceEntry ? () => setTraceEntry(currentTraceEntry) : undefined}
             />
           )}
-          <WorkerComposer
-            workspaceId={workspace.workspace_id}
-            workerItemId={workspace.worker_item.id}
-            workspace={workspace}
-            execution={execution}
-            activities={activity}
-            onRefresh={onRefresh}
-          />
+          {legacyExecutionEligible ? (
+            <WorkerComposer
+              workspaceId={workspace.workspace_id}
+              workerItemId={workspace.worker_item.id}
+              workspace={workspace}
+              execution={execution}
+              activities={activity}
+              onRefresh={onRefresh}
+            />
+          ) : (
+            <NativeWorkerComposer
+              workspaceId={workspace.workspace_id}
+              workerItemId={workspace.worker_item.id}
+              workspace={workspace}
+              execution={execution}
+              nativeContext={nativeContext}
+              activities={activity}
+              onRefresh={onRefresh}
+            />
+          )}
         </div>
         <WorkerSidebar
           workspace={workspace}
+          legacyExecutionEligible={legacyExecutionEligible}
           taskTitle={taskTitle}
           subtaskTitle={subtaskTitle}
           onRefresh={onRefresh}
           handoffAvailable={handoffAvailable}
           onOpenHandoff={() => setHandoffOpen(true)}
+          onNativeHandoffRequest={(target) => {
+            setNativeHandoffTarget(target);
+            setNativeHandoffOpen(true);
+          }}
+          onNativeHandoffHistoryRequest={() => {
+            setNativeHandoffTarget(null);
+            setNativeHandoffOpen(true);
+          }}
           resultInputs={resultInputs}
           resultInputsLoading={resultInputsLoading}
           resultInputsError={resultInputsError}
@@ -396,7 +519,7 @@ function WorkerItemContent({
           resultInputActionState={resultInputActionState}
         />
       </div>
-      {handoffOpen ? (
+      {legacyDialogVisible ? (
         <HandoffDialog
           workspace={workspace}
           taskTitle={taskTitle}
@@ -409,11 +532,24 @@ function WorkerItemContent({
           onClose={() => setHandoffOpen(false)}
         />
       ) : null}
-      {traceDescriptor ? (
+      {nativeHandoffOpen ? (
+        <ProfileHandoffDialog
+          workspace={workspace}
+          taskTitle={taskTitle}
+          subtaskTitle={subtaskTitle}
+          initialTarget={nativeHandoffTarget}
+          onRefresh={onRefresh}
+          onClose={() => {
+            setNativeHandoffOpen(false);
+            setNativeHandoffTarget(null);
+          }}
+        />
+      ) : null}
+      {traceEntry ? (
         <WorkerTraceDialog
           workspaceId={workspace.workspace_id}
-          descriptor={traceDescriptor}
-          onClose={() => setTraceDescriptor(null)}
+          {...traceEntry}
+          onClose={() => setTraceEntry(null)}
         />
       ) : null}
     </>

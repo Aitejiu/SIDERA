@@ -13,6 +13,7 @@ import type {
   HandoffCandidateList,
   HandoffProposal,
   HandoffTransition,
+  NativeHandoffProposal,
   WorkerWorkspace,
 } from "./types";
 
@@ -240,6 +241,55 @@ const proposal: HandoffProposal = {
   impact_summary: { worker_item_version: 7 },
 };
 
+const nativeProposal: NativeHandoffProposal = {
+  id: PROPOSAL_ID,
+  proposal_schema_version: 2,
+  workspace_id: WORKSPACE_ID,
+  root_task_id: ROOT_TASK_ID,
+  subtask_id: SUBTASK_ID,
+  worker_item_id: WORKER_ITEM_ID,
+  source_worker_item_version: 7,
+  version: 1,
+  proposal_hash: "a".repeat(64),
+  status: "prepared",
+  stale_reason: null,
+  created_at: "2026-10-07T00:00:00Z",
+  expires_at: "2026-10-07T00:15:00Z",
+  confirmed_at: null,
+  cancelled_at: null,
+  source_execution_id: SOURCE_EXECUTION_ID,
+  source_session_id: SOURCE_SESSION_ID,
+  source_run_id: "90000000-0000-0000-0000-000000000001",
+  source_binding_version: 2,
+  source_profile_ref: {
+    workspace_id: WORKSPACE_ID,
+    profile_id: "50000000-0000-0000-0000-000000000001",
+    revision: 1,
+  },
+  target_assignee: { kind: "profile", id: "50000000-0000-0000-0000-000000000002" },
+  target_profile_ref: {
+    workspace_id: WORKSPACE_ID,
+    profile_id: "50000000-0000-0000-0000-000000000002",
+    revision: 1,
+  },
+  target_worker_id: null,
+  handoff_reason: "Move the item to a different Profile",
+  handoff_instruction: "Continue the current validation",
+  context: {
+    source_package_id: "b0000000-0000-0000-0000-000000000001",
+    source_package_hash: "b".repeat(64),
+    source_context_version: 3,
+    target_package_id: null,
+    target_package_hash: null,
+    target_context_version: 4,
+  },
+  plan_base: {
+    snapshot_id: "10000000-0000-0000-0000-000000000001",
+    generation: 2,
+    head_version: 6,
+  },
+};
+
 const blockedTransition: HandoffTransition = {
   ...proposal,
   id: TRANSITION_ID,
@@ -375,6 +425,31 @@ describe("HandoffDialog", () => {
     expect(within(review).getByText("Proposal hash")).toBeVisible();
     expect(requestBody?.command_type).toBe("PrepareWorkerHandoff");
     expect(requestBody?.target_id).toBe(WORKER_ITEM_ID);
+  });
+
+  it("refuses legacy actions when the fetched proposal is native", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post("/api/v1/commands", () => HttpResponse.json({
+        command_id: "command-1",
+        aggregate_id: PROPOSAL_ID,
+        aggregate_version: 1,
+        event_ids: [],
+      })),
+      http.get(
+        `/api/v1/workspaces/${WORKSPACE_ID}/handoff-proposals/${PROPOSAL_ID}`,
+        () => HttpResponse.json(nativeProposal),
+      ),
+    );
+    renderDialog();
+
+    await user.type(screen.getByRole("textbox", { name: "切换原因" }), "Move to another Profile");
+    await user.type(screen.getByRole("textbox", { name: "交接指令" }), "Continue the current validation");
+    await user.click(screen.getByRole("button", { name: "查看切换方案" }));
+
+    expect(await screen.findByText("Profile 原生交接方案请使用归属窗口复核")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认切换" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "取消方案" })).not.toBeInTheDocument();
   });
 
   it("confirms in place and exposes source/target trace links with progress", async () => {

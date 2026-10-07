@@ -7,7 +7,10 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { server } from "@/test/server";
 import { workerResultInputsFixture } from "@/test/resultInputFixtures";
+import type { LocalSession } from "@/features/local-session/api";
 import { resultAction as taskResultAction, resultView as taskResultView } from "../results/testFixtures";
+import type { AgentBindingView, AgentExecutionView, NativeWorkerContextView } from "../assignments/types";
+import type { Execution } from "../trace/types";
 
 import { WorkerItemPage } from "./WorkerItemPage";
 
@@ -23,6 +26,30 @@ const WORKER_TRANSITION_ID = "a0000000-0000-0000-0000-000000000001";
 const PLAN_TRANSITION_ID = "b0000000-0000-0000-0000-000000000001";
 const PATCH_ID = "c0000000-0000-0000-0000-000000000001";
 const HANDOFF_TARGET_ID = "80000000-0000-0000-0000-000000000002";
+const BASE = `/api/v1/workspaces/${WORKSPACE_ID}`;
+const APPOINTMENT_SESSION: LocalSession = {
+  session_id: "d0000000-0000-0000-0000-000000000001",
+  workspace_id: WORKSPACE_ID,
+  principal_id: "principal-current",
+  expires_at: "2099-01-01T00:00:00Z",
+};
+
+function legacyNativeContext(): NativeWorkerContextView {
+  return {
+    workspace_id: WORKSPACE_ID,
+    worker_item_id: WORKER_ITEM_ID,
+    execution_mode: "legacy",
+    worker_item_version: workspace.worker_item.version,
+    binding: null,
+    execution: null,
+    execution_version: null,
+    context: null,
+    input_enabled: false,
+    read_only_reason: "execution_mode_legacy",
+    run: null,
+    as_of: "2026-10-07T00:00:00Z",
+  };
+}
 
 const workerResultOverview = taskResultView({
   workspace_id: WORKSPACE_ID,
@@ -245,6 +272,30 @@ const workspace = {
   },
 };
 
+function traceExecution(executionId = EXECUTION_TWO_ID): Execution {
+  return {
+    id: executionId, workspace_id: WORKSPACE_ID, task_id: workspace.current_placement.subtask_task_id,
+    worker_item_id: WORKER_ITEM_ID, lineage_id: executionId, attempt: 2, max_attempts: 3,
+    purpose: "Implement callback", status: "running", capability_requirements: [],
+    assigned_worker_id: workspace.current_runtime.worker_id,
+    assigned_worker_summary: workspace.execution_history[0]!.assigned_worker_summary!,
+    pinned_worker_id: null, pinned_worker_summary: null, binding_summary: null,
+    active_lease_id: null, last_fencing_token: 8, not_before: "2026-08-23T08:00:00Z",
+    failure_code: null, started_at: "2026-08-23T08:00:00Z", finished_at: null,
+    version: 3, stop_requested: false, source_execution_id: null, source_session_id: null,
+    created_at: "2026-08-23T08:00:00Z", updated_at: "2026-08-23T08:05:00Z",
+    adapter_forbidden: [], adapter_preferences: ["opencode"], blocked_since: null,
+    requires_operator: false, scheduling_status: "assigned", waiting_details_summary: null, waiting_reason: null,
+  };
+}
+
+function savedTraceExecution(executionId = EXECUTION_TWO_ID): AgentExecutionView {
+  return { workspace_id: WORKSPACE_ID, execution_id: executionId, root_task_id: ROOT_TASK_ID,
+    subtask_id: workspace.current_placement.subtask_task_id, worker_item_id: WORKER_ITEM_ID,
+    status: "running", updated_at: "2026-08-23T08:05:00Z", profile_ref: null,
+    binding_version: null, run_id: null, link_status: null, event_cursor: null };
+}
+
 const handoffCandidates = {
   workspace_id: WORKSPACE_ID,
   worker_item_id: WORKER_ITEM_ID,
@@ -464,6 +515,9 @@ describe("WorkerItemPage", () => {
   beforeEach(() => {
     server.resetHandlers();
     server.use(
+      http.get("/product/v1/session", () => HttpResponse.json(APPOINTMENT_SESSION)),
+      http.get(`${BASE}/assignments/worker_item/${WORKER_ITEM_ID}`, () => HttpResponse.json(null)),
+      http.get(`${BASE}/worker-items/${WORKER_ITEM_ID}/native-context`, () => HttpResponse.json(legacyNativeContext())),
       http.get(
         `/api/v1/tasks/${ROOT_TASK_ID}/graph`,
         () => HttpResponse.json({
@@ -554,7 +608,8 @@ describe("WorkerItemPage", () => {
         }],
         next_cursor: null,
       })),
-      http.get(`/api/v1/executions/${EXECUTION_TWO_ID}`, () => HttpResponse.json({ status: "running" })),
+      http.get(`/api/v1/executions/${EXECUTION_TWO_ID}`, () => HttpResponse.json(traceExecution())),
+      http.get(`${BASE}/agent-executions/${EXECUTION_TWO_ID}`, () => HttpResponse.json(savedTraceExecution())),
       http.get(`/api/v1/workspaces/${WORKSPACE_ID}/executions/${EXECUTION_TWO_ID}/context-package`, () => HttpResponse.json(makeExecutionContextPackage(CONTEXT_PACKAGE_ONE_ID, EXECUTION_TWO_ID, 4))),
       http.get(`/api/v1/workspaces/${WORKSPACE_ID}/executions/${EXECUTION_ONE_ID}/context-package`, () => HttpResponse.json(makeExecutionContextPackage(CONTEXT_PACKAGE_TWO_ID, EXECUTION_ONE_ID, 3))),
     );
@@ -919,7 +974,7 @@ describe("WorkerItemPage", () => {
     await user.click(traceButton);
 
     const dialog = await screen.findByRole("dialog", { name: "Agent Trace" });
-    expect(within(dialog).getAllByText("运行回调测试").length).toBeGreaterThan(0);
+    expect((await within(dialog).findAllByText("运行回调测试")).length).toBeGreaterThan(0);
     await user.click(within(dialog).getByRole("button", { name: "关闭 Agent Trace" }));
 
     expect(screen.queryByRole("dialog", { name: "Agent Trace" })).not.toBeInTheDocument();
@@ -934,9 +989,123 @@ describe("WorkerItemPage", () => {
     expect(screen.queryByText("Session 1 已关闭")).not.toBeInTheDocument();
     await user.click(traceButton);
     const dialog = await screen.findByRole("dialog", { name: "Agent Trace" });
-    expect(within(dialog).getAllByText("运行回调测试").length).toBeGreaterThan(0);
+    expect((await within(dialog).findAllByText("运行回调测试")).length).toBeGreaterThan(0);
     await user.click(within(dialog).getByRole("button", { name: "关闭 Agent Trace" }));
     expect(traceButton).toHaveFocus();
+  });
+
+  it.each([false, true])("opens current saved native Trace without a legacy descriptor or Session, failure=%s", async (failed) => {
+    const profileRef = { workspace_id: WORKSPACE_ID, profile_id: "e0000000-0000-0000-0000-000000000001", revision: 1 };
+    const runId = "f0000000-0000-0000-0000-000000000001";
+    const original: AgentExecutionView = { ...savedTraceExecution(), profile_ref: profileRef,
+      binding_version: 2, run_id: runId, link_status: "accepted", event_cursor: 3 };
+    const currentBinding: AgentBindingView = { workspace_id: WORKSPACE_ID, target_type: "worker_item", target_id: WORKER_ITEM_ID,
+      assignee: { kind: "profile", id: profileRef.profile_id }, profile_ref: { ...profileRef, revision: 2 },
+      version: 3, runnable: true, not_runnable_reasons: [], created_at: "2026-10-07T00:00:00Z", changed_at: "2026-10-07T00:00:00Z" };
+    const nativeContext: NativeWorkerContextView = { ...legacyNativeContext(), execution_mode: "native_profile",
+      binding: currentBinding, execution: original, execution_version: 3, context: null,
+      input_enabled: false, read_only_reason: "native_context_unavailable" };
+    let legacyReads = 0; let writes = 0; const selected: string[] = [];
+    server.use(
+      http.get(`${BASE}/assignments/worker_item/${WORKER_ITEM_ID}`, () => HttpResponse.json(currentBinding)),
+      http.get(`${BASE}/worker-items/${WORKER_ITEM_ID}/native-context`, () => HttpResponse.json(nativeContext)),
+      http.get(`${BASE}/worker-items/${WORKER_ITEM_ID}/workspace`, () => HttpResponse.json({ ...workspace,
+        trace_descriptor: null, current_runtime: { ...workspace.current_runtime, adapter_type: "agent-run", session_id: null },
+        can_intervene: false, read_only_reason: "no_active_session", intervention_context: null, plan_sync: null })),
+      http.get(`/api/v1/executions/${EXECUTION_TWO_ID}`, () => HttpResponse.json({ ...traceExecution(),
+        assigned_worker_summary: { ...traceExecution().assigned_worker_summary!, adapter_type: "agent-run" } })),
+      http.get(`${BASE}/agent-executions/${EXECUTION_TWO_ID}`, () => HttpResponse.json(original)),
+      http.get(`${BASE}/worker-items/${WORKER_ITEM_ID}/executions/:ex/native-trace`, ({ params }) => {
+        selected.push(String(params.ex));
+        return failed ? HttpResponse.json({ error: { code: "service_unavailable", message: "private-secret", details: {} } }, { status: 503 })
+          : HttpResponse.json({ workspace_id: WORKSPACE_ID, worker_item_id: WORKER_ITEM_ID, execution_id: EXECUTION_TWO_ID,
+            run_id: runId, profile_ref: profileRef, next_sequence: 3, has_more: false,
+            events: [{ run_id: runId, sequence: 3, kind: "native.original", occurred_at: "2026-10-07T00:00:00Z",
+              operation_id: null, response_id: null, data: { text: "Raw trace only in dialog" } }] });
+      }),
+      http.get("/api/v1/tasks/:root/executions/:ex/sessions/:session/trace", () => { legacyReads += 1; return HttpResponse.json({}); }),
+      http.post("*", () => { writes += 1; return HttpResponse.json({}); }),
+    );
+    const user = userEvent.setup(); renderPage();
+    expect(await screen.findByRole("heading", { name: "实现回调幂等" })).toBeVisible();
+    expect(screen.queryByText("Raw trace only in dialog")).not.toBeInTheDocument();
+    const entry = await screen.findByRole("button", { name: "查看当前 Agent Trace" });
+    expect(screen.getByRole("region", { name: "当前进展" })).toHaveTextContent("运行回调测试");
+    expect(screen.getByText("只修改这个回调重试规则")).toBeVisible();
+    await user.click(entry);
+    const dialog = await screen.findByRole("dialog", { name: "Agent Trace" });
+    if (failed) expect(await within(dialog).findByRole("alert")).toHaveTextContent("Agent Trace 暂不可用");
+    else {
+      await within(dialog).findByRole("heading", { name: "native.original" });
+      expect(within(dialog).getByText("Profile R1")).toBeVisible();
+    }
+    await user.click(within(dialog).getByRole("button", { name: "关闭 Agent Trace" }));
+    expect(entry).toHaveFocus(); expect(selected).toEqual([EXECUTION_TWO_ID]);
+    expect(screen.getByRole("textbox", { name: "介入这个 Worker" })).toBeVisible();
+    expect(screen.getByText("只修改这个回调重试规则")).toBeVisible();
+    expect(screen.queryByText("Raw trace only in dialog")).not.toBeInTheDocument();
+    expect(legacyReads).toBe(0); expect(writes).toBe(0);
+  });
+
+  it("keeps the historical activity's original Execution and R1 pins while the current native owner is R2", async () => {
+    const profileRef = { workspace_id: WORKSPACE_ID, profile_id: "e0000000-0000-0000-0000-000000000001", revision: 1 };
+    const runId = "f0000000-0000-0000-0000-000000000001";
+    const original: AgentExecutionView = { ...savedTraceExecution(EXECUTION_ONE_ID), profile_ref: profileRef,
+      status: "completed", binding_version: 2, run_id: runId, link_status: "accepted", event_cursor: 8 };
+    const current: AgentExecutionView = { ...savedTraceExecution(), profile_ref: { ...profileRef, revision: 2 },
+      binding_version: 3, run_id: "f0000000-0000-0000-0000-000000000002", link_status: "accepted", event_cursor: 12 };
+    const currentBinding: AgentBindingView = { workspace_id: WORKSPACE_ID, target_type: "worker_item", target_id: WORKER_ITEM_ID,
+      assignee: { kind: "profile", id: profileRef.profile_id }, profile_ref: current.profile_ref,
+      version: 3, runnable: true, not_runnable_reasons: [], created_at: "2026-10-07T00:00:00Z", changed_at: "2026-10-07T00:00:00Z" };
+    const nativeContext: NativeWorkerContextView = { ...legacyNativeContext(), execution_mode: "native_profile",
+      binding: currentBinding, execution: current, execution_version: 3, context: null,
+      input_enabled: false, read_only_reason: "native_context_unavailable" };
+    const selected: string[] = []; let legacyReads = 0; let writes = 0;
+    server.use(
+      http.get(`${BASE}/assignments/worker_item/${WORKER_ITEM_ID}`, () => HttpResponse.json(currentBinding)),
+      http.get(`${BASE}/worker-items/${WORKER_ITEM_ID}/native-context`, () => HttpResponse.json(nativeContext)),
+      http.get(`${BASE}/worker-items/${WORKER_ITEM_ID}/workspace`, () => HttpResponse.json({ ...workspace,
+        trace_descriptor: null, current_runtime: { ...workspace.current_runtime, adapter_type: "agent-run", session_id: null },
+        can_intervene: false, read_only_reason: "no_active_session", intervention_context: null, plan_sync: null })),
+      http.get(`${BASE}/worker-items/${WORKER_ITEM_ID}/activity`, () => HttpResponse.json({ ...firstActivityPage,
+        items: firstActivityPage.items.map((item) => ({ ...item, trace_descriptor: item.execution_id === EXECUTION_ONE_ID && item.kind === "session.closed"
+          ? { root_task_id: ROOT_TASK_ID, execution_id: EXECUTION_ONE_ID, session_id: "unknown", route: "ignored-historical-route", raw_ref: null } : null })) })),
+      http.get("/api/v1/executions/:ex", ({ params }) => HttpResponse.json({ ...traceExecution(String(params.ex)),
+        status: params.ex === EXECUTION_ONE_ID ? "completed" : "running",
+        assigned_worker_summary: { ...traceExecution().assigned_worker_summary!, adapter_type: "agent-run" } })),
+      http.get(`${BASE}/agent-executions/:ex`, ({ params }) => HttpResponse.json(params.ex === EXECUTION_ONE_ID ? original : current)),
+      http.get(`${BASE}/worker-items/${WORKER_ITEM_ID}/executions/:ex/native-trace`, ({ params }) => {
+        selected.push(String(params.ex));
+        return HttpResponse.json({ workspace_id: WORKSPACE_ID, worker_item_id: WORKER_ITEM_ID, execution_id: EXECUTION_ONE_ID,
+          run_id: runId, profile_ref: profileRef, next_sequence: 8, has_more: false,
+          events: [{ run_id: runId, sequence: 8, kind: "historical.original", occurred_at: "2026-10-07T00:00:00Z",
+            operation_id: null, response_id: null, data: { text: "Original historical Run, not the current owner" } }] });
+      }),
+      http.get("/api/v1/tasks/:root/executions/:ex/sessions/:session/trace", () => { legacyReads += 1; return HttpResponse.json({}); }),
+      http.post("*", () => { writes += 1; return HttpResponse.json({}); }),
+    );
+    const user = userEvent.setup(); renderPage();
+    await screen.findByRole("heading", { name: "实现回调幂等" });
+    expect(screen.queryByText("Original historical Run, not the current owner")).not.toBeInTheDocument();
+    expect(selected).toEqual([]);
+    await user.click(await screen.findByRole("button", { name: "系统记录" }));
+    const entry = await screen.findByRole("button", { name: "查看 Agent Trace" });
+    await user.click(entry);
+    const dialog = await screen.findByRole("dialog", { name: "Agent Trace" });
+    await within(dialog).findByRole("heading", { name: "historical.original" });
+    expect(within(dialog).getByText("Profile R1")).toBeVisible();
+    expect(within(dialog).queryByText("Profile R2")).not.toBeInTheDocument();
+    await user.click(within(dialog).getByText("原始执行", { selector: "summary" }));
+    expect(within(dialog).getByText(EXECUTION_ONE_ID)).toBeVisible();
+    expect(within(dialog).getByText(runId)).toBeVisible();
+    expect(selected).toEqual([EXECUTION_ONE_ID]);
+    await user.click(within(dialog).getByRole("button", { name: "关闭 Agent Trace" }));
+    expect(entry).toHaveFocus();
+    expect(screen.getByRole("region", { name: "当前进展" })).toHaveTextContent("运行回调测试");
+    expect(screen.getByText("只修改这个回调重试规则")).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "介入这个 Worker" })).toBeVisible();
+    expect(screen.queryByText("Original historical Run, not the current owner")).not.toBeInTheDocument();
+    expect(legacyReads).toBe(0); expect(writes).toBe(0);
   });
 
   it("keeps a retired WorkerItem visibly read-only", async () => {

@@ -33,6 +33,7 @@ from sidera_control_plane.api.dependencies import (
     get_native_worker_services,
     get_trusted_assignment_identity,
 )
+from sidera_control_plane.api.native_worker_queries import get_native_worker_reads
 from sidera_control_plane.application.agent_worker_adapter import NativeWorkerServices
 from sidera_control_plane.application.assignment_queries import AssignmentQueryService
 from sidera_control_plane.application.command_service import CommandService
@@ -42,6 +43,9 @@ from sidera_control_plane.application.execution_authority import (
     PlanningAuthorityReader,
 )
 from sidera_control_plane.application.execution_commands import ExecutionCommandHandler
+from sidera_control_plane.application.native_worker_queries import (
+    NativeWorkerQueryService,
+)
 from sidera_control_plane.application.request_authority import (
     ControlPlaneIdentity,
     ControlPlaneRequestAuthorizer,
@@ -79,6 +83,10 @@ from sidera_control_plane.domain.native_setup import (
     WorkspaceSetupRequest,
     WorkspaceSetupView,
 )
+from sidera_control_plane.domain.native_worker_views import (
+    NativeWorkerContextView,
+    NativeWorkerTraceView,
+)
 from sidera_control_plane.gateway_owner import GatewayOwner, build_gateway_owner
 from sidera_control_plane.notification_worker import build_notification_worker
 from sidera_control_plane.persistence.assignment_read_store import (
@@ -97,6 +105,9 @@ from sidera_control_plane.persistence.native_verification_sessions import (
 )
 from sidera_control_plane.persistence.native_worker_slots import SavedNativeWorkerSlots
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from sidera_control_plane.persistence.worker_workspace_query_store import (
+    SqlAlchemyWorkerWorkspaceQueryStore,
+)
 from sidera_control_plane.plan_transition_worker import build_plan_transition_worker
 from sidera_control_plane.planning_worker import (
     PlanningWorkerRuntime,
@@ -257,6 +268,7 @@ class ControlPlaneRuntime:
             self._services
         )
         self.app.dependency_overrides[get_assignment_reads] = lambda: self
+        self.app.dependency_overrides[get_native_worker_reads] = lambda: self
 
     @property
     def execution_authorizer(self) -> ExecutionAuthorizer:
@@ -1298,6 +1310,75 @@ class ControlPlaneRuntime:
     ) -> AgentBindingView | None:
         with self._assignment_queries(workspace_id, grant_id) as queries:
             return queries.read_assignment(workspace_id, target_type, target_id)
+
+    @contextmanager
+    def _native_worker_queries(
+        self, workspace_id: UUID, grant_id: UUID
+    ) -> Iterator[NativeWorkerQueryService]:
+        with self._condition:
+            if self._closed or self._closing:
+                raise AgentError("control_plane_closed", "Control plane is closed")
+            self._active_work += 1
+            self._regular_work += 1
+            self._drained.clear()
+        try:
+            authorizer = self._request_authorizer
+            current = (
+                None
+                if authorizer is None or type(grant_id) is not UUID
+                else authorizer.identity_for_grant(grant_id)
+            )
+            if (
+                authorizer is None
+                or not isinstance(current, ControlPlaneIdentity)
+                or current.grant_id != grant_id
+                or current.actor_type != "user"
+                or self._settings.local_actor_type != "user"
+                or current.principal_id != self._settings.local_actor_id
+            ):
+                raise AgentError("permission_denied", "Native worker read denied.")
+            yield NativeWorkerQueryService(
+                workspace_store=SqlAlchemyWorkerWorkspaceQueryStore(self._database),
+                assignment_store=PostgresAssignmentReadStore(self._database.session),
+                execution=self._execution,
+                observations=self._observations,
+                input_authorizer=self._execution_authorizer,
+                authorizer=authorizer,
+                identity=current,
+                principal_id=self._settings.local_actor_id,
+                workspace_id=workspace_id,
+            )
+        finally:
+            with self._condition:
+                self._active_work -= 1
+                self._regular_work -= 1
+                self._drained.clear()
+                self._condition.notify_all()
+
+    def read_native_worker_context(
+        self, workspace_id: UUID, worker_item_id: UUID, *, grant_id: UUID
+    ) -> NativeWorkerContextView:
+        with self._native_worker_queries(workspace_id, grant_id) as queries:
+            return queries.read_context(workspace_id, worker_item_id)
+
+    def read_native_worker_trace(
+        self,
+        workspace_id: UUID,
+        worker_item_id: UUID,
+        execution_id: UUID,
+        *,
+        grant_id: UUID,
+        after_sequence: int = 0,
+        limit: int = 100,
+    ) -> NativeWorkerTraceView:
+        with self._native_worker_queries(workspace_id, grant_id) as queries:
+            return queries.read_trace(
+                workspace_id,
+                worker_item_id,
+                execution_id,
+                after_sequence=after_sequence,
+                limit=limit,
+            )
 
     def read_agent_execution(
         self, workspace_id: UUID, execution_id: UUID, *, grant_id: UUID

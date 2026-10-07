@@ -1,17 +1,21 @@
 import { AlertTriangle, ArrowLeft, CheckCircle2, RefreshCw } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { ApiProblem } from "@/shared/api/client";
+import { LocalSessionButton } from "@/features/local-session/LocalSessionDialog";
+import { ProposalAssignees } from "@/features/assignments/ProposalAssignees";
 
 import {
   buildConfirmPlanRevisionCommand,
   executePlanningCommand,
   getPlanRevisionDiff,
   getPlanningRequest,
+  listPlanningRuns,
   planRevisionDiffQueryKey,
   planningRequestQueryKey,
+  planningRunsQueryKey,
 } from "./api";
 import { getTask, taskGraphQueryKey, taskQueryKey } from "@/features/tasks/api";
 import { RevisionDagDiff } from "./RevisionDagDiff";
@@ -19,6 +23,7 @@ import { RevisionDecisionSummary } from "./RevisionDecisionSummary";
 import { RevisionHierarchyDiff } from "./RevisionHierarchyDiff";
 import { RevisionImpactPanel } from "./RevisionImpactPanel";
 import type { ConfirmPlanRevisionPayload, PlanningRequest, RevisionDiff } from "./types";
+import { useNativePlanRevision } from "./useNativePlanRevision";
 
 export function PlanRevisionPage() {
   const {
@@ -52,6 +57,33 @@ export function PlanRevisionPage() {
     queryFn: ({ signal }) => getTask(workspaceId, rootTaskId, signal),
     enabled: Boolean(workspaceId && rootTaskId),
   });
+  const runsQuery = useQuery({
+    queryKey: planningRunsQueryKey(workspaceId, planningRequestId),
+    queryFn: ({ signal }) => listPlanningRuns(workspaceId, planningRequestId, signal),
+    enabled: request?.kind === "revision" && Boolean(workspaceId && planningRequestId),
+    retry: false,
+  });
+  const refreshRevisionViews = useCallback(async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: planningRequestQueryKey(workspaceId, planningRequestId) }),
+      queryClient.invalidateQueries({ queryKey: planningRunsQueryKey(workspaceId, planningRequestId) }),
+      queryClient.invalidateQueries({ queryKey: planRevisionDiffQueryKey(workspaceId, planningRequestId) }),
+      queryClient.invalidateQueries({ queryKey: taskQueryKey(workspaceId, rootTaskId) }),
+      queryClient.invalidateQueries({ queryKey: taskGraphQueryKey(workspaceId, rootTaskId) }),
+      queryClient.invalidateQueries({ queryKey: ["task-overview", workspaceId, rootTaskId] }),
+      queryClient.invalidateQueries({ queryKey: ["plan-transitions", workspaceId, rootTaskId] }),
+    ]);
+  }, [planningRequestId, queryClient, rootTaskId, workspaceId]);
+  const nativeRevision = useNativePlanRevision({
+    workspaceId,
+    rootTaskId,
+    requestId: planningRequestId,
+    request,
+    diff: diffQuery.data,
+    rootTask: taskQuery.data,
+    runs: runsQuery.data?.items,
+    onRefresh: refreshRevisionViews,
+  });
 
   if (requestQuery.isPending) {
     return <PlanRevisionState title="正在读取计划调整" detail="正在恢复当前方案和变更范围。" />;
@@ -79,7 +111,7 @@ export function PlanRevisionPage() {
 
   const diff = diffQuery.data;
   const rootTitle = taskQuery.data?.title ?? rootTitleFromDiff(diff) ?? "根任务";
-  const isStale = request.status === "stale"
+  const isStale = nativeRevision.stale || request.status === "stale"
     || request.status === "conflicted"
     || request.revision_freshness?.base_fresh === false
     || diff?.freshness.base_fresh === false;
@@ -91,14 +123,15 @@ export function PlanRevisionPage() {
   const baseFresh = !isStale
     && diff?.freshness.base_fresh !== false;
   const isProposalReady = isRevisionReady(request.status);
-  const canConfirm = isProposalReady
+  const legacyCanConfirm = nativeRevision.mode === "legacy" && isProposalReady
     && diff !== undefined
     && baseFresh
     && request.current_proposal_revision !== null
     && request.current_proposal_content_hash !== null;
+  const visibleError = nativeRevision.mode === "legacy" ? commandError : nativeRevision.error;
 
   async function confirmRevision() {
-    if (!canConfirm || diff === undefined || revisionRequest.current_proposal_revision === null || revisionRequest.current_proposal_content_hash === null) {
+    if (!legacyCanConfirm || diff === undefined || revisionRequest.current_proposal_revision === null || revisionRequest.current_proposal_content_hash === null) {
       return;
     }
     const payload: ConfirmPlanRevisionPayload = {
@@ -161,10 +194,10 @@ export function PlanRevisionPage() {
         </div>
       </header>
 
-      {commandError ? (
+      {visibleError ? (
         <div className="plan-revision-page__message plan-revision-page__message--error" role="alert">
           <AlertTriangle size={15} aria-hidden="true" />
-          <span>{commandError}</span>
+          <span>{visibleError}</span>
         </div>
       ) : null}
       {commandAccepted ? (
@@ -174,11 +207,45 @@ export function PlanRevisionPage() {
         </div>
       ) : null}
 
+      {nativeRevision.mode !== "legacy" && nativeRevision.nativeHint && !nativeRevision.sessionValid ? (
+        <div className="plan-revision-page__message" role="status">
+          <span>需要当前工作区的有效本地会话</span>
+          <LocalSessionButton workspaceId={workspaceId} onAuthorized={nativeRevision.onSessionAuthorized} />
+        </div>
+      ) : null}
+
+      {nativeRevision.command.original !== null ? (
+        <div className="plan-revision-page__message" role="group" aria-label="原始命令恢复">
+          <span>{nativeRevisionStatusLabel(nativeRevision.command.status)}</span>
+          {nativeRevision.command.unresolved ? (
+            <button
+              className="quiet-button"
+              type="button"
+              disabled={!nativeRevision.sessionValid || nativeRevision.command.busy}
+              onClick={() => void nativeRevision.command.lookupOriginal()}
+            >
+              {nativeRevision.command.busy ? "正在查询" : "核对原始命令"}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
       {isStale ? (
         <section className="plan-revision-page__stale" role="alert" aria-labelledby="revision-stale-title">
           <div>
             <strong id="revision-stale-title">当前基准已过期</strong>
             <p>活动计划已经变化，必须重新读取最新 Revision 后才能确认。</p>
+            {nativeRevision.mode !== "legacy" ? (
+              <button
+                className="quiet-button"
+                type="button"
+                disabled={!nativeRevision.sessionValid || nativeRevision.revisitBusy
+                  || nativeRevision.command.unresolved || nativeRevision.command.busy}
+                onClick={() => void nativeRevision.revisit()}
+              >
+                {nativeRevision.revisitBusy ? "正在重新读取" : "重新审阅最新 Revision"}
+              </button>
+            ) : null}
           </div>
           <div className="plan-revision-page__stale-reasons">
             {staleReasons.map((reason) => <span key={reason}>{reason}</span>)}
@@ -214,18 +281,75 @@ export function PlanRevisionPage() {
             <div className="plan-revision-page__loading" role="status">当前状态没有可审阅的变更范围。</div>
           )}
 
+          {nativeRevision.mode !== "legacy" && nativeRevision.nativeHint
+            && !isRevisionTerminal(request.status) && nativeRevision.targets.length > 0 ? (
+              <section className="plan-revision-page__review" aria-labelledby="revision-owner-title">
+                <div>
+                  <span className="eyebrow">REVISION OWNERS</span>
+                  <h2 id="revision-owner-title">负责人</h2>
+                </div>
+                <ProposalAssignees
+                  workspaceId={workspaceId}
+                  principalId={nativeRevision.session?.principal_id ?? ""}
+                  targets={nativeRevision.targets}
+                  profiles={nativeRevision.profiles}
+                  choices={nativeRevision.choices}
+                  reusedBindings={nativeRevision.reusedBindings}
+                  onChange={nativeRevision.onChoiceChange}
+                  disabled={!nativeRevision.sessionValid || nativeRevision.stale
+                    || nativeRevision.command.unresolved || nativeRevision.command.busy
+                    || nativeRevision.command.status === "applied"}
+                />
+                {nativeRevision.missingOwnerReason ? (
+                  <p role="status">{nativeRevision.missingOwnerReason}</p>
+                ) : null}
+              </section>
+            ) : null}
+
           <div className="plan-revision-page__actions">
             <p className="plan-revision-page__actions-note">新计划会立即成为活动目标，Worker 随后异步同步。</p>
-            <button
-              className="primary-button"
-              type="button"
-              disabled={!canConfirm || pending}
-              aria-busy={pending}
-              onClick={() => void confirmRevision()}
-            >
-              <CheckCircle2 size={15} aria-hidden="true" />
-              {pending ? "正在启用新计划" : "确认并启用新计划"}
-            </button>
+            {nativeRevision.mode === "legacy" ? (
+              <button
+                className="primary-button"
+                type="button"
+                disabled={!legacyCanConfirm || pending}
+                aria-busy={pending}
+                onClick={() => void confirmRevision()}
+              >
+                <CheckCircle2 size={15} aria-hidden="true" />
+                {pending ? "正在启用新计划" : "确认并启用新计划"}
+              </button>
+            ) : (
+              <>
+                {nativeRevision.outcome === "command_applied" ? (
+                  <div className="plan-revision-page__message" role="status">原始命令已处理，但新计划状态尚未核实。</div>
+                ) : null}
+                {nativeRevision.outcome === "base_conflicted" ? (
+                  <div className="plan-revision-page__message plan-revision-page__message--error" role="alert">
+                    活动计划基准已变化；原始确认已处理，但新计划没有启用。
+                  </div>
+                ) : null}
+                {nativeRevision.outcome === "plan_enabled" ? (
+                  <div className="plan-revision-page__message plan-revision-page__message--success" role="status">
+                    <CheckCircle2 size={15} aria-hidden="true" />
+                    <span>新计划已启用，Worker 将按受影响分支异步收敛。</span>
+                  </div>
+                ) : null}
+                {nativeRevision.mode === "unavailable" ? (
+                  <p role="status">{nativeRevision.disabledReason}</p>
+                ) : null}
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={!nativeRevision.canConfirm || nativeRevision.command.busy || nativeRevision.revisitBusy}
+                  aria-busy={nativeRevision.command.busy}
+                  onClick={() => void nativeRevision.confirm()}
+                >
+                  <CheckCircle2 size={15} aria-hidden="true" />
+                  {nativeRevision.command.busy ? "正在确认计划调整" : "确认并启用新计划"}
+                </button>
+              </>
+            )}
             <Link className="quiet-button" to={`/workspaces/${workspaceId}/tasks/${rootTaskId}`}>
               返回任务
             </Link>
@@ -345,4 +469,14 @@ function generationLabel(diff: RevisionDiff | undefined, request: PlanningReques
 function rootTitleFromDiff(diff: RevisionDiff | undefined): string | undefined {
   const path = diff?.affected_branch_paths[0];
   return path?.split(" / ")[0] || undefined;
+}
+
+function nativeRevisionStatusLabel(status: string): string {
+  switch (status) {
+    case "pending": return "原始确认仍在处理中";
+    case "unknown": return "原始确认结果待核对";
+    case "applied": return "原始确认已处理";
+    case "rejected": return "原始确认被拒绝";
+    default: return "原始确认状态不可用";
+  }
 }

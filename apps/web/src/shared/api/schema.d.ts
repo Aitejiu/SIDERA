@@ -1509,6 +1509,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/executions/{execution_id}/native-trace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Native Worker Trace */
+        get: operations["readNativeWorkerTrace"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/handoff": {
         parameters: {
             query?: never;
@@ -1552,6 +1569,23 @@ export interface paths {
         };
         /** List Worker Item Knowledge Submissions */
         get: operations["list_worker_item_knowledge_submissions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/native-context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Native Worker Context */
+        get: operations["readNativeWorkerContext"];
         put?: never;
         post?: never;
         delete?: never;
@@ -4089,7 +4123,6 @@ export interface components {
              */
             workspace_id: string;
         };
-        JsonValue: unknown;
         /** KnowledgeRevisionRefPayload */
         KnowledgeRevisionRefPayload: {
             /** Ordinal */
@@ -4753,6 +4786,112 @@ export interface components {
             /** Selected Model */
             selected_model: string | null;
             state: components["schemas"]["RunState"];
+        };
+        /** NativeWorkerContextAddress */
+        NativeWorkerContextAddress: {
+            /** Binding Version */
+            binding_version: number;
+            /** Context Version */
+            context_version: number;
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /**
+             * Execution Mode
+             * @constant
+             */
+            execution_mode: "native_profile";
+            /** Plan Generation */
+            plan_generation: number;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /**
+             * Session Id
+             * Format: uuid
+             */
+            session_id: string;
+            /** Session Version */
+            session_version: number;
+            /**
+             * Worker Id
+             * Format: uuid
+             */
+            worker_id: string;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+        };
+        /** NativeWorkerContextView */
+        NativeWorkerContextView: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            binding: components["schemas"]["AgentBindingView"] | null;
+            context: components["schemas"]["NativeWorkerContextAddress"] | null;
+            execution: components["schemas"]["AgentExecutionView"] | null;
+            /**
+             * Execution Mode
+             * @enum {string}
+             */
+            execution_mode: "native_profile" | "legacy" | "unassigned";
+            /** Execution Version */
+            execution_version?: number | null;
+            /** Input Enabled */
+            input_enabled: boolean;
+            /** Read Only Reason */
+            read_only_reason: string | null;
+            run: components["schemas"]["NativeRunView"] | null;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+            /** Worker Item Version */
+            worker_item_version: number;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** NativeWorkerTraceView */
+        NativeWorkerTraceView: {
+            /** Events */
+            events: components["schemas"]["RunEvent"][];
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /** Has More */
+            has_more: boolean;
+            /** Next Sequence */
+            next_sequence: number;
+            profile_ref: components["schemas"]["ProfileRef"];
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
         };
         /** NotificationAttemptPageResponse */
         NotificationAttemptPageResponse: {
@@ -7758,6 +7897,31 @@ export interface components {
             /** Waiting Count */
             waiting_count: number;
         };
+        /** RunEvent */
+        RunEvent: {
+            /** Data */
+            data: {
+                [key: string]: components["schemas"]["sidera_agents__contracts__JsonValue"];
+            };
+            /** Kind */
+            kind: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Operation Id */
+            operation_id: string | null;
+            /** Response Id */
+            response_id: string | null;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /** Sequence */
+            sequence: number;
+        };
         /**
          * RunState
          * @enum {string}
@@ -9743,7 +9907,7 @@ export interface components {
             run_id: string;
             /** Steps */
             steps: {
-                [key: string]: components["schemas"]["JsonValue"];
+                [key: string]: components["schemas"]["pydantic__types__JsonValue"];
             }[];
             /** Summary */
             summary: string;
@@ -10108,6 +10272,10 @@ export interface components {
              */
             workspace_id: string;
         };
+        pydantic__types__JsonValue: unknown;
+        sidera_agents__contracts__JsonValue: boolean | number | string | components["schemas"]["sidera_agents__contracts__JsonValue"][] | {
+            [key: string]: components["schemas"]["sidera_agents__contracts__JsonValue"];
+        } | null;
     };
     responses: never;
     parameters: never;
@@ -13063,6 +13231,42 @@ export interface operations {
             };
         };
     };
+    readNativeWorkerTrace: {
+        parameters: {
+            query?: {
+                after_sequence?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                worker_item_id: string;
+                execution_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NativeWorkerTraceView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_worker_item_handoff: {
         parameters: {
             query?: never;
@@ -13149,6 +13353,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["KnowledgeSubmissionPageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readNativeWorkerContext: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                worker_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NativeWorkerContextView"];
                 };
             };
             /** @description Validation Error */

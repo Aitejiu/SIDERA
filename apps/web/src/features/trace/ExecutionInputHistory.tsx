@@ -35,9 +35,14 @@ export function ExecutionInputHistory({ inputs }: { inputs: ExecutionInput[] }) 
 
 function inputStatusLabel(status: string): string {
   const labels: Record<string, string> = {
+    accepted: "已接受",
     queued: "已排队",
+    dispatching: "投递中",
     delivered: "已投递",
     blocked: "已阻塞",
+    failed: "投递失败",
+    cancelled: "已取消",
+    superseded: "已失效",
     canceled: "已取消",
     rejected: "已拒绝",
   };

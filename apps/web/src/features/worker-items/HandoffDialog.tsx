@@ -18,7 +18,15 @@ import {
   prepareWorkerHandoff,
 } from "./api";
 import { HandoffProgress } from "./HandoffProgress";
-import type { HandoffCandidate, HandoffCandidateList, HandoffProposal, WorkerWorkspace } from "./types";
+import {
+  isLegacyHandoffProposal,
+  isNativeHandoffProposal,
+  type HandoffCandidate,
+  type HandoffCandidateList,
+  type HandoffProposal,
+  type NativeHandoffProposal,
+  type WorkerWorkspace,
+} from "./types";
 
 type HandoffDialogStep = "select" | "review" | "progress";
 
@@ -59,6 +67,9 @@ export function HandoffDialog({
     queryFn: ({ signal }) => getHandoffProposal(workspace.workspace_id, proposalId ?? "", signal),
     enabled: proposalId !== null,
   });
+  const fetchedProposal = proposalQuery.data;
+  const legacyProposal = isLegacyHandoffProposal(fetchedProposal) ? fetchedProposal : undefined;
+  const nativeProposal = isNativeHandoffProposal(fetchedProposal) ? fetchedProposal : undefined;
 
   const eligibleCandidates = (candidates?.candidates ?? []).filter((candidate) => candidate.eligible);
   const selectedWorkerId = selectedWorkerIdState !== null
@@ -234,7 +245,8 @@ export function HandoffDialog({
       ) : null}
       {step === "review" ? (
         <ReviewDialog
-          proposal={proposalQuery.data}
+          proposal={legacyProposal}
+          nativeProposal={nativeProposal}
           isPending={proposalQuery.isPending}
           error={proposalQuery.error}
           status={status}
@@ -246,10 +258,10 @@ export function HandoffDialog({
             setErrorMessage(null);
           }}
           onCancel={() => {
-            if (proposalQuery.data) void cancel(proposalQuery.data);
+            if (legacyProposal) void cancel(legacyProposal);
           }}
           onConfirm={() => {
-            if (proposalQuery.data) void confirm(proposalQuery.data);
+            if (legacyProposal) void confirm(legacyProposal);
           }}
         />
       ) : null}
@@ -345,6 +357,7 @@ function CandidateCard({
 
 function ReviewDialog({
   proposal,
+  nativeProposal,
   isPending,
   error,
   status,
@@ -356,6 +369,7 @@ function ReviewDialog({
   onConfirm,
 }: {
   proposal: HandoffProposal | undefined;
+  nativeProposal: NativeHandoffProposal | undefined;
   isPending: boolean;
   error: unknown;
   status: "idle" | "submitting" | "cancelling";
@@ -378,9 +392,12 @@ function ReviewDialog({
           <X size={16} aria-hidden="true" />
         </button>
       </div>
-      {isPending ? <div className="handoff-dialog__notice" role="status">正在读取不可变切换方案</div> : null}
-      {error ? <div className="handoff-dialog__error" role="alert"><CircleAlert size={14} aria-hidden="true" />{describeError(error)}</div> : null}
-      {proposal ? (
+      {nativeProposal ? (
+        <div className="handoff-dialog__notice" role="status">Profile 原生交接方案请使用归属窗口复核</div>
+      ) : null}
+      {!nativeProposal && isPending ? <div className="handoff-dialog__notice" role="status">正在读取不可变切换方案</div> : null}
+      {!nativeProposal && error ? <div className="handoff-dialog__error" role="alert"><CircleAlert size={14} aria-hidden="true" />{describeError(error)}</div> : null}
+      {!nativeProposal && proposal ? (
         <div className="handoff-dialog__body">
           {stale ? <div className="handoff-dialog__stale" role="alert"><CircleAlert size={15} aria-hidden="true" /><span><strong>方案已失效</strong>{proposal.stale_reason ? `：${proposal.stale_reason}` : ""}</span></div> : null}
           <section className="handoff-review-scope">
@@ -412,11 +429,17 @@ function ReviewDialog({
         </div>
       ) : null}
       <div className="handoff-dialog__actions">
-        <button className="quiet-button" type="button" onClick={onBack} disabled={status !== "idle"}>返回选择</button>
-        {proposal ? <button className="quiet-button" type="button" onClick={onCancel} disabled={status !== "idle"}>{status === "cancelling" ? "取消中" : "取消方案"}</button> : null}
-        <button className="primary-button" type="button" onClick={onConfirm} disabled={!proposal || stale || status !== "idle"}>
-          {status === "submitting" ? "确认中" : "确认切换"}
-        </button>
+        {nativeProposal ? (
+          <button className="quiet-button" type="button" onClick={onClose}>关闭</button>
+        ) : (
+          <>
+            <button className="quiet-button" type="button" onClick={onBack} disabled={status !== "idle"}>返回选择</button>
+            {proposal ? <button className="quiet-button" type="button" onClick={onCancel} disabled={status !== "idle"}>{status === "cancelling" ? "取消中" : "取消方案"}</button> : null}
+            <button className="primary-button" type="button" onClick={onConfirm} disabled={!proposal || stale || status !== "idle"}>
+              {status === "submitting" ? "确认中" : "确认切换"}
+            </button>
+          </>
+        )}
       </div>
     </section>
   );

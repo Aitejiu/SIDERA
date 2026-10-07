@@ -145,6 +145,10 @@ function installHandlers(request: Record<string, unknown> = revision) {
       () => HttpResponse.json(diff),
     ),
     http.get(
+      `/api/v1/workspaces/${WORKSPACE_ID}/planning-requests/${REQUEST_ID}/runs`,
+      () => HttpResponse.json({ items: [] }),
+    ),
+    http.get(
       `/api/v1/tasks/${ROOT_TASK_ID}`,
       () => HttpResponse.json({
         id: ROOT_TASK_ID,
