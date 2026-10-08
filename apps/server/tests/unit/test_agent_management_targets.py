@@ -1514,6 +1514,80 @@ def test_owned_vite_starts_installed_cli_without_pnpm(
     assert popen_kwargs["start_new_session"] is True
 
 
+@pytest.mark.parametrize(
+    ("knowledge_port", "knowledge_token"),
+    [
+        (12345, None),
+        (None, SecretStr("owned")),
+        (True, SecretStr("owned")),
+        (0, SecretStr("owned")),
+        (65536, SecretStr("owned")),
+        ("12345", SecretStr("owned")),
+        (12345, SecretStr("")),
+    ],
+)
+def test_owned_vite_rejects_incomplete_knowledge_binding_before_process(
+    tmp_path, no_database_connections, monkeypatch, knowledge_port, knowledge_token
+):
+    monkeypatch.setattr(
+        desktop_module,
+        "_vite_environment",
+        lambda *_: pytest.fail("Rejected binding reached toolchain setup"),
+    )
+    with pytest.raises(ProductTargetError, match="fresh_knowledge_binding_refused"):
+        desktop_module.start_owned_vite(
+            tmp_path=tmp_path,
+            web_root=tmp_path,
+            backend_url="http://127.0.0.1:32100",
+            port=32101,
+            resource_owner=SimpleNamespace(vite=None),
+            knowledge_port=knowledge_port,
+            knowledge_token=knowledge_token,
+        )
+
+
+def test_owned_vite_binds_knowledge_only_in_child_environment(
+    tmp_path, no_database_connections, monkeypatch
+):
+    token = SecretStr("synthetic-owned-knowledge")
+    captured = {}
+    process = SimpleNamespace(poll=lambda: None)
+    response = nullcontext(SimpleNamespace(status=200))
+    monkeypatch.setattr(
+        desktop_module,
+        "_vite_environment",
+        lambda *_: ({"PATH": "/usr/bin:/bin"}, "inert-node", "inert-vite.js"),
+    )
+    monkeypatch.setattr(
+        desktop_module.subprocess,
+        "Popen",
+        lambda argv, **kw: captured.update(argv=argv, **kw) or process,
+    )
+    monkeypatch.setattr(desktop_module, "urlopen", lambda *_a, **_kw: response)
+    owner = SimpleNamespace(vite=None)
+    assert (
+        desktop_module.start_owned_vite(
+            tmp_path=tmp_path,
+            web_root=tmp_path,
+            backend_url="http://127.0.0.1:32100",
+            port=32101,
+            resource_owner=owner,
+            knowledge_port=32102,
+            knowledge_token=token,
+        )
+        is process
+    )
+    assert captured["env"] == {
+        "PATH": "/usr/bin:/bin",
+        "SIDERA_WEB_BACKEND": "native",
+        "SIDERA_WEB_PRODUCT_URL": "http://127.0.0.1:32100",
+        "SIDERA_WEB_KNOWLEDGE_SERVICE_PORT": "32102",
+        "SIDERA_WEB_KNOWLEDGE_TOKEN": token.get_secret_value(),
+    }
+    assert token.get_secret_value() not in " ".join(captured["argv"])
+    assert owner.vite is process
+
+
 def test_owned_vite_refuses_missing_installed_cli_before_popen(
     tmp_path, no_database_connections, monkeypatch
 ) -> None:
@@ -1629,7 +1703,12 @@ def test_reserved_listener_close_failure_prevents_guard_release(
 ) -> None:
     class FakeGuard:
         def __init__(self):
+            self.inspect_calls = 0
             self.release_calls = 0
+
+        def inspect(self):
+            self.inspect_calls += 1
+            raise AssertionError("incomplete listener cleanup inspected guards")
 
         def release(self):
             self.release_calls += 1
@@ -1657,7 +1736,7 @@ def test_reserved_listener_close_failure_prevents_guard_release(
         lambda guards: {component: {} for component in COMPONENTS},
     )
     monkeypatch.setattr(
-        desktop_module, "_bind_listener", lambda host: (listener, 55439)
+        desktop_module, "_bind_listener", lambda host, port=0: (listener, 55439)
     )
     monkeypatch.setattr(
         desktop_module,
@@ -1666,12 +1745,143 @@ def test_reserved_listener_close_failure_prevents_guard_release(
     )
 
     fixture = desktop_module.management_desktop_lab.__wrapped__(tmp_path)
-    with pytest.raises(ProductTargetError, match="inert_setup_refused"):
+    with pytest.raises(ProductTargetError, match="fresh_context_refused"):
         next(fixture)
 
     assert listener.close_calls == 1
+    assert guard.inspect_calls == 0
     assert guard.release_calls == 0
-    assert any(
+    assert (
+        sum(
+            resource is listener
+            for resource in desktop_module._retained_desktop_resources
+        )
+        == 1
+    )
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("raises", [False, True])
+def test_context_rejection_retains_listener_when_close_is_incomplete(
+    tmp_path, no_database_connections, monkeypatch, existing, raises
+) -> None:
+    class FakeListener:
+        close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+            if raises:
+                raise OSError("inert close refusal")
+
+        def fileno(self):
+            return 23
+
+    admission = desktop_module.select_management_desktop_targets(
+        _fresh_desktop_environ(tmp_path)
+    )
+    assert admission is not None
+    paths = desktop_module.fresh_desktop_context_paths(admission)
+    if existing:
+        for directory in (
+            admission.evidence_directory,
+            paths["directory"].parent,
+            paths["directory"],
+        ):
+            desktop_module._ensure_private_context_directory(directory)
+        inventory_module.write_private_json(
+            paths["file"],
+            {
+                "schema_version": 1,
+                "allocation_id": admission.allocation_id,
+                "target_identity": desktop_module._expected_target_facts(
+                    admission.targets
+                ),
+                "workspace_id": str(
+                    desktop_module.management_workspace_id(admission.allocation_id)
+                ),
+                "backend_port": 55439,
+                "vite_port": 55440,
+            },
+        )
+
+    listener = FakeListener()
+    bind_calls = []
+
+    def bind(host, port=0):
+        bind_calls.append((host, port))
+        return listener, 55441 if existing else 55439
+
+    def reserve(_host):
+        if existing:
+            raise AssertionError("existing context reallocated a port")
+        raise ProductTargetError("inert_setup_refused")
+
+    monkeypatch.setattr(desktop_module, "_bind_listener", bind)
+    monkeypatch.setattr(desktop_module, "_reserve_port", reserve)
+    with pytest.raises(ProductTargetError, match="fresh_context_refused"):
+        desktop_module.load_or_create_fresh_context(admission)
+
+    assert bind_calls == [("127.0.0.1", 55439 if existing else 0)]
+    assert listener.close_calls == 1
+    assert (
+        sum(
+            resource is listener
+            for resource in desktop_module._retained_desktop_resources
+        )
+        == 1
+    )
+
+
+def test_context_rejection_releases_idle_guards_after_successful_listener_close(
+    tmp_path, no_database_connections, monkeypatch
+) -> None:
+    class FakeGuard:
+        inspect_calls = 0
+        release_calls = 0
+
+        def inspect(self):
+            self.inspect_calls += 1
+            return {"idle": {"active_connections": 0, "held_locks": 0}}
+
+        def release(self):
+            self.release_calls += 1
+            return True
+
+    class FakeListener:
+        close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+        def fileno(self):
+            return -1 if self.close_calls else 23
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("rejected context started a runtime or server")
+
+    guard = FakeGuard()
+    listener = FakeListener()
+    monkeypatch.setattr(desktop_module.os, "environ", _fresh_desktop_environ(tmp_path))
+    monkeypatch.setattr(desktop_module, "acquire_guards", lambda _targets: [guard])
+    monkeypatch.setattr(
+        desktop_module, "validate_fresh_empty_targets", lambda _guards: {}
+    )
+    monkeypatch.setattr(
+        desktop_module, "_bind_listener", lambda host, port=0: (listener, 55439)
+    )
+    monkeypatch.setattr(
+        desktop_module,
+        "_reserve_port",
+        lambda _host: (_ for _ in ()).throw(ProductTargetError("inert_setup_refused")),
+    )
+    for name in ("build_product_runtime", "start_owned_backend", "start_owned_vite"):
+        monkeypatch.setattr(desktop_module, name, unexpected)
+    fixture = desktop_module.management_desktop_lab.__wrapped__(tmp_path)
+    with pytest.raises(ProductTargetError, match="fresh_context_refused"):
+        next(fixture)
+
+    assert (listener.close_calls, guard.inspect_calls, guard.release_calls) == (1, 1, 1)
+    assert not any(
         resource is listener for resource in desktop_module._retained_desktop_resources
     )
 

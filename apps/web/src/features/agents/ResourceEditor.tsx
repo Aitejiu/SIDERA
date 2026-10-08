@@ -6,7 +6,7 @@ import { useWorkspaceTabs } from "@/app/WorkspaceTabs";
 import { loadTabs, reduceTabs, registerDirectRoute, saveTabs, type ConfigurationRecovery } from "@/app/workspaceTabsState";
 import { ConfigurationNavigationGuard, EnvironmentFields } from "./AgentSettings";
 import { CredentialPicker } from "./CredentialPicker";
-import { AgentApiProblem, listConnections, readConfigurationRequest, readResource, saveResource } from "./api";
+import { AgentApiProblem, listConnections, listProductToolConnections, readConfigurationRequest, readResource, saveResource } from "./api";
 import { confirmed, sameRef, type ConfigurationResult, type ResourceDraft, type ResourceRef, type ResourceView } from "./types";
 
 type Mode = "inline" | "source" | "connection" | "stdio" | "http";
@@ -30,6 +30,14 @@ export function ResourceEditor({ workspaceId, resource, kind, onSaved, onCancel 
   const [credentialGuard, setCredentialGuard] = useState({ dirty: false, unsettled: false });
   const mounted = useRef(false), submitting = useRef(false), restored = useRef(false);
   const connections = useQuery({ queryKey: ["agent-connections", workspaceId], queryFn: () => listConnections(workspaceId), enabled: mode === "connection" });
+  const toolConnections = useQuery({ queryKey: ["product-tool-connections", workspaceId], queryFn: () => listProductToolConnections(workspaceId), enabled: kind === "mcp" && mode === "connection" });
+  const connectionMetadata = [...(connections.isSuccess ? connections.data : []), ...(kind === "mcp" && toolConnections.isSuccess ? toolConnections.data : [])];
+  const connectionMetadataUnavailable = !connections.isSuccess && (kind !== "mcp" || !toolConnections.isSuccess);
+  function eligibleConnection(id: unknown) {
+    const matches = connectionMetadata.filter(item => item.connection_id === id);
+    return !connectionMetadataUnavailable && matches.length === 1 && matches[0]?.workspace_id === workspaceId && matches[0]?.availability === "configured";
+  }
+  const connectionOptions = connectionMetadata.filter(item => item.workspace_id === workspaceId).filter((item, index, items) => items.findIndex(other => other.connection_id === item.connection_id) === index);
   const unsettled = intent !== null && (intent.result === null || !confirmed(intent.result) && intent.result.state !== "rejected");
   const dirty = JSON.stringify(draft) !== JSON.stringify(baseline);
   const conflicted = intent?.result?.state === "rejected";
@@ -78,7 +86,7 @@ export function ResourceEditor({ workspaceId, resource, kind, onSaved, onCancel 
   function setting(key: string, value: ResourceDraft["settings"][string]) { edit({ settings: { ...draft.settings, [key]: value } }); }
   async function save() {
     if (submitting.current || unsettled || credentialGuard.dirty || credentialGuard.unsettled || conflicted || !dirty) return;
-    if (mode === "connection" && !connections.data?.some(item => item.workspace_id === workspaceId && item.connection_id === draft.settings.connection_id && item.availability === "configured")) { setError("受信连接不可用"); return; }
+    if (mode === "connection" && !eligibleConnection(draft.settings.connection_id)) { setError("受信连接不可用"); return; }
     const operationId = crypto.randomUUID(), original = structuredClone(draft);
     try { remember({ operationId }); } catch { setError("无法保留原资源保存请求"); return; }
     submitting.current = true; setPending(true); setIntent({ operationId, result: null }); setError(null);
@@ -117,7 +125,7 @@ export function ResourceEditor({ workspaceId, resource, kind, onSaved, onCancel 
           {([["provider", "来源提供方"], ["key", "来源键"], ["version", "来源版本"]] as const).map(([key, label]) => <label className="worker-runtime-field" key={key}><span>{label}</span><input required value={text(source[key])} onChange={event => setting("source_ref", { ...source, [key]: event.target.value })} /></label>)}
           <label className="worker-runtime-field"><span>SHA256</span><input required pattern="[a-fA-F0-9]{64}" value={text(draft.settings.content_hash)} onChange={event => setting("content_hash", event.target.value)} /></label>
         </> : null}
-        {mode === "connection" ? <label className="worker-runtime-field agent-form-fields__wide"><span>受信连接</span><select required value={text(draft.settings.connection_id)} disabled={connections.isPending || connections.isError} onChange={event => setting("connection_id", event.target.value)}><option value="">选择连接</option>{connections.data?.filter(item => item.workspace_id === workspaceId).map(item => <option key={item.connection_id} value={item.connection_id} disabled={item.availability !== "configured"}>{item.name} · R{item.revision} · {item.availability}</option>)}</select>{connections.isError ? <small role="alert">连接元数据不可用</small> : null}</label> : null}
+        {mode === "connection" ? <label className="worker-runtime-field agent-form-fields__wide"><span>受信连接</span><select aria-label="受信连接" required value={text(draft.settings.connection_id)} disabled={connectionMetadataUnavailable} onChange={event => setting("connection_id", event.target.value)}><option value="">选择连接</option>{connectionOptions.map(item => <option key={item.connection_id} value={item.connection_id} disabled={!eligibleConnection(item.connection_id)}>{item.name}{"revision" in item ? ` · R${item.revision}` : ""} · {item.availability}</option>)}</select>{connections.isError ? <small role="alert">连接元数据不可用</small> : null}{kind === "mcp" && toolConnections.isError ? <small role="alert">任务工具连接元数据不可用</small> : null}</label> : null}
         {mode === "stdio" ? <>
           <label className="worker-runtime-field agent-form-fields__wide"><span>可执行文件绝对路径</span><input required value={command[0] ?? ""} onChange={event => setting("command", [event.target.value, ...command.slice(1)])} /></label>
           <div className="agent-form-fields__wide">{command.slice(1).map((item, index) => <div className="agent-environment__row" key={index}><label className="worker-runtime-field"><span>参数 {index + 1}</span><input required value={item} onChange={event => setting("command", command.map((value, i) => i === index + 1 ? event.target.value : value))} /></label><button className="icon-button" type="button" aria-label={`移除参数 ${index + 1}`} title="移除参数" onClick={() => setting("command", command.filter((_, i) => i !== index + 1))}><Trash2 size={14} /></button></div>)}<button className="quiet-button" type="button" onClick={() => setting("command", [...command, ""])}><Plus size={14} />添加参数</button></div>
@@ -126,7 +134,7 @@ export function ResourceEditor({ workspaceId, resource, kind, onSaved, onCancel 
         {mode === "http" ? <><label className="worker-runtime-field agent-form-fields__wide"><span>MCP 地址</span><input type="url" required value={text(draft.settings.url)} onChange={event => setting("url", event.target.value)} /></label><HeaderFields value={stringMap(draft.settings.headers)} onChange={value => setting("headers", value)} /></> : null}
         <CredentialPicker workspaceId={workspaceId} value={draft.secret_refs} onChange={secret_refs => edit({ secret_refs })} onGuardChange={setCredentialGuard} />
       </fieldset>
-      <div className="agent-form-actions"><button className="quiet-button" type="submit" disabled={pending || unsettled || credentialGuard.dirty || credentialGuard.unsettled || conflicted || !dirty}><Save size={14} />保存资源</button></div>
+      <div className="agent-form-actions"><button className="quiet-button" type="submit" disabled={pending || unsettled || credentialGuard.dirty || credentialGuard.unsettled || conflicted || !dirty || mode === "connection" && !eligibleConnection(draft.settings.connection_id)}><Save size={14} />保存资源</button></div>
     </form>
     {intent?.result && confirmed(intent.result) && !error ? <p className="agent-success" role="status">{intent.result.state === "reconciled" ? "已找到原资源 · 现有绑定未改变" : "资源已保存 · 现有绑定未改变"}</p> : null}
     {unsettled ? <><p role="status">资源保存结果未确认</p><button className="quiet-button" disabled={pending} onClick={() => void queryOriginal()}><RefreshCw size={14} />查询原资源保存结果</button></> : null}

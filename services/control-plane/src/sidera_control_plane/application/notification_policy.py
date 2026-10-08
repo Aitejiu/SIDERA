@@ -389,7 +389,7 @@ class NotificationPolicyV1:
                 transition = NotificationTransition.COMPLETED
                 emit_reason = "new_milestone" if should_emit else "milestone_already_seen"
             elif fact_kind == NotificationKind.TASK_COMPLETED.value:
-                should_emit = previous_status != "completed"
+                should_emit = previous_status not in {"completed", "succeeded"}
                 priority = NotificationPriority.PROGRESS
                 transition = NotificationTransition.COMPLETED
                 emit_reason = "root_task_completed" if should_emit else "root_completion_seen"

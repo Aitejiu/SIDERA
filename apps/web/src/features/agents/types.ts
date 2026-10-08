@@ -30,6 +30,7 @@ export type CredentialWriteInput = components["schemas"]["CredentialWriteInput"]
 export type CredentialRevocation = components["schemas"]["CredentialRevocationSchema"];
 export type SecretBinding = components["schemas"]["SecretBinding"];
 export type Connection = components["schemas"]["ConnectionSummarySchema"];
+export type ToolConnection = components["schemas"]["ToolConnectionView"];
 
 export function confirmed(result: ConfigurationResult): boolean {
   return result.state === "succeeded" || result.state === "reconciled";

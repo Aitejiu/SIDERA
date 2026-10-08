@@ -12,7 +12,8 @@ import { useState } from "react";
 import { ApiProblem } from "@/shared/api/client";
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 
-import type { WorkerResultInputsView } from "../result-inputs/api";
+import type { ResultInputAction, WorkerResultInputsView } from "../result-inputs/api";
+import { freezeWorkerResultActionReview, workerResultActionFingerprint } from "../result-inputs/nativeWorkerResultActions";
 import {
   approveCollaborationRelease,
   pauseCollaborationRelease,
@@ -38,6 +39,15 @@ export interface WorkerGovernancePanelProps {
   collaboration: WorkerCollaborationSummary | null | undefined;
   resultInputs?: WorkerResultInputsView;
   onRefresh: () => Promise<void>;
+  nativeActions?: NativeWorkerGovernanceOwner;
+}
+
+export interface NativeWorkerGovernanceOwner {
+  reviewAction: (action: GovernanceAction) => ResultInputAction | null;
+  onGovernanceAction: (action: GovernanceAction, reason: string) => Promise<boolean>;
+  busy: boolean;
+  canSubmit: boolean;
+  error: string | null;
 }
 
 type ActionButtonCopy = {
@@ -62,10 +72,16 @@ export function WorkerGovernancePanel({
   collaboration,
   resultInputs,
   onRefresh,
+  nativeActions,
 }: WorkerGovernancePanelProps) {
   const [activeAction, setActiveAction] = useState<GovernanceAction | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [openedReview, setOpenedReview] = useState<{
+    descriptor: ResultInputAction | null;
+    proposal: ActiveCollaborationProposal | null;
+  } | null>(null);
+  const pending = isSubmitting || nativeActions?.busy === true;
 
   if (collaboration === null || collaboration === undefined || !collaboration.enabled) return null;
 
@@ -76,19 +92,50 @@ export function WorkerGovernancePanel({
   const status = governanceStatus(mode, releaseState, collaboration.attention_state);
 
   const openAction = (action: GovernanceAction) => {
+    if (nativeActions) {
+      const descriptor = nativeActions.reviewAction(action);
+      const review = descriptor ? freezeWorkerResultActionReview(descriptor) : null;
+      setOpenedReview({ descriptor: review?.action ?? null, proposal: proposal ? { ...proposal } : null });
+    }
     setErrorMessage(null);
     setActiveAction(action);
   };
 
   const closeAction = () => {
-    if (!isSubmitting) {
+    if (!pending) {
       setActiveAction(null);
       setErrorMessage(null);
+      setOpenedReview(null);
     }
   };
 
   const submitAction = async (reason: string) => {
-    if (activeAction === null || isSubmitting) return;
+    if (activeAction === null || pending) return;
+    if (nativeActions) {
+      const descriptor = nativeActions.reviewAction(activeAction);
+      if (!openedReview?.descriptor || descriptor === null
+        || workerResultActionFingerprint({ action: openedReview.descriptor, reason: null })
+          !== workerResultActionFingerprint({ action: descriptor, reason: null })) {
+        setErrorMessage("操作依据已变化，请重新打开并确认当前操作。");
+        return;
+      }
+      if (!nativeActions.canSubmit) {
+        setErrorMessage(nativeActions.error ?? "原操作尚未确认，请查询原操作。");
+        return;
+      }
+      setIsSubmitting(true);
+      setErrorMessage(null);
+      try {
+        if (await nativeActions.onGovernanceAction(activeAction, reason)) {
+          setActiveAction(null); setOpenedReview(null);
+        }
+      } catch {
+        setErrorMessage("治理操作结果暂未确认，请查询原操作。");
+      } finally {
+        setIsSubmitting(false);
+      }
+      return;
+    }
     setIsSubmitting(true);
     setErrorMessage(null);
     try {
@@ -174,14 +221,16 @@ export function WorkerGovernancePanel({
               const Icon = copy.icon;
               // Governance targets the WorkerItem release gate, independently of
               // whether the current Agent Session accepts user input.
-              const enabled = actionRequirementsMet(action, proposal, collaboration);
+              const enabled = nativeActions
+                ? nativeActions.canSubmit && nativeActions.reviewAction(action) !== null
+                : actionRequirementsMet(action, proposal, collaboration);
               return (
                 <button
                   className={copy.tone === "danger" ? "quiet-button quiet-button--danger" : "quiet-button"}
                   type="button"
                   key={action}
                   onClick={() => openAction(action)}
-                  disabled={!enabled || isSubmitting}
+                  disabled={!enabled || pending}
                 >
                   <Icon size={14} aria-hidden="true" />{copy.label}
                 </button>
@@ -196,10 +245,10 @@ export function WorkerGovernancePanel({
         <GovernanceActionDialog
           action={activeAction}
           taskPath={taskPath}
-          proposal={proposal}
+          proposal={nativeActions ? openedReview?.proposal ?? null : proposal}
           {...(resultInputs === undefined ? {} : { resultInputs })}
-          errorMessage={errorMessage}
-          isSubmitting={isSubmitting}
+          errorMessage={errorMessage ?? nativeActions?.error ?? null}
+          isSubmitting={pending}
           onClose={closeAction}
           onSubmit={(reason) => void submitAction(reason)}
         />

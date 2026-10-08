@@ -507,6 +507,165 @@ def local_policy_fixture(settings_values, command_type="SendExecutionInput"):
     return host, sessions, store, clock, issue, target
 
 
+def local_acceptance_basis_target(target):
+    return replace(
+        target,
+        command=None,
+        method="POST",
+        route="/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/results/{candidate_id}/acceptance-basis",
+        path_parameters=(
+            ("workspace_id", str(target.workspace_id)),
+            ("root_task_id", str(uuid4())),
+            ("candidate_id", str(uuid4())),
+        ),
+    )
+
+
+def test_local_policy_allows_current_human_acceptance_basis_query(settings_values):
+    host, _, _, _, issue, target = local_policy_fixture(settings_values)
+    host.require(
+        issue.session_id, "control_plane.query", local_acceptance_basis_target(target)
+    )
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "foreign_workspace",
+        "principal",
+        "revoked",
+        "expired",
+        "unknown",
+        "background",
+        "mutate",
+        "arbitrary_post",
+    ],
+)
+def test_local_policy_acceptance_basis_never_expands_current_human_scope(
+    settings_values, variant
+):
+    from sidera_agents.errors import AgentError
+
+    host, sessions, _, clock, issue, base = local_policy_fixture(settings_values)
+    target = local_acceptance_basis_target(base)
+    grant, action = issue.session_id, "control_plane.query"
+    if variant == "foreign_workspace":
+        workspace = uuid4()
+        target = replace(
+            target,
+            workspace_id=workspace,
+            path_parameters=(
+                ("workspace_id", str(workspace)),
+                *target.path_parameters[1:],
+            ),
+        )
+    elif variant == "principal":
+        target = replace(target, principal_id="forged-user")
+    elif variant == "revoked":
+        sessions.revoke(issue.session_id)
+    elif variant == "expired":
+        clock[0] = issue.expires_at
+    elif variant == "unknown":
+        grant = uuid4()
+    elif variant == "background":
+        grant = host.background_identity.grant_id
+    elif variant == "mutate":
+        action = "control_plane.mutate"
+    else:
+        target = replace(target, route="/api/v1/commands")
+    with pytest.raises(AgentError, match="permission_denied"):
+        host.require(grant, action, target)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "variant", ["allowed", "missing_csrf", "hostile_origin", "foreign_workspace"]
+)
+async def test_actual_local_human_acceptance_basis_post_keeps_browser_boundary(
+    settings_values, no_database_connections, monkeypatch, variant
+):
+    import httpx
+    from fastapi import HTTPException
+    from sidera_agents import bootstrap
+    from sidera_control_plane.api.dependencies import get_result_query_service
+
+    from sidera_product.app import create_app
+    from sidera_product.composition import build_product_runtime
+
+    native_calls, business_calls = [], []
+
+    def forbidden_native_start(*args, **kwargs):
+        native_calls.append("start_background")
+        pytest.fail("Acceptance-basis authority test attempted native start")
+
+    def result_dependency_marker():
+        business_calls.append("result_query")
+        raise HTTPException(418, detail={"code": "inert_result_dependency"})
+
+    monkeypatch.setattr(
+        bootstrap.AgentService, "start_background", forbidden_native_start
+    )
+    _, sessions, _, _ = service(settings_values)
+    runtime = build_product_runtime(sessions.settings)
+    runtime.local_sessions = sessions
+    runtime.request_authorizer.local_sessions = sessions
+    runtime.control_plane.app.dependency_overrides[get_result_query_service] = (
+        result_dependency_marker
+    )
+    bootstrap_issue = sessions.create_bootstrap()
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app(runtime=runtime)),
+            base_url=sessions.settings.local_url,
+        ) as client:
+            exchanged = await client.post(
+                "/product/v1/session/bootstrap",
+                json={"token": bootstrap_issue.token.get_secret_value()},
+                headers={"Origin": sessions.settings.web_origin},
+            )
+            assert exchanged.status_code == 200
+            headers = {"Origin": sessions.settings.web_origin}
+            if variant != "missing_csrf":
+                headers["X-Sidera-CSRF"] = client.cookies["sidera_csrf"]
+            if variant == "hostile_origin":
+                headers["Origin"] = "http://attacker.example"
+            workspace = (
+                uuid4()
+                if variant == "foreign_workspace"
+                else sessions.settings.workspace_id
+            )
+            reply = await client.post(
+                f"/api/v1/workspaces/{workspace}/tasks/{uuid4()}/results/{uuid4()}/acceptance-basis",
+                json={
+                    "criteria": [
+                        {
+                            "criterion_key": "C1",
+                            "decision": "manual_passed",
+                            "reason": "verified",
+                        }
+                    ]
+                },
+                headers=headers,
+            )
+            if variant == "allowed":
+                assert reply.status_code == 418
+                assert business_calls == ["result_query"]
+            else:
+                assert reply.status_code == 403
+                if variant == "foreign_workspace":
+                    assert reply.json()["error"]["code"] == "permission_denied"
+                else:
+                    assert reply.json()["detail"]["code"] == (
+                        "csrf_required"
+                        if variant == "missing_csrf"
+                        else "origin_denied"
+                    )
+                assert business_calls == []
+        assert native_calls == []
+    finally:
+        assert runtime.close(grace_seconds=0) is True
+
+
 @pytest.mark.parametrize(
     "command",
     [

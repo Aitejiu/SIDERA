@@ -294,6 +294,34 @@ def test_direct_cp_role_reads_exact_related_public_targets(
         )
 
 
+@pytest.mark.parametrize("role", ["main", "planner", "worker"])
+@pytest.mark.parametrize("action", ["control_plane.query", "control_plane.mutate"])
+def test_direct_cp_agent_cannot_query_or_mutate_acceptance_basis(
+    settings_values, tmp_path, role, action
+):
+    from dataclasses import replace
+
+    lab, _, verified = host_tool_fixture(settings_values, tmp_path, role=role)
+    root = uuid4() if role == "main" else verified.record.root_task_id
+    lab.host.require(
+        verified.record.grant_id,
+        "control_plane.query",
+        cp_read_target(verified, "/api/v1/tasks/{task_id}", task_id=root),
+    )
+    target = replace(
+        cp_read_target(
+            verified,
+            "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/results/{candidate_id}/acceptance-basis",
+            workspace_id=verified.record.workspace_id,
+            root_task_id=root,
+            candidate_id=uuid4(),
+        ),
+        method="POST",
+    )
+    with pytest.raises(AgentError, match="permission_denied"):
+        lab.host.require(verified.record.grant_id, action, target)
+
+
 @pytest.mark.parametrize(
     "variant",
     [

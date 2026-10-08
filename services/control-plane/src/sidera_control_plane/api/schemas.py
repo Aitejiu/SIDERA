@@ -6199,6 +6199,7 @@ class NotificationDeliveryResponse(BaseModel):
     exhausted_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    route_version: int | None = Field(default=None, ge=1)
 
     @classmethod
     def from_view(

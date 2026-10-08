@@ -4048,7 +4048,7 @@ class WorkerGateway:
             if session.execution_id != execution.id:
                 raise GatewayMessageError("stop Session does not match execution")
             link = uow.execution_authorities.get_link(
-                execution.workspace_id, execution.id
+                execution.workspace_id, execution.id, for_update=True
             )
             native_operation = None
             if link is not None:
@@ -4090,6 +4090,22 @@ class WorkerGateway:
                         accepted_sequence,
                     )
                     require_gateway_owner(self._owner_check)
+                return
+            if native_operation is not None and execution.active_lease_id is None:
+                self._assert_completed_original_native_stop(
+                    uow, execution, lease, context.binding, session, link, native_operation
+                )
+                previous_operation_version = native_operation.version
+                if native_operation.status is GatewayOperationStatus.UNKNOWN:
+                    native_operation.resolve_stop(
+                        now=self._clock(), result_ref=f"sequence:{accepted_sequence}"
+                    )
+                else:
+                    native_operation.succeed(
+                        now=self._clock(), result_ref=f"sequence:{accepted_sequence}"
+                    )
+                uow.gateway_operations.save(native_operation, previous_operation_version)
+                require_gateway_owner(self._owner_check)
                 return
             execution.assert_fence(
                 lease_id=context.binding.lease_id,
@@ -4397,6 +4413,114 @@ class WorkerGateway:
         ):
             raise GatewayRecoveryRequired("original native Stop current lease changed")
 
+    def _assert_completed_original_native_stop(
+        self, uow, execution, lease, binding, session, link, operation
+    ):
+        require_gateway_owner(self._owner_check)
+        if (
+            link is None
+            or execution.status
+            not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED}
+            or link.status != execution.status.value
+            or not execution.stop_requested
+            or execution.active_lease_id is not None
+            or execution.last_fencing_token != binding.fencing_token
+            or execution.assigned_worker_id != binding.worker_id
+            or binding.workspace_id != execution.workspace_id
+            or binding.execution_id != execution.id
+            or operation.workspace_id != execution.workspace_id
+            or operation.execution_id != execution.id
+            or operation.task_id != execution.task_id
+            or lease.status is not LeaseStatus.RELEASED
+            or lease.id != binding.lease_id
+            or lease.workspace_id != execution.workspace_id
+            or lease.execution_id != execution.id
+            or lease.worker_id != binding.worker_id
+            or lease.fencing_token != binding.fencing_token
+            or session.status is not ExecutionSessionStatus.CLOSED
+            or session.workspace_id != execution.workspace_id
+            or session.execution_id != execution.id
+            or session.worker_id != binding.worker_id
+            or session.adapter_module_id != binding.adapter_module_id
+            or session.adapter_config_version != binding.adapter_config_version
+            or session.workspace_module_id != binding.workspace_module_id
+            or session.workspace_config_version != binding.workspace_config_version
+            or session.capability_snapshot != binding.capability_snapshot
+            or uow.sessions.get_active_for_execution(execution.id, for_update=True)
+            is not None
+        ):
+            raise GatewayRecoveryRequired("completed original native Stop facts changed")
+        worker = uow.workers.get(
+            binding.worker_id, execution.workspace_id, for_update=True
+        )
+        task = uow.tasks.get(execution.task_id, execution.workspace_id)
+        authority = uow.execution_authorities.get(
+            link.authority_id, workspace_id=execution.workspace_id
+        )
+        if (
+            worker is None
+            or worker.id != binding.worker_id
+            or worker.workspace_id != execution.workspace_id
+            or task is None
+            or task.id != execution.task_id
+            or task.workspace_id != execution.workspace_id
+            or authority is None
+            or "run.read" not in authority.actions
+            or authority.target_type not in {"subtask", "worker_item"}
+            or authority.target_id
+            != (
+                execution.worker_item_id
+                if authority.target_type == "worker_item"
+                else execution.task_id
+            )
+        ):
+            raise GatewayRecoveryRequired(
+                "completed original native Stop authority changed"
+            )
+        adapter_instance, adapter_definition = _load_module(
+            uow,
+            binding.adapter_module_id,
+            execution.workspace_id,
+            expected_type="worker_adapter",
+        )
+        workspace_instance, workspace_definition = _load_module(
+            uow,
+            binding.workspace_module_id,
+            execution.workspace_id,
+            expected_type="workspace_provider",
+        )
+        if (
+            adapter_instance.config_version != binding.adapter_config_version
+            or workspace_instance.config_version != binding.workspace_config_version
+            or binding.capability_snapshot != native_capabilities()
+            or adapter_definition.provider != worker.adapter_type
+        ):
+            raise GatewayRecoveryRequired(
+                "completed original native Stop module pins changed"
+            )
+        for definition, instance in (
+            (adapter_definition, adapter_instance),
+            (workspace_definition, workspace_instance),
+        ):
+            _validate_module_operation(definition, instance, RuntimeModuleOperation.STOP)
+        context = _AssignmentContext(
+            execution,
+            task,
+            None,
+            worker,
+            lease,
+            binding,
+            adapter_definition,
+            adapter_instance,
+            workspace_definition,
+            workspace_instance,
+        )
+        if self._assert_native_stop_scope(
+            uow, context, session, operation.operation_id
+        ) != operation:
+            raise GatewayRecoveryRequired("completed original native Stop receipt changed")
+        require_gateway_owner(self._owner_check)
+
     @staticmethod
     def _assert_native_stop_evidence(
         uow: ControlPlaneUnitOfWork,
@@ -4413,28 +4537,36 @@ class WorkerGateway:
             raise GatewayRecoveryRequired(
                 "original Stop evidence has not reached both durable cursors"
             )
-        if link.status == "stopped":
-            return
         event = uow.execution_events.get(
             session.id, accepted_sequence, execution.workspace_id
         )
         if (
-            link.status not in {"succeeded", "failed"}
+            link.status not in {"succeeded", "failed", "stopped"}
             or event is None
             or event.workspace_id != execution.workspace_id
             or event.execution_id != execution.id
             or event.session_id != session.id
             or event.sequence != accepted_sequence
-            or event.event_type != "native.stop.stopped"
-            or event.payload.get("native_kind") != "stop.stopped"
             or event.payload.get("run_id") != str(link.run_id)
-            or event.payload.get("operation_id") != str(operation_id)
-            or event.raw_ref is None
+            or not isinstance(event.raw_ref, str)
             or re.fullmatch(r"native-event-sha256:[0-9a-f]{64}", event.raw_ref) is None
         ):
             raise GatewayRecoveryRequired(
                 "original native terminal Stop evidence changed"
             )
+        if (
+            event.event_type == "native.stop.stopped"
+            and event.payload.get("native_kind") == "stop.stopped"
+            and event.payload.get("operation_id") == str(operation_id)
+        ):
+            return
+        if (
+            link.status == "stopped"
+            and event.event_type == "session.closed"
+            and event.payload.get("native_kind") in {"run.stopped", "run.closed"}
+        ):
+            return
+        raise GatewayRecoveryRequired("original native terminal Stop evidence changed")
 
     def _persist_native_stop_failure(
         self, context, session_id, operation_id, failure_code
@@ -4479,10 +4611,23 @@ class WorkerGateway:
         fencing_token,
         accepted_sequence,
     ):
-        execution = uow.executions.get(link.execution_id, link.workspace_id)
-        session = uow.sessions.get_any(session_id, link.workspace_id)
-        lease = uow.leases.get(lease_id, link.workspace_id)
-        binding = uow.bindings.get_for_execution(link.execution_id, link.workspace_id)
+        execution = uow.executions.get(
+            link.execution_id, link.workspace_id, for_update=True
+        )
+        session = uow.sessions.get_any(session_id, link.workspace_id, for_update=True)
+        lease = uow.leases.get(lease_id, link.workspace_id, for_update=True)
+        binding = uow.bindings.get_for_execution(
+            link.execution_id, link.workspace_id, for_update=True
+        )
+        if (
+            uow.execution_authorities.get_link(
+                link.workspace_id, link.execution_id, for_update=True
+            ) != link
+            or uow.gateway_operations.get_by_operation_id(
+                operation.operation_id, link.workspace_id, for_update=True
+            ) != operation
+        ):
+            raise GatewayRecoveryRequired("successful original Stop receipt changed")
         selected = None if execution is None else native_binding(uow, execution)
         authority = uow.execution_authorities.get(
             link.authority_id, workspace_id=link.workspace_id
@@ -4519,7 +4664,12 @@ class WorkerGateway:
             != uuid5(NAMESPACE_URL, f"sidera.native.session:{link.run_id}")
             or session.adapter_session_id != f"agent-run:{link.run_id}"
             or session.status is not ExecutionSessionStatus.CLOSED
-            or execution.status is not ExecutionStatus.CANCELED
+            or execution.status
+            not in {
+                ExecutionStatus.CANCELED,
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+            }
             or execution.active_lease_id is not None
             or not execution.stop_requested
             or lease.status is not LeaseStatus.RELEASED
@@ -4529,6 +4679,10 @@ class WorkerGateway:
             or link.event_cursor < accepted_sequence
         ):
             raise GatewayRecoveryRequired("successful original Stop cleanup facts do not match")
+        if execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED}:
+            self._assert_completed_original_native_stop(
+                uow, execution, lease, binding, session, link, operation
+            )
         self._assert_native_stop_evidence(
             uow, execution, session, link, operation.operation_id, accepted_sequence
         )
@@ -5351,9 +5505,15 @@ class WorkerGateway:
             raise GatewayMessageError(
                 "bound worker was not found", code="runtime_binding_missing"
             )
-        if execution.active_lease_id != lease_id:
-            raise GatewayMessageError("execution lease does not match event")
-        execution.assert_fence(lease_id=lease_id, fencing_token=fencing_token)
+        completed_original_stop_query = (
+            original_native_stop_query
+            and operation is RuntimeModuleOperation.STOP
+            and execution.active_lease_id is None
+        )
+        if not completed_original_stop_query:
+            if execution.active_lease_id != lease_id:
+                raise GatewayMessageError("execution lease does not match event")
+            execution.assert_fence(lease_id=lease_id, fencing_token=fencing_token)
         if not original_native_stop_query:
             lease.assert_owner(binding.worker_id, fencing_token, self._clock())
         adapter_instance, adapter_definition = _load_module(
@@ -5436,10 +5596,23 @@ class WorkerGateway:
                 raise GatewayRecoveryRequired(
                     "original native Stop query facts changed"
                 )
-            self._assert_current_original_native_stop_lease(execution, lease, binding)
             self._assert_native_stop_scope(
                 uow, context, session, original_stop.operation_id
             )
+            if completed_original_stop_query:
+                self._assert_completed_original_native_stop(
+                    uow,
+                    execution,
+                    lease,
+                    binding,
+                    session,
+                    uow.execution_authorities.get_link(
+                        execution.workspace_id, execution.id, for_update=True
+                    ),
+                    original_stop,
+                )
+            else:
+                self._assert_current_original_native_stop_lease(execution, lease, binding)
         return context
 
     def _assignment_is_obsolete(
@@ -6004,6 +6177,7 @@ class WorkerGateway:
                 and lease.expires_at > self._clock()
             )
         keeper = None
+        renew_due = False
         if live and authority is not None:
             try:
                 context = self._load_context_by_ids(
@@ -6017,8 +6191,20 @@ class WorkerGateway:
                 context = None
             if context is not None:
                 keeper = self._lease_keeper(context)
+                interval = self._assignment_lease_renew_interval_seconds
+                last_renewal = context.lease.renewed_at or context.lease.issued_at
+                renew_due = interval > 0 and self._clock() >= (
+                    last_renewal + timedelta(seconds=interval)
+                )
         try:
             if keeper is not None:
+                if renew_due:
+                    require_gateway_owner(self._owner_check)
+                    if not keeper.renew_once():
+                        raise GatewayRecoveryRequired(
+                            "original observation lease is unavailable",
+                            code="native_recovery_required",
+                        )
                 keeper.start()
             yield
             require_gateway_owner(self._owner_check)

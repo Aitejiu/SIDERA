@@ -1,10 +1,16 @@
 from datetime import UTC, datetime
 
+import pytest
+
+from sidera_control_plane.application.agent_worker_adapter import project_run_event
 from sidera_control_plane.application.event_ingestor import (
     _redact_payload,
     _terminal_observation,
 )
 from sidera_control_plane.domain.gateway import AdapterEvent
+from tests.unit import test_native_terminal_stop
+
+terminal_stop_factory = test_native_terminal_stop.terminal_stop_factory
 
 
 def test_event_payload_redacts_secrets_and_bounds_large_values() -> None:
@@ -64,3 +70,48 @@ def test_turn_completion_is_persisted_without_becoming_terminal_observation() ->
     )
 
     assert turn is None
+
+
+@pytest.mark.parametrize("terminal", ("succeeded", "failed"))
+def test_original_native_stop_preserves_terminal_business_history(
+    terminal_stop_factory,
+    terminal,
+):
+    s = terminal_stop_factory(terminal=terminal, closed=False, ingest=True)
+    before = (s.execution.status, s.task.status, s.task.version)
+    event = project_run_event(s.native_events[0])
+
+    report = s.gateway._event_ingestor.ingest_original_page_in_uow(
+        s.uow,
+        expected=s.link,
+        principal_id=s.authority.principal_id,
+        events=(event,),
+    )
+
+    assert s.link.status == terminal and s.link.event_cursor == 2
+    assert s.session.last_sequence == 2
+    assert report.events[0].event_type == "native.stop.stopped"
+    assert not report.terminal_observations
+    assert _terminal_observation(event) is None
+    assert (s.execution.status, s.task.status, s.task.version) == before
+
+
+@pytest.mark.parametrize("kind", ("stop.accepted", "stop.unknown", "stop.failed"))
+def test_unconfirmed_original_native_stop_does_not_close_running_link(
+    terminal_stop_factory,
+    kind,
+):
+    s = terminal_stop_factory(terminal="running", closed=False, ingest=True)
+    event = project_run_event(s.native_events[0].model_copy(update={"kind": kind}))
+
+    report = s.gateway._event_ingestor.ingest_original_page_in_uow(
+        s.uow,
+        expected=s.link,
+        principal_id=s.authority.principal_id,
+        events=(event,),
+    )
+
+    assert s.link.status == "running" and s.link.event_cursor == 2
+    assert s.session.status.value == "active" and s.session.last_sequence == 2
+    assert report.events[0].event_type == f"native.{kind}"
+    assert not report.terminal_observations

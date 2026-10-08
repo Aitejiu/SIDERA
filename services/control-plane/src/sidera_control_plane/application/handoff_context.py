@@ -7,21 +7,26 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from sidera_control_plane.application.code_result_delivery import resolve_code_inputs
 from sidera_control_plane.application.context_requests import (
     ExecutionContextAuthorizationError,
     build_derived_execution_context_assembly_request,
     build_execution_context_assembly_request,
+    execution_context_manifest_schema_version,
     load_execution_context_selection,
     resolve_execution_context_authorization,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.domain.code_results import CodeInputManifestV1
 from sidera_control_plane.domain.context_packages import (
     ContextAssemblyRequest,
     ContextAssemblyStatus,
     ContextConsumerType,
     ContextPackageManifestV1,
+    ContextPackageManifestV3,
     ContextPackageStatus,
     ContextPurpose,
+    ResultInputManifestV1,
     context_package_reference,
 )
 from sidera_control_plane.domain.errors import DomainError, ValidationError
@@ -44,6 +49,8 @@ from sidera_control_plane.domain.handoffs import (
     HandoffProposalStatus,
     HandoffTransition,
 )
+from sidera_control_plane.domain.input_selections import CollaborationInputSelectionV1
+from sidera_control_plane.domain.result_operations import ResultError
 from sidera_control_plane.domain.work_context import WorkContextRevision
 from sidera_control_plane.domain.worker_item import WorkerItem
 from sidera_control_plane.domain.workspace import (
@@ -379,24 +386,14 @@ class HandoffContextService:
             authorization = resolve_execution_context_authorization(
                 uow, target_execution
             )
-            selection = (
-                load_execution_context_selection(uow, authorization.request)
-                if authorization is not None
-                else None
-            )
             request_id = uuid5(
                 _HANDOFF_CONTEXT_NAMESPACE,
                 f"sidera:handoff-context-request:{current.id}:"
                 f"{current.logical_attempt}:{target_execution.id}",
             )
-            idempotency_key = (
+            idempotency_key_prefix = (
                 f"context:handoff:{current.id}:attempt:{current.logical_attempt}:"
-                f"execution:{target_execution.id}:"
-                + (
-                    f"v2:selection:{selection.selection_hash}"
-                    if selection is not None
-                    else "v1"
-                )
+                f"execution:{target_execution.id}"
             )
             additional_budget = {
                 "handoff_context_bundle_id": str(bundle.id),
@@ -416,7 +413,7 @@ class HandoffContextService:
                     ttl_seconds=self._context_ttl_seconds,
                     created_at=bundle.created_at,
                     request_id=request_id,
-                    idempotency_key=idempotency_key,
+                    idempotency_key=idempotency_key_prefix + ":v1",
                     additional_fact_scope_refs=("handoff_context_bundle",),
                     additional_budget=additional_budget,
                 )
@@ -430,12 +427,12 @@ class HandoffContextService:
                     ttl_seconds=self._context_ttl_seconds,
                     created_at=bundle.created_at,
                     request_id=request_id,
-                    idempotency_key=idempotency_key,
+                    idempotency_key_prefix=idempotency_key_prefix,
                     additional_fact_scope_refs=("handoff_context_bundle",),
                     additional_budget=additional_budget,
                     work_context_revision=context_revision,
                 )
-        except (ExecutionContextAuthorizationError, ValueError) as exc:
+        except (ExecutionContextAuthorizationError, ValueError, ValidationError) as exc:
             raise HandoffContextError(
                 "handoff target input Selection authorization is invalid",
                 code="handoff_context_input_selection_invalid",
@@ -511,12 +508,18 @@ class HandoffContextService:
                     if authorization is not None
                     else None
                 )
-            except (ExecutionContextAuthorizationError, ValueError) as exc:
+                manifest_schema_version = execution_context_manifest_schema_version(
+                    uow, target_execution
+                )
+            except (
+                ExecutionContextAuthorizationError,
+                ValueError,
+                ValidationError,
+            ) as exc:
                 raise HandoffContextError(
                     "handoff target input Selection authorization is invalid",
                     code="handoff_context_input_selection_invalid",
                 ) from exc
-            manifest_schema_version = 2 if selection is not None else 1
             assembly = uow.context_assemblies.get_for_consumer(
                 ContextPurpose.EXECUTION,
                 target_execution_id,
@@ -596,11 +599,12 @@ class HandoffContextService:
             if selection is not None:
                 result_input_manifest = getattr(package, "result_input_manifest", None)
                 if (
-                    assembly.manifest_schema_version != 2
+                    assembly.manifest_schema_version not in {2, 3}
+                    or assembly.manifest_schema_version != manifest_schema_version
                     or assembly.input_selection_id != selection.id
                     or assembly.input_selection_hash != selection.selection_hash
-                    or package.manifest_schema_version != 2
-                    or result_input_manifest is None
+                    or package.manifest_schema_version != manifest_schema_version
+                    or not isinstance(result_input_manifest, ResultInputManifestV1)
                     or result_input_manifest.input_selection_id != selection.id
                     or result_input_manifest.input_selection_hash
                     != selection.selection_hash
@@ -609,6 +613,21 @@ class HandoffContextService:
                         "handoff target input Selection package is stale",
                         code="handoff_context_input_selection_stale",
                     )
+            if manifest_schema_version == 3:
+                if authorization is None or selection is None:
+                    raise HandoffContextError(
+                        "handoff target code input Selection is missing",
+                        code="handoff_context_input_selection_stale",
+                    )
+                self._validate_code_package(
+                    uow,
+                    execution=target_execution,
+                    request=authorization.request,
+                    selection=selection,
+                    assembly=assembly,
+                    package=package,
+                    error_prefix="handoff_context_input_selection",
+                )
             handoff_facts = package.control_plane_fact_snapshot.get("handoff")
             if (
                 not isinstance(handoff_facts, Mapping)
@@ -690,16 +709,26 @@ class HandoffContextService:
                 if authorization is not None
                 else None
             )
-        except (ExecutionContextAuthorizationError, ValueError) as exc:
+            manifest_schema_version = (
+                execution_context_manifest_schema_version(uow, source_execution)
+                if source_execution is not None
+                else 1
+            )
+        except (ExecutionContextAuthorizationError, ValueError, ValidationError) as exc:
             raise HandoffContextError(
                 "handoff source input Selection authorization is invalid",
                 code="handoff_context_source_input_selection_invalid",
             ) from exc
+        if package.manifest_schema_version != manifest_schema_version:
+            raise HandoffContextError(
+                "handoff source ContextPackage input protocol is stale",
+                code="handoff_context_source_input_selection_stale",
+            )
         if selection is not None:
             result_input_manifest = getattr(package, "result_input_manifest", None)
             if (
-                package.manifest_schema_version != 2
-                or result_input_manifest is None
+                manifest_schema_version not in {2, 3}
+                or not isinstance(result_input_manifest, ResultInputManifestV1)
                 or result_input_manifest.input_selection_id != selection.id
                 or result_input_manifest.input_selection_hash
                 != selection.selection_hash
@@ -708,7 +737,79 @@ class HandoffContextService:
                     "handoff source ContextPackage input Selection is stale",
                     code="handoff_context_source_input_selection_stale",
                 )
+        if manifest_schema_version == 3:
+            if authorization is None or selection is None or source_execution is None:
+                raise HandoffContextError(
+                    "handoff source code input Selection is missing",
+                    code="handoff_context_source_input_selection_stale",
+                )
+            assembly = uow.context_assemblies.get_for_consumer(
+                ContextPurpose.EXECUTION,
+                source_execution.id,
+                transition.workspace_id,
+                manifest_schema_version=manifest_schema_version,
+            )
+            HandoffContextService._validate_code_package(
+                uow,
+                execution=source_execution,
+                request=authorization.request,
+                selection=selection,
+                assembly=assembly,
+                package=package,
+                error_prefix="handoff_context_source_input_selection",
+            )
         return package
+
+    @staticmethod
+    def _validate_code_package(
+        uow: ControlPlaneUnitOfWork,
+        *,
+        execution: Execution,
+        request: ExecutionRequest,
+        selection: CollaborationInputSelectionV1,
+        assembly: ContextAssemblyRequest | None,
+        package: ContextPackageManifestV1,
+        error_prefix: str,
+    ) -> None:
+        manifest = getattr(package, "code_input_manifest", None)
+        if (
+            not isinstance(package, ContextPackageManifestV3)
+            or not isinstance(manifest, CodeInputManifestV1)
+            or assembly is None
+            or assembly.manifest_schema_version != 3
+            or not isinstance(assembly.code_input_manifest, CodeInputManifestV1)
+            or assembly.code_input_manifest != manifest
+            or assembly.verification_manifest is not None
+            or package.verification_manifest is not None
+            or manifest.workspace_id != execution.workspace_id
+            or manifest.workspace_id != request.workspace_id
+            or manifest.root_task_id != request.root_task_id
+            or manifest.request_id != request.id
+            or manifest.execution_id != execution.id
+            or manifest.selection_id != selection.id
+            or manifest.selection_hash != selection.selection_hash
+            or manifest.input_hash != manifest.compute_content_hash()
+            or assembly.input_selection_id != selection.id
+            or assembly.input_selection_hash != selection.selection_hash
+            or assembly.budget.get("code_input_hash") != manifest.input_hash
+            or assembly.budget.get("execution_request_id") != str(request.id)
+            or assembly.work_context_revision_id != package.work_context_revision_id
+            or assembly.context_version != package.context_version
+            or assembly.idempotency_key != package.idempotency_key
+            or ":v3:" not in assembly.idempotency_key
+            or manifest.input_hash not in assembly.idempotency_key
+        ):
+            raise HandoffContextError(
+                "handoff code input package identity is stale",
+                code=f"{error_prefix}_stale",
+            )
+        try:
+            resolve_code_inputs(uow, manifest)
+        except (ResultError, ValueError, ValidationError) as exc:
+            raise HandoffContextError(
+                "handoff code input Selection authorization is invalid",
+                code=f"{error_prefix}_invalid",
+            ) from exc
 
     @staticmethod
     def _load_source_manifest(

@@ -33,6 +33,9 @@ import {
   workerResultInputsQueryKey,
 } from "../result-inputs/api";
 import type { ResultInputAction, WorkerResultInputsView } from "../result-inputs/api";
+import { NativeWorkerResultActionRecovery } from "../result-inputs/NativeWorkerResultActionRecovery";
+import { reviewWorkerGovernanceAction } from "../result-inputs/nativeWorkerResultActions";
+import { useNativeWorkerResultActions } from "../result-inputs/useNativeWorkerResultActions";
 import {
   getHandoffCandidates,
   getWorkerItemWorkspace,
@@ -50,6 +53,13 @@ import { HandoffProgress } from "./HandoffProgress";
 import { WorkerSidebar } from "./WorkerSidebar";
 import { WorkerTimeline } from "./WorkerTimeline";
 import { WorkerTraceDialog } from "./WorkerTraceDialog";
+import { NativeTransitionRecoveryStatus } from "./NativeTransitionRecoveryStatus";
+import { useNativeTransitionRecovery } from "./useNativeTransitionRecovery";
+import {
+  freezeNativeTransitionRecoveryIntent, nativeTransitionRecoveryDraftKey, nativeTransitionRecoveryStrategies,
+  reviewNativeTransitionRecovery, sameNativeTransitionRecoveryReview,
+  type NativeTransitionRecoveryReview, type NativeTransitionRecoveryScope,
+} from "./nativeTransitionRecovery";
 import type { Execution } from "../trace/types";
 import type { TraceSelectionAddress } from "../trace/nativeTrace";
 import { ProfileHandoffDialog } from "../assignments/ProfileHandoffDialog";
@@ -226,9 +236,11 @@ export function WorkerItemPage() {
       ]),
     ]);
   };
+  const nativeTransitionRecovery = useNativeTransitionRecovery({ workspaceId, workerItemId, onRefresh: refreshWorkerItem });
 
   return (
     <section className="worker-item-page" aria-labelledby="worker-item-title">
+      <NativeTransitionRecoveryStatus workspaceId={workspaceId} actions={nativeTransitionRecovery} />
       <AsyncState
         isLoading={workspaceQuery.isPending}
         isError={workspaceQuery.isError}
@@ -240,6 +252,7 @@ export function WorkerItemPage() {
           <WorkerItemContent
             key={`${workspaceId}:${workspaceQuery.data.worker_item.id}`}
             workspace={workspaceQuery.data}
+            nativeTransitionRecovery={nativeTransitionRecovery.authority?.kind === "legacy" ? null : nativeTransitionRecovery}
             legacyExecutionEligible={legacyExecutionEligible}
             nativeContext={appointmentContextQuery.isSuccess ? appointmentContextQuery.data : undefined}
             activity={activity.items}
@@ -293,6 +306,7 @@ type TraceEntry =
 
 function WorkerItemContent({
   workspace,
+  nativeTransitionRecovery,
   legacyExecutionEligible,
   nativeContext,
   activity,
@@ -323,6 +337,7 @@ function WorkerItemContent({
   onOpenArtifact,
 }: {
   workspace: WorkerWorkspace;
+  nativeTransitionRecovery: NativeTransitionRecoveryActions;
   legacyExecutionEligible: boolean;
   nativeContext: NativeWorkerContextView | undefined;
   activity: readonly WorkerActivity[];
@@ -352,6 +367,14 @@ function WorkerItemContent({
   onOpenWorkerItem: (workerItemId: string) => void;
   onOpenArtifact: (artifactId: string) => void;
 }) {
+  const nativeResultActions = useNativeWorkerResultActions({
+    workspaceId: workspace.workspace_id,
+    workerItemId: workspace.worker_item.id,
+    workspace,
+    resultInputs,
+    onRefresh,
+  });
+  const legacyResultActions = nativeResultActions.authority?.kind === "legacy";
   const [traceEntry, setTraceEntry] = useState<TraceEntry | null>(null);
   const savedExecution = nativeContext?.execution;
   const nativeTraceAddress: TraceSelectionAddress | null = nativeContext?.execution_mode === "native_profile"
@@ -421,6 +444,8 @@ function WorkerItemContent({
 
       <PlanSyncBanner
         workspaceId={workspace.workspace_id}
+        workspace={workspace}
+        nativeActions={nativeTransitionRecovery}
         sync={workspace.plan_sync}
         scope={`${taskTitle} / ${subtaskTitle} / ${workspace.worker_item.title}`}
         onRefresh={onRefresh}
@@ -515,8 +540,23 @@ function WorkerItemContent({
           onOpenWorkerItem={onOpenWorkerItem}
           onOpenArtifact={onOpenArtifact}
           onOpenResults={onOpenResults}
-          onResultInputAction={(action) => void handleResultInputAction(action)}
-          resultInputActionState={resultInputActionState}
+          onResultInputAction={(action) => {
+            if (legacyResultActions) void handleResultInputAction(action);
+            else void nativeResultActions.onAction(action);
+          }}
+          resultInputActionState={legacyResultActions ? resultInputActionState : { status: "idle", message: null }}
+          {...(legacyResultActions ? {} : {
+            nativeActions: {
+              reviewAction: (action) => reviewWorkerGovernanceAction(workspace, action),
+              onGovernanceAction: nativeResultActions.onGovernanceAction,
+              busy: nativeResultActions.busy,
+              canSubmit: nativeResultActions.canSubmit,
+              error: nativeResultActions.error,
+            },
+          })}
+          nativeResultActionRecovery={(
+            <NativeWorkerResultActionRecovery workspaceId={workspace.workspace_id} actions={nativeResultActions} />
+          )}
         />
       </div>
       {legacyDialogVisible ? (
@@ -558,14 +598,19 @@ function WorkerItemContent({
 
 type WorkerPlanSync = NonNullable<WorkerWorkspace["plan_sync"]>;
 type RecoveryStrategy = RecoverWorkerTransitionPayload["strategy"];
+type NativeTransitionRecoveryActions = ReturnType<typeof useNativeTransitionRecovery> | null;
 
 function PlanSyncBanner({
   workspaceId,
+  workspace,
+  nativeActions,
   sync,
   scope,
   onRefresh,
 }: {
   workspaceId: string;
+  workspace: WorkerWorkspace;
+  nativeActions: NativeTransitionRecoveryActions;
   sync: WorkerPlanSync | null | undefined;
   scope: string;
   onRefresh: () => Promise<void>;
@@ -607,7 +652,15 @@ function PlanSyncBanner({
         ) : null}
         {message ? <span className="worker-plan-sync__message" role="status">{message}</span> : null}
       </section>
-      {dialogOpen ? (
+      {dialogOpen && nativeActions !== null ? (
+        <NativePlanSyncRecoveryDialog
+          workspace={workspace}
+          sync={sync}
+          scope={scope}
+          actions={nativeActions}
+          onClose={() => setDialogOpen(false)}
+        />
+      ) : dialogOpen ? (
         <PlanSyncRecoveryDialog
           workspaceId={workspaceId}
           sync={sync}
@@ -622,6 +675,91 @@ function PlanSyncBanner({
       ) : null}
     </>
   );
+}
+
+function NativePlanSyncRecoveryDialog({ workspace, sync, scope, actions, onClose }: {
+  workspace: WorkerWorkspace; sync: WorkerPlanSync; scope: string;
+  actions: NonNullable<NativeTransitionRecoveryActions>; onClose: () => void;
+}) {
+  const [strategy, setStrategy] = useState<RecoveryStrategy>("reconcile_adapter");
+  const [reason, setReason] = useState("");
+  const [evidenceRefs, setEvidenceRefs] = useState("");
+  const [displayed, setDisplayed] = useState<{ scope: NativeTransitionRecoveryScope; review: NativeTransitionRecoveryReview } | null>(null);
+  const transitionQuery = useQuery({
+    queryKey: ["native-transition-recovery-review", workspace.workspace_id, workspace.worker_item.id,
+      actions.scope?.principalId ?? "", sync.worker_transition_id],
+    queryFn: ({ signal }) => getWorkerTransition(workspace.workspace_id, sync.worker_transition_id, signal),
+    enabled: actions.authority?.kind === "product" && actions.scope !== null,
+    retry: false, refetchOnMount: "always", refetchOnWindowFocus: false, refetchOnReconnect: false,
+  });
+  const currentRead = transitionQuery.isSuccess && !transitionQuery.isFetching && transitionQuery.data && actions.scope
+    ? reviewNativeTransitionRecovery(workspace, actions.scope, transitionQuery.data) : null;
+  useEffect(() => {
+    if (displayed !== null || currentRead === null || actions.scope === null) return;
+    const captured = { scope: { ...actions.scope }, review: currentRead };
+    let active = true;
+    queueMicrotask(() => { if (active) setDisplayed(prior => prior ?? captured); });
+    return () => { active = false; };
+  }, [actions.scope, currentRead, displayed]);
+  const sameScope = displayed !== null && actions.scope !== null
+    && nativeTransitionRecoveryDraftKey(displayed.scope) === nativeTransitionRecoveryDraftKey(actions.scope);
+  const reviewed = sameScope && currentRead !== null && displayed !== null
+    && sameNativeTransitionRecoveryReview(displayed.review, currentRead);
+  const intent = displayed === null ? null : freezeNativeTransitionRecoveryIntent({ ...displayed.review, strategy,
+    reason, evidenceRefs: evidenceRefs.split(",") });
+  const eligible = displayed === null ? ["reconcile_adapter", "fail_closed_branch"] : nativeTransitionRecoveryStrategies(displayed.review);
+  const options: { value: RecoveryStrategy; label: string; detail: string }[] = [
+    { value: "reconcile_adapter", label: "重新核对 Adapter 状态", detail: "记录核对请求，等待控制面确认后续 Transition 状态。" },
+    { value: "continue_after_confirmed_stop", label: "确认停止后继续", detail: "由控制面核对旧 Execution、Session 和租约的停止证据。" },
+    { value: "continue_after_confirmed_patch_absence", label: "确认补丁未落地后继续", detail: "由控制面核对 Context Patch 未被应用的证据。" },
+    { value: "fail_closed_branch", label: "将分支安全关闭", detail: "保留未知结果和证据，停止该分支的后续推进。" },
+  ];
+  const canSubmit = actions.canPerform && reviewed && intent !== null;
+  const error = actions.error ?? (transitionQuery.isError ? "当前 Transition 暂不可用，请重新打开恢复窗口。"
+    : transitionQuery.isSuccess && !transitionQuery.isFetching && !reviewed && displayed !== null
+      ? "计划同步依据已变化，请重新打开并确认当前 Transition。"
+      : transitionQuery.isSuccess && !transitionQuery.isFetching && currentRead === null
+        ? "当前 Transition 与计划同步范围不一致，请重新打开恢复窗口。" : null);
+  async function submit() {
+    if (!canSubmit || intent === null) return;
+    if (await actions.perform(intent)) onClose();
+  }
+  return <div className="worker-plan-recovery-backdrop">
+    <section className="worker-plan-recovery" role="dialog" aria-modal="true" aria-labelledby="worker-plan-recovery-title">
+      <div className="worker-plan-recovery__heading">
+        <div><span className="eyebrow">BOUNDED RECOVERY</span><h2 id="worker-plan-recovery-title">恢复计划同步</h2></div>
+        <button className="icon-button" type="button" aria-label="关闭恢复窗口" title="关闭恢复窗口" onClick={onClose}><X size={16} aria-hidden="true" /></button>
+      </div>
+      <div className="worker-plan-recovery__scope"><span className="eyebrow">影响范围</span><strong>{scope}</strong></div>
+      <dl className="worker-plan-recovery__facts">
+        <div><dt>Transition</dt><dd>{sync.worker_transition_id}</dd></div>
+        <div><dt>版本</dt><dd>{displayed && sameScope ? `Transition V${displayed.review.version}` : "正在读取 Transition"}</dd></div>
+        <div><dt>WorkerItem</dt><dd>{workspace.worker_item.id}</dd></div>
+        <div><dt>Root Task</dt><dd>{workspace.worker_item.root_task_id}</dd></div>
+        <div><dt>冻结原因</dt><dd>{sync.failure_code ?? "未知结果"}</dd></div>
+        <div><dt>代际</dt><dd>{generationLabel(sync)}</dd></div>
+      </dl>
+      <fieldset className="worker-plan-recovery__options" disabled={!reviewed || !actions.authorized || actions.busy}>
+        <legend>恢复策略</legend>
+        {options.filter(option => eligible.includes(option.value)).map(option => <label key={option.value}>
+          <input type="radio" name="worker-plan-recovery-strategy" value={option.value} checked={strategy === option.value} onChange={() => setStrategy(option.value)} />
+          <span><strong>{option.label}</strong><small>{option.detail}</small></span>
+        </label>)}
+      </fieldset>
+      <label className="worker-plan-recovery__field"><span>恢复原因</span>
+        <input value={reason} onChange={event => setReason(event.target.value)} aria-label="恢复原因" disabled={actions.busy} />
+      </label>
+      <label className="worker-plan-recovery__field"><span>证据引用</span>
+        <input value={evidenceRefs} onChange={event => setEvidenceRefs(event.target.value)} aria-label="证据引用" disabled={actions.busy} />
+      </label>
+      {!actions.authorized ? <span role="status">当前操作身份未确认</span> : null}
+      {error ? <div className="worker-plan-recovery__error" role="alert"><CircleAlert size={14} aria-hidden="true" />{error}</div> : null}
+      <div className="worker-plan-recovery__actions">
+        <button className="quiet-button" type="button" onClick={onClose}>取消</button>
+        <button className="primary-button" type="button" onClick={() => void submit()} disabled={!canSubmit}>{actions.busy ? "提交中" : "提交恢复策略"}</button>
+      </div>
+    </section>
+  </div>;
 }
 
 function PlanSyncRecoveryDialog({

@@ -37,6 +37,7 @@ def selected_product_targets(tmp_path_factory):
                 "0001_product_defaults_sessions",
                 "0002_local_authority_tools",
                 "0003_conversations",
+                "0004_configuration_requests",
             },
             "agents": {"0004_inputs_events"},
             "cp": {"0039_hard_only_input_selections"},

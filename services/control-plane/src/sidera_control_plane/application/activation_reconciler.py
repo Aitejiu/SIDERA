@@ -15,6 +15,9 @@ from sidera_control_plane.application.context_requests import (
     build_execution_context_assembly_request,
     load_execution_context_selection,
 )
+from sidera_control_plane.application.execution_code_inputs import (
+    execution_code_input_manifest,
+)
 from sidera_control_plane.application.execution_commands import (
     build_continuation_execution,
 )
@@ -430,6 +433,13 @@ class ActivationReconciler:
                 created_at=now,
             )
         else:
+            code_input_manifest = (
+                execution_code_input_manifest(
+                    uow, request, execution, input_selection, plan=context.snapshot
+                )
+                if verification_manifest is None
+                else None
+            )
             context_assembly = build_execution_context_assembly_request(
                 execution=execution,
                 execution_request=request,
@@ -440,11 +450,13 @@ class ActivationReconciler:
                 manifest_schema_version=(
                     3
                     if verification_manifest is not None
+                    or code_input_manifest is not None
                     else 2
                     if input_selection is not None
                     else 1
                 ),
                 input_selection=input_selection,
+                code_input_manifest=code_input_manifest,
                 verification_manifest=verification_manifest,
             )
         uow.context_assemblies.add(context_assembly)

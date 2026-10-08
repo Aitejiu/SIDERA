@@ -5084,6 +5084,8 @@ export interface components {
              * Format: uuid
              */
             route_id: string;
+            /** Route Version */
+            route_version?: number | null;
             /** Status */
             status: string;
             /**

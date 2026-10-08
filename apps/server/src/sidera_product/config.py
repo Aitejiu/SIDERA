@@ -68,6 +68,7 @@ class ProductSettings(BaseSettings):
     agent_poll_interval_seconds: float = Field(default=0.25, gt=0, le=60)
     result_inputs_enabled: StrictBool = True
     result_integration_enabled: StrictBool = True
+    notification_enabled: StrictBool = True
     managed_credentials_enabled: StrictBool = False
     bootstrap_ttl_seconds: StrictInt = Field(default=300, ge=1, le=3600)
     local_session_ttl_seconds: StrictInt = Field(default=43200, ge=1, le=604800)
@@ -82,6 +83,7 @@ class ProductSettings(BaseSettings):
         "reload",
         "result_inputs_enabled",
         "result_integration_enabled",
+        "notification_enabled",
         "managed_credentials_enabled",
         "bootstrap_ttl_seconds",
         "local_session_ttl_seconds",
@@ -202,6 +204,7 @@ class ProductSettings(BaseSettings):
             "api_bind_host": self.bind_host,
             "result_inputs_enabled": self.result_inputs_enabled,
             "result_integration_enabled": self.result_integration_enabled,
+            "notification_enabled": self.notification_enabled,
             "result_repository_path": None,
             "interview_demo_manifest": None,
             "gateway_sync_workspace_id": None,

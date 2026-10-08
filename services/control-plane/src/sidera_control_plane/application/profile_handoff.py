@@ -3,6 +3,8 @@
 import json
 from collections.abc import Mapping
 from contextlib import nullcontext
+from dataclasses import replace
+from datetime import UTC
 from hashlib import sha256
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -297,6 +299,16 @@ NATIVE_CONTEXT_KEYS = frozenset(
 )
 
 
+def _same_native_handoff_source(
+    current: NativeHandoffProposalPayload, expected: NativeHandoffProposalPayload
+) -> bool:
+    # Native slot heartbeats change Worker version, not the pinned execution.
+    return (
+        replace(current, source_worker_version=expected.source_worker_version)
+        == expected
+    )
+
+
 class ProfileHandoffValidator:
     def __init__(self, *, assignments, identity, native_services, clock):
         self.assignments, self.identity, self.services, self.clock = (
@@ -401,7 +413,7 @@ class ProfileHandoffValidator:
             payload.target_profile_ref,
             **arguments,
         )
-        if before != payload:
+        if not _same_native_handoff_source(before, payload):
             raise ValidationError("native handoff proposal source is stale")
         self.target(
             payload.workspace_id,
@@ -439,7 +451,7 @@ class ProfileHandoffValidator:
             lock=True,
             **arguments,
         )
-        if after != payload:
+        if not _same_native_handoff_source(after, payload):
             raise ValidationError("native handoff proposal changed during inspection")
 
     def stale_reason(self, uow, payload):
@@ -619,7 +631,7 @@ class ProfileHandoffValidator:
             expected_version=envelope.expected_version,
             lock=True,
         )
-        if before != after:
+        if not _same_native_handoff_source(after, before):
             raise ValidationError("native handoff source changed during inspection")
         return after
 
@@ -1058,6 +1070,7 @@ class ProfileHandoffPhaseService:
             or current.logical_attempt != transition.logical_attempt
             or (
                 current.lease_owner != transition.lease_owner
+                or current.lease_expires_at != transition.lease_expires_at
                 or current.lease_expires_at is None
                 or current.lease_expires_at <= self._clock()
             )
@@ -1333,13 +1346,15 @@ class ProfileHandoffPhaseService:
             uow.gateway_operations.save(operation, previous)
         return evidence
 
-    def stop(self, transition):
+    def stop(self, transition, *, query_only=False):
         require_gateway_owner(self._owner_check)
         with self._uow_factory() as uow:
             current = self._current(
                 uow, transition, HandoffGateOperation.COORDINATOR_STOP_SOURCE, lock=True
             )
             source = self._source(uow, current, lock=True)
+            if query_only and source[2].revoked:
+                return None
             checkpoint = HandoffCheckpointEvidence.from_native_mapping(
                 current.source_checkpoint_facts
             )
@@ -1349,9 +1364,29 @@ class ProfileHandoffPhaseService:
                     "native stop intention missing",
                     code="native_handoff_source_stop_invalid",
                 )
+            if query_only and operation_id != handoff_step_operation_id(
+                current.id,
+                HandoffPhase.STOP_SOURCE,
+                logical_attempt=current.logical_attempt,
+                action="stop_source",
+            ):
+                raise GatewayMessageError(
+                    "original native stop intention changed",
+                    code="native_handoff_source_stop_invalid",
+                )
+            if (
+                query_only
+                and uow.gateway_operations.get_by_operation_id(
+                    operation_id, current.workspace_id, for_update=True
+                )
+                is None
+            ):
+                return None
             operation, first = self._begin(
                 uow, current, source, operation_id, GatewayOperationType.STOP_SESSION
             )
+            if query_only and first:
+                raise GatewayMessageError("original native Stop is unavailable")
             if operation.status is GatewayOperationStatus.FAILED:
                 raise GatewayMessageError(
                     "original native stop failed",
@@ -1444,6 +1479,8 @@ class ProfileHandoffPhaseService:
                 uow, transition, HandoffGateOperation.COORDINATOR_STOP_SOURCE, lock=True
             )
             execution, session, authority, _ = self._source(uow, locked, lock=True)
+            if query_only and authority.revoked:
+                return None
             lease = uow.leases.get(
                 authority.lease_id, locked.workspace_id, for_update=True
             )
@@ -1651,14 +1688,18 @@ def native_proposal_projection(proposal):
         "proposal_hash": proposal.proposal_hash,
         "status": proposal.status.value,
         "stale_reason": proposal.stale_reason,
-        "created_at": proposal.created_at.isoformat(),
-        "expires_at": proposal.expires_at.isoformat(),
+        "created_at": proposal.created_at.astimezone(UTC)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "expires_at": proposal.expires_at.astimezone(UTC)
+        .isoformat()
+        .replace("+00:00", "Z"),
         "confirmed_at": None
         if proposal.confirmed_at is None
-        else proposal.confirmed_at.isoformat(),
+        else proposal.confirmed_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
         "cancelled_at": None
         if proposal.cancelled_at is None
-        else proposal.cancelled_at.isoformat(),
+        else proposal.cancelled_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
         "source_execution_id": str(payload.source_execution_id),
         "source_session_id": str(payload.source_session_id),
         "source_run_id": str(payload.source_run_id),
@@ -1748,14 +1789,18 @@ def native_transition_projection(transition, *, target_run_id=None):
         else str(transition.blocked_operation_id),
         "next_attempt_at": None
         if transition.next_attempt_at is None
-        else transition.next_attempt_at.isoformat(),
-        "confirmed_at": transition.confirmed_at.isoformat(),
+        else transition.next_attempt_at.astimezone(UTC)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "confirmed_at": transition.confirmed_at.astimezone(UTC)
+        .isoformat()
+        .replace("+00:00", "Z"),
         "started_at": None
         if transition.started_at is None
-        else transition.started_at.isoformat(),
+        else transition.started_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
         "completed_at": None
         if transition.completed_at is None
-        else transition.completed_at.isoformat(),
+        else transition.completed_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
         "context": native_context_projection(payload, transition),
         "plan_base": native_plan_projection(payload),
         "available_recovery_strategies": [],

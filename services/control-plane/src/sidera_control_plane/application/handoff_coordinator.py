@@ -38,6 +38,7 @@ from sidera_control_plane.application.workspace_handoff import (
     WorkspaceHandoffService,
     WorkspaceHandoffUnknown,
 )
+from sidera_control_plane.domain.agent_bindings import AgentExecutionLink
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.context_packages import (
     ContextConsumerType,
@@ -272,6 +273,111 @@ class HandoffCoordinator:
             outcome = self._run_claimed(claimed_transition)
             counters[outcome] += 1
         return HandoffRunResult(claimed=len(claimed), **counters)
+
+    def drain_original_source_stop(self, expected: AgentExecutionLink) -> bool:
+        if self._native_handoff is None or expected.run_id is None:
+            return False
+        now = self._clock()
+        with self._uow_factory() as uow:
+            execution = uow.executions.get(
+                expected.execution_id, expected.workspace_id, for_update=True
+            )
+            link = uow.execution_authorities.get_link(
+                expected.workspace_id, expected.execution_id, for_update=True
+            )
+            if (
+                execution is None
+                or execution.worker_item_id is None
+                or link != expected
+            ):
+                return False
+            current = uow.handoff_transitions.get_active_for_worker_item(
+                execution.worker_item_id, execution.workspace_id, for_update=True
+            )
+            if (
+                current is None
+                or current.handoff_schema_version != 2
+                or current.status is not HandoffTransitionStatus.RUNNING
+                or current.phase is not HandoffPhase.STOP_SOURCE
+                or current.native_payload is None
+            ):
+                return False
+            payload = current.native_payload
+            if (
+                current.workspace_id,
+                current.worker_item_id,
+                current.source_execution_id,
+                current.source_session_id,
+                payload.workspace_id,
+                payload.worker_item_id,
+                payload.source_execution_id,
+                payload.source_run_id,
+                payload.source_authority_id,
+                payload.source_binding_version,
+                payload.source_profile_ref,
+            ) != (
+                link.workspace_id,
+                execution.worker_item_id,
+                execution.id,
+                uuid5(NAMESPACE_URL, f"sidera.native.session:{link.run_id}"),
+                link.workspace_id,
+                execution.worker_item_id,
+                execution.id,
+                link.run_id,
+                link.authority_id,
+                link.binding_version,
+                link.profile_ref,
+            ):
+                return False
+            authority = uow.execution_authorities.get(
+                link.authority_id, workspace_id=link.workspace_id
+            )
+            if authority is None or authority.revoked:
+                return False
+            lease = uow.leases.get(
+                authority.lease_id, link.workspace_id, for_update=True
+            )
+            if (
+                lease is None
+                or lease.execution_id != execution.id
+                or lease.fencing_token != authority.fencing_token
+                or execution.last_fencing_token != authority.fencing_token
+            ):
+                return False
+            if lease.status is LeaseStatus.ACTIVE:
+                if lease.expires_at <= now or execution.active_lease_id != lease.id:
+                    return False
+            elif (
+                lease.status is not LeaseStatus.RELEASED
+                or current.source_stop_facts is None
+            ):
+                return False
+            if current.lease_expires_at is not None and current.lease_expires_at > now:
+                return False
+            previous_version = current.version
+            claimed_expiry = now + timedelta(seconds=self._lease_ttl_seconds)
+            claimed_attempt = current.logical_attempt
+            current.lease_owner = self._owner_id
+            current.lease_expires_at = claimed_expiry
+            current.next_attempt_at = None
+            current.version += 1
+            uow.handoff_transitions.save(current, previous_version)
+            claimed = current
+        try:
+            return self._native_handoff.stop(claimed, query_only=True) is not None
+        finally:
+            with self._uow_factory() as uow:
+                current = uow.handoff_transitions.get(
+                    claimed.id, claimed.workspace_id, for_update=True
+                )
+                if current is not None and (
+                    current.lease_owner == self._owner_id
+                    and current.lease_expires_at == claimed_expiry
+                    and current.logical_attempt == claimed_attempt
+                ):
+                    previous_version = current.version
+                    current.release_claim()
+                    uow.handoff_transitions.save(current, previous_version)
 
     def _claim(self, *, now: datetime, limit: int) -> tuple[HandoffTransition, ...]:
         with self._uow_factory() as uow:

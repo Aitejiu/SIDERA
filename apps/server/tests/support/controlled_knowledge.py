@@ -19,7 +19,7 @@ class BoundedHTTPServer(HTTPServer):
 class OwnedKnowledgeServer:
     """One exact authorized workspace with a test-owned known-empty catalog."""
 
-    def __init__(self, workspace: UUID) -> None:
+    def __init__(self, workspace: UUID, *, include_page_list: bool = False) -> None:
         self.workspace = workspace
         self.token = SecretStr(uuid4().hex)
         self._calls = []
@@ -46,7 +46,10 @@ class OwnedKnowledgeServer:
                 if len(parts) >= 5 and parts[1:4] == ["api", "v1", "workspaces"]:
                     with suppress(ValueError):
                         workspace_id = UUID(parts[4])
-                exact_path = f"/api/v1/workspaces/{owner.workspace}/knowledge/search"
+                prefix = f"/api/v1/workspaces/{owner.workspace}/knowledge"
+                allowed_paths = {prefix + "/search"}
+                if include_page_list:
+                    allowed_paths.add(prefix + "/pages")
                 if not hmac.compare_digest(
                     self.headers.get("Authorization", ""),
                     "Bearer " + owner.token.get_secret_value(),
@@ -54,7 +57,7 @@ class OwnedKnowledgeServer:
                     status, code = 401, "permission_denied"
                 elif workspace_id is not None and workspace_id != owner.workspace:
                     status, code = 403, "permission_denied"
-                elif self.command != "GET" or path != exact_path:
+                elif self.command != "GET" or path not in allowed_paths:
                     status, code = 404, "reference_not_found"
                 else:
                     status, code = 200, None

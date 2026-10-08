@@ -30,7 +30,10 @@ from sidera_agents.ports import (
 from sidera_control_plane.application.assignments import AssignmentTarget
 from sidera_control_plane.application.execution_authority import PlanningActionTarget
 from sidera_control_plane.application.planning_commands import PlanningCommandTarget
-from sidera_control_plane.application.request_authority import ControlPlaneRequestTarget
+from sidera_control_plane.application.request_authority import (
+    ControlPlaneRequestTarget,
+    is_result_acceptance_basis_query,
+)
 from sidera_control_plane.composition import native_runtime
 from sidera_control_plane.composition.native_runtime import (
     ControlPlaneIdentity,
@@ -495,7 +498,10 @@ class ProductRequestAuthorizer:
                 or target.principal_id != identity.principal_id
             ):
                 deny()
-            if action == "control_plane.query" and target.method in {"GET", "HEAD"}:
+            if action == "control_plane.query" and (
+                target.method in {"GET", "HEAD"}
+                or is_result_acceptance_basis_query(target)
+            ):
                 return
             command = target.command
             if command is not None and (

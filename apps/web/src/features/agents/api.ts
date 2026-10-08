@@ -5,7 +5,7 @@ import type {
   CredentialWrite, CredentialWriteInput, Defaults, DefaultsBody, NativeRunSummary,
   ProfileDraft, ProfileList, ProfileRef, ProfileStatus, ProfileView, ProfileWork,
   ResourceDraft, ResourceList, ResourceRef, ResourceStatus, ResourceView,
-  RuntimeCandidate, RuntimeDescriptor, RuntimeRef, RuntimeSnapshot,
+  RuntimeCandidate, RuntimeDescriptor, RuntimeRef, RuntimeSnapshot, ToolConnection,
 } from "./types";
 
 export class AgentApiProblem extends Error {
@@ -92,6 +92,7 @@ export const readDefaults = (ws: string) => agentRequest<Defaults>(product(ws) +
 export const writeDefaults = (ws: string, body: DefaultsBody) => agentRequest<Defaults>(product(ws) + "/defaults", json("PUT", body));
 export const listCredentials = (ws: string) => agentRequest<Credential[]>(credentials(ws) + "/credentials");
 export const listConnections = (ws: string) => agentRequest<Connection[]>(credentials(ws) + "/connections");
+export const listProductToolConnections = (ws: string) => agentRequest<ToolConnection[]>(product(ws) + "/tool-connections");
 export const writeCredential = (ws: string, body: CredentialWriteInput) => agentRequest<CredentialWrite>(credentials(ws) + "/credential-writes", json("POST", body));
 export const readCredentialWrite = (ws: string, operationId: string) => agentRequest<CredentialWrite>(credentials(ws) + `/credential-writes/${encodeURIComponent(operationId)}`);
 export const recoverCredentialWrite = (ws: string, operationId: string) => agentRequest<CredentialWrite>(credentials(ws) + `/credential-writes/${encodeURIComponent(operationId)}/recover`, { method: "POST" });

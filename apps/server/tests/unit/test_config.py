@@ -22,6 +22,7 @@ def test_product_maps_explicit_cp_settings_not_ambient_legacy_flags(
     monkeypatch.setenv("SIDERA_INTERVIEW_DEMO_MANIFEST", "/hostile/old-manifest")
     monkeypatch.setenv("SIDERA_RESULT_INPUTS_ENABLED", "false")
     monkeypatch.setenv("SIDERA_RESULT_INTEGRATION_ENABLED", "false")
+    monkeypatch.setenv("SIDERA_NOTIFICATION_ENABLED", "HOSTILE_NOTIFICATION_SENTINEL")
     settings = settings_class.model_validate(settings_values)
     cp = settings.control_plane_settings()
     assert cp.database_url == settings_values["cp_database_url"]
@@ -30,6 +31,8 @@ def test_product_maps_explicit_cp_settings_not_ambient_legacy_flags(
     assert cp.interview_demo_manifest is None
     assert cp.result_inputs_enabled is True
     assert cp.result_integration_enabled is True
+    assert settings.notification_enabled is True
+    assert cp.notification_enabled is True
     assert cp.result_repository_path is None
     assert cp.workspace_root == settings_values["workspace_root"]
     assert cp.artifact_root == settings_values["artifact_root"]
@@ -50,6 +53,58 @@ def test_product_explicit_disabled_result_options_reach_real_cp_settings(
     assert cp.result_inputs_enabled is False
     assert cp.result_integration_enabled is False
     assert cp.result_repository_path is None
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_product_explicit_notification_option_reaches_real_cp_settings(
+    settings_values, monkeypatch, enabled
+):
+    monkeypatch.setenv("SIDERA_PRODUCT_NOTIFICATION_ENABLED", "false")
+    monkeypatch.setenv("SIDERA_NOTIFICATION_ENABLED", "HOSTILE_NOTIFICATION_SENTINEL")
+    settings = product_settings().model_validate(
+        {**settings_values, "notification_enabled": enabled}
+    )
+
+    assert settings.notification_enabled is enabled
+    assert settings.control_plane_settings().notification_enabled is enabled
+
+
+@pytest.mark.parametrize("value,enabled", [("false", False), ("true", True)])
+def test_product_notification_environment_option_reaches_real_cp_settings(
+    settings_values, monkeypatch, value, enabled
+):
+    monkeypatch.setenv("SIDERA_PRODUCT_NOTIFICATION_ENABLED", value)
+    monkeypatch.setenv("SIDERA_NOTIFICATION_ENABLED", "HOSTILE_NOTIFICATION_SENTINEL")
+    settings = product_settings()(**settings_values)
+
+    assert settings.notification_enabled is enabled
+    assert settings.control_plane_settings().notification_enabled is enabled
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "0",
+        "1",
+        "1.0",
+        "null",
+        "[]",
+        '{"flag":"NOTIFICATION_SECRET_SENTINEL"}',
+        '"NOTIFICATION_SECRET_SENTINEL"',
+        "NOTIFICATION_SECRET_SENTINEL",
+    ],
+)
+def test_product_notification_environment_rejects_non_boolean_scalars_safely(
+    settings_values, monkeypatch, value
+):
+    monkeypatch.setenv("SIDERA_PRODUCT_NOTIFICATION_ENABLED", value)
+    with pytest.raises(ValidationError) as error:
+        product_settings()(**settings_values)
+
+    assert "NOTIFICATION_SECRET_SENTINEL" not in str(error.value)
+    assert error.value.errors(include_input=False)[0]["loc"] == (
+        "notification_enabled",
+    )
 
 
 @pytest.mark.parametrize(

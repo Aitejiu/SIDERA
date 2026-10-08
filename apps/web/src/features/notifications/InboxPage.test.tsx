@@ -203,7 +203,9 @@ function renderPage() {
 
 describe("InboxPage", () => {
   beforeEach(() => {
+    vi.restoreAllMocks();
     server.resetHandlers();
+    server.use(http.get("/main-agent/v1/health", () => HttpResponse.json({ status: "ok", service: "sidera-main-agent-gateway" })));
     streamState.status = "live";
     streamState.error = null;
     seedSnapshotCursor.mockClear();
@@ -467,6 +469,62 @@ describe("InboxPage", () => {
     const history = await screen.findByRole("region", { name: "渠道需要处理的线程历史" });
     expect(within(history).getByRole("button", { name: "归档线程" })).toBeVisible();
     expect(within(history).queryByRole("button", { name: "标记已读" })).not.toBeInTheDocument();
+  });
+
+  it("preserves the actual legacy archive writer under fresh positive gateway health", async () => {
+    const resolved = makeThread({ business_status: "resolved" });
+    installHandlers({ threads: { action: [resolved], progress: [], archived: [] } });
+    installDetailHandler(makeDetail({ thread: resolved, available_commands: ["archive"] }));
+    const posted: Record<string, unknown>[] = [];
+    server.use(http.post("/api/v1/commands", async ({ request }) => {
+      const command = await request.json() as Record<string, unknown>; posted.push(command);
+      return HttpResponse.json({ command_id: command.command_id, aggregate_id: resolved.id, aggregate_version: 5, event_ids: [] });
+    }));
+    renderPage(); const user = userEvent.setup(); await screen.findByText("渠道需要处理");
+    await user.click(screen.getByRole("button", { name: "展开渠道需要处理" }));
+    const archive = await screen.findByRole("button", { name: "归档线程" }); await waitFor(() => expect(archive).toBeEnabled()); await user.click(archive);
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toMatchObject({ command_type: "ArchiveNotificationThread", actor: { type: "local", id: "aitejiu" }, target_id: resolved.id, expected_version: 4, payload: {} });
+  });
+
+  it("fresh legacy health loss denies the old builder before allocating identity", async () => {
+    installHandlers(); installDetailHandler(); let healthReads = 0, posts = 0;
+    server.use(
+      http.get("/main-agent/v1/health", () => { healthReads++; return HttpResponse.json({ status: "ok", service: healthReads === 1 ? "sidera-main-agent-gateway" : "unknown" }); }),
+      http.post("/api/v1/commands", () => { posts++; return new HttpResponse(null, { status: 503 }); }),
+    );
+    renderPage(); const user = userEvent.setup(); await screen.findByText("渠道需要处理");
+    await user.click(screen.getByRole("button", { name: "展开渠道需要处理" }));
+    const button = await screen.findByRole("button", { name: "标记已读" }); await waitFor(() => expect(button).toBeEnabled());
+    const identity = vi.spyOn(crypto, "randomUUID"); await user.click(button); await waitFor(() => expect(healthReads).toBe(2));
+    expect(identity).not.toHaveBeenCalled(); expect(posts).toBe(0);
+  });
+
+  it("keeps server cursor pagination as GET only", async () => {
+    installHandlers(); const cursors: (string | null)[] = []; let posts = 0;
+    server.use(
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/notification-threads`, ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get("cursor"); cursors.push(cursor);
+        return HttpResponse.json({ items: [makeThread(cursor ? { id: "60000000-0000-0000-0000-000000000004", title: "第二页线程" } : {})], next_cursor: cursor ? null : "next-page", last_change_cursor: 42 });
+      }),
+      http.post("/api/v1/commands", () => { posts++; return new HttpResponse(null, { status: 503 }); }),
+    );
+    renderPage(); await screen.findByText("渠道需要处理"); await userEvent.setup().click(screen.getByRole("button", { name: "读取更多" }));
+    expect(await screen.findByText("第二页线程")).toBeVisible(); expect(cursors).toEqual([null, "next-page"]); expect(posts).toBe(0);
+    expect(screen.getByText("渠道需要处理")).toBeVisible();
+  });
+
+  it("keeps delivery diagnostics GET only without constructing a command", async () => {
+    installHandlers(); const detail = makeDetail(); installDetailHandler(detail); let gets = 0, posts = 0;
+    server.use(
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/notification-deliveries/${detail.deliveries[0]!.delivery_id}/attempts`, () => {
+        gets++; return HttpResponse.json({ items: [{ delivery_id: detail.deliveries[0]!.delivery_id, attempt_number: 10, outcome: "provider_unavailable", error_code: "provider_unavailable" }], next_cursor: null });
+      }),
+      http.post("/api/v1/commands", () => { posts++; return new HttpResponse(null, { status: 503 }); }),
+    );
+    renderPage(); const user = userEvent.setup(); await screen.findByText("渠道需要处理"); await user.click(screen.getByRole("button", { name: "展开渠道需要处理" }));
+    const diagnostics = await screen.findByRole("button", { name: "查看投递诊断" }); const identity = vi.spyOn(crypto, "randomUUID"); await user.click(diagnostics);
+    expect(await screen.findByText("第 10 次")).toBeVisible(); expect(gets).toBe(1); expect(posts).toBe(0); expect(identity).not.toHaveBeenCalled();
   });
 });
 

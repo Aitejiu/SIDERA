@@ -11,6 +11,9 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sidera_agents.contracts import ProfileRef
 
+from sidera_control_plane.application.execution_code_inputs import (
+    execution_code_input_manifest,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.code_results import CodeInputManifestV1
 from sidera_control_plane.domain.collaboration import (
@@ -212,12 +215,23 @@ def build_derived_execution_context_assembly_request(
     created_at: datetime,
     request_id: UUID | None = None,
     idempotency_key: str | None = None,
+    idempotency_key_prefix: str | None = None,
     additional_fact_scope_refs: Sequence[str] = (),
     additional_budget: Mapping[str, object] | None = None,
     work_context_revision: WorkContextRevision | None = None,
 ) -> ContextAssemblyRequest | None:
     """Build a new consumer package request for a derived execution."""
 
+    if idempotency_key_prefix is not None:
+        if idempotency_key is not None:
+            raise ValueError("execution context key and prefix are mutually exclusive")
+        if (
+            not isinstance(idempotency_key_prefix, str)
+            or not idempotency_key_prefix
+            or idempotency_key_prefix != idempotency_key_prefix.strip()
+            or re.search(r"[\x00-\x1f\x7f-\x9f]", idempotency_key_prefix)
+        ):
+            raise ValueError("execution context idempotency key prefix is invalid")
     authorization = resolve_execution_context_authorization(uow, execution)
     if authorization is None:
         return None
@@ -285,6 +299,18 @@ def build_derived_execution_context_assembly_request(
             "derived execution WorkContext revision is unavailable"
         )
     selection = load_execution_context_selection(uow, authorization.request)
+    code_input_manifest = execution_code_input_manifest(
+        uow, authorization.request, execution, selection
+    )
+    if idempotency_key_prefix is not None:
+        suffix = (
+            f":v3:input:{code_input_manifest.input_hash}"
+            if code_input_manifest is not None
+            else f":v2:selection:{selection.selection_hash}"
+            if selection is not None
+            else ":v1"
+        )
+        idempotency_key = idempotency_key_prefix + suffix
     inherited_budget: dict[str, object] = {
         "execution_context_inheritance": {
             "kind": clean_kind,
@@ -318,8 +344,11 @@ def build_derived_execution_context_assembly_request(
             *additional_fact_scope_refs,
         ),
         additional_budget=inherited_budget,
-        manifest_schema_version=2 if selection is not None else 1,
+        manifest_schema_version=(
+            3 if code_input_manifest is not None else 2 if selection is not None else 1
+        ),
         input_selection=selection,
+        code_input_manifest=code_input_manifest,
     )
 
 

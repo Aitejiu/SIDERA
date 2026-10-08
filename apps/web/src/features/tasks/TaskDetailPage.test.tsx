@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
@@ -382,6 +382,7 @@ describe("TaskDetailPage", () => {
   beforeEach(() => {
     server.resetHandlers();
     server.use(
+      http.get("/main-agent/v1/health", () => HttpResponse.json({ status: "ok", service: "sidera-main-agent-gateway" })),
       http.get(`/api/v1/tasks/${ROOT_TASK_ID}/graph`, () => HttpResponse.json(graph)),
       http.get(`/api/v1/tasks/${ROOT_TASK_ID}`, () => HttpResponse.json(rootTask)),
       http.get(`/api/v1/tasks/${ROOT_TASK_ID}/activity`, ({ request }) => {
@@ -405,6 +406,21 @@ describe("TaskDetailPage", () => {
         () => HttpResponse.json(resultView()),
       ),
     );
+  });
+
+  it("retains the actual legacy acknowledgement envelope on positive gateway health", async () => {
+    let body: Record<string, unknown> | undefined;
+    server.use(http.post("/api/v1/commands", async ({ request }) => {
+      body = await request.json() as Record<string, unknown>;
+      return HttpResponse.json({ command_id: body.command_id, aggregate_id: ROOT_TASK_ID, aggregate_version: 4, event_ids: [] });
+    }));
+    renderPage();
+    await waitFor(() => expect(screen.getByRole("button", { name: "确认已处理" })).toBeEnabled());
+    await userEvent.setup().click(screen.getByRole("button", { name: "确认已处理" }));
+    expect(await screen.findByText("当前没有待确认事项")).toBeVisible();
+    expect(body).toMatchObject({ command_type: "AcknowledgeAttentionItem", actor: { type: "local", id: "aitejiu" }, target_id: ROOT_TASK_ID, expected_version: 4 });
+    expect(body?.payload).toEqual({ attention_key: attentionItem.key, source_correlation_id: attentionItem.correlation_id, source_resource_version: 3 });
+    expect(screen.queryByRole("region", { name: "待处理事项确认记录" })).not.toBeInTheDocument();
   });
 
   it("keeps auxiliary facts behind task details without hiding decisions or changing the selected view", async () => {

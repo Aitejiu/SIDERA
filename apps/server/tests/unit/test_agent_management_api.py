@@ -748,7 +748,102 @@ def test_actual_product_openapi_exposes_finite_session_and_management_contracts_
         "key"
         not in document["components"]["schemas"]["ConfigurationResult"]["properties"]
     )
+    tool_route = document["paths"][
+        "/product/v1/workspaces/{workspace_id}/tool-connections"
+    ]["get"]
+    assert tool_route["operationId"] == "listProductToolConnections"
+    assert tool_route["responses"]["200"]["content"]["application/json"]["schema"][
+        "items"
+    ] == {"$ref": "#/components/schemas/ToolConnectionView"}
+    assert set(
+        document["components"]["schemas"]["ToolConnectionView"]["properties"]
+    ) == {
+        "workspace_id",
+        "connection_id",
+        "name",
+        "availability",
+    }
     assert lab.runtime.status()["lifecycle"] == "constructed" and lab.native.calls == []
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["current", "anonymous", "agent", "expired", "revoked", "mismatched", "foreign"],
+)
+def test_product_tool_connection_metadata_requires_current_human_and_has_no_side_effects(
+    management_http_runtime, monkeypatch, variant
+):
+    lab = management_http_runtime
+    workspace_id = lab.runtime.settings.workspace_id
+    connection_id = lab.runtime.task_tool_connections.connection_id
+    for method in (
+        "list_profiles",
+        "list_resources",
+        "create_profile",
+        "create_resource",
+    ):
+        monkeypatch.setattr(
+            lab.runtime.agents.catalog,
+            method,
+            lambda *args, **kwargs: pytest.fail("Tool metadata touched the catalog"),
+        )
+    monkeypatch.setattr(
+        lab.runtime.secret_store,
+        "read",
+        lambda *args: pytest.fail("Tool metadata resolved a secret"),
+    )
+    sessions = lab.runtime.local_sessions.store.sessions
+    session_id = next(iter(sessions))
+    if variant == "anonymous":
+        lab.client.cookies.clear()
+    elif variant in {"expired", "revoked"}:
+        sessions[session_id] = replace(
+            sessions[session_id],
+            **{
+                "expires_at" if variant == "expired" else "revoked_at": datetime.now(
+                    UTC
+                )
+                - timedelta(seconds=1)
+            },
+        )
+    elif variant in {"agent", "mismatched"}:
+        identity = lab.runtime.local_sessions.identity_for_grant(session_id)
+        identity = replace(
+            identity,
+            **{"actor_type": "agent"}
+            if variant == "agent"
+            else {"principal_id": "another-human"},
+        )
+        monkeypatch.setattr(
+            lab.runtime.local_sessions, "authenticate_request", lambda request: identity
+        )
+    elif variant == "foreign":
+        workspace_id = uuid4()
+    with monkeypatch.context() as guarded:
+        guarded.setattr(
+            lab.runtime,
+            "task_tool_connections",
+            SimpleNamespace(connection_id=connection_id),
+        )
+        guarded.setattr(lab.runtime, "grants", SimpleNamespace())
+        reply = lab.client.get(
+            f"/product/v1/workspaces/{workspace_id}/tool-connections"
+        )
+    assert reply.status_code == (
+        200 if variant == "current" else 403 if variant == "foreign" else 401
+    )
+    if variant == "current":
+        assert reply.headers["cache-control"] == "no-store"
+        assert reply.json() == [
+            {
+                "workspace_id": str(workspace_id),
+                "connection_id": str(connection_id),
+                "name": "SIDERA Task Tools",
+                "availability": "configured",
+            }
+        ]
+    assert lab.journal.rows == {} and lab.native.calls == []
+    assert lab.runtime.status()["lifecycle"] == "constructed"
 
 
 @pytest.mark.parametrize(

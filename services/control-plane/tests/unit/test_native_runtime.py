@@ -4,7 +4,7 @@ import os
 import runpy
 import tomllib
 from collections import Counter
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -1020,6 +1020,171 @@ def test_protected_http_lifetime_retains_owned_resources_through_cleanup(
     assert Counter(s.closed) == ALL_STARTUP_CLOSED and not s.native.calls
 
 
+@pytest.fixture
+def native_projection_stream(startup_case, monkeypatch):
+    import threading
+
+    from sidera_control_plane.api import projection_stream
+    from sidera_control_plane.api.dependencies import get_database
+
+    s = startup_case
+    entered, abort = threading.Event(), threading.Event()
+    responses, failures, database_disposals = [], [], []
+    sessions = SimpleNamespace(open=0, opened=0)
+    boundary = object()
+
+    @contextmanager
+    def session():
+        assert s.alive[0] and not s.closed and not database_disposals
+        sessions.open += 1
+        sessions.opened += 1
+        try:
+            yield boundary
+        finally:
+            sessions.open -= 1
+
+    class EmptyChanges:
+        def __init__(self, session, *, retention_seconds):
+            assert session is boundary
+            assert (
+                retention_seconds
+                == s.runtime._settings.projection_change_retention_seconds
+            )
+
+        def cursor_expired(self, workspace_id, cursor):
+            assert (workspace_id, cursor) == (s.workspace_id, 0)
+            return abort.is_set()
+
+        def list_after(self, workspace_id, *, cursor, limit):
+            assert (workspace_id, cursor, limit) == (s.workspace_id, 0, 100)
+            entered.set()
+            return ()
+
+    s.runtime.app.dependency_overrides[get_database] = lambda: SimpleNamespace(
+        session=session
+    )
+    monkeypatch.setattr(projection_stream, "ProjectionChangeRepository", EmptyChanges)
+    monkeypatch.setattr(
+        s.runtime._settings, "projection_stream_poll_interval_seconds", 0.01
+    )
+    dispose = s.runtime._database.dispose
+
+    def record_disposal():
+        assert sessions.open == 0
+        assert s.runtime._active_work == s.runtime._regular_work == 0
+        assert all(not thread.is_alive() for thread in s.runtime._threads)
+        database_disposals.append(True)
+        dispose()
+
+    monkeypatch.setattr(s.runtime._database, "dispose", record_disposal)
+    s.runtime.start_background(background_identity=s.identity)
+    with TestClient(s.runtime.app) as client:
+
+        def read():
+            try:
+                responses.append(
+                    client.get(
+                        f"/api/v1/workspaces/{s.workspace_id}/projection-changes"
+                    )
+                )
+            except BaseException as exc:  # noqa: BLE001 - Forward joined reader failures.
+                failures.append(exc)
+
+        reader = threading.Thread(target=read, name="test-native-projection-stream")
+        reader.start()
+        try:
+            yield SimpleNamespace(
+                case=s,
+                entered=entered,
+                abort=abort,
+                reader=reader,
+                responses=responses,
+                failures=failures,
+                sessions=sessions,
+                database_disposals=database_disposals,
+            )
+        finally:
+            # Settle an unchanged producer after the intended RED assertion fails.
+            abort.set()
+            reader.join(timeout=2)
+            assert not reader.is_alive() and not failures
+            assert s.runtime.close(grace_seconds=1) is True
+            assert all(not thread.is_alive() for thread in s.runtime._threads)
+
+
+def test_close_ends_native_projection_stream_before_disposal(native_projection_stream):
+    stream = native_projection_stream
+    s = stream.case
+    assert stream.entered.wait(2), "Projection route did not poll its repository"
+    assert stream.reader.is_alive() and not stream.responses and not stream.failures
+    assert s.alive[0] and not s.closed and not stream.database_disposals
+    with s.runtime._condition:
+        assert s.runtime._regular_work >= 1
+
+    assert s.runtime.close(grace_seconds=1) is True
+
+    stream.reader.join(timeout=2)
+    assert not stream.reader.is_alive() and not stream.failures
+    response = stream.responses[0]
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
+    assert response.text == ": connected\n\n"
+    assert not stream.abort.is_set()
+    assert stream.sessions.open == 0 and stream.sessions.opened >= 1
+    assert all(not thread.is_alive() for thread in s.runtime._threads)
+    assert Counter(s.closed) == ALL_STARTUP_CLOSED
+    assert stream.database_disposals == [True] and not s.native.calls
+    assert s.runtime.close(grace_seconds=1) is True
+    assert Counter(s.closed) == ALL_STARTUP_CLOSED
+    assert stream.database_disposals == [True] and not s.native.calls
+
+
+def test_close_ends_projection_stream_but_retains_outstanding_original(
+    native_projection_stream, monkeypatch
+):
+    import threading
+
+    stream = native_projection_stream
+    s = stream.case
+    original_drained = threading.Event()
+    monkeypatch.setattr(
+        s.runtime._verifications,
+        "has_outstanding",
+        lambda: not original_drained.is_set(),
+    )
+    try:
+        assert stream.entered.wait(2), "Projection route did not poll its repository"
+        assert stream.reader.is_alive() and not stream.responses and not stream.failures
+        assert s.alive[0] and not s.closed and not stream.database_disposals
+
+        assert s.runtime.close(grace_seconds=0.1) is False
+
+        stream.reader.join(timeout=2)
+        assert not stream.reader.is_alive() and not stream.failures
+        response = stream.responses[0]
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
+        assert response.text == ": connected\n\n"
+        assert not stream.abort.is_set() and stream.sessions.open == 0
+        with s.runtime._condition:
+            assert s.runtime._regular_work == 0
+        assert not s.runtime._stop.is_set() and not s.runtime._drained.is_set()
+        assert not s.runtime._closed and not s.runtime._disposal_complete
+        assert s.alive[0] and not s.closed and not stream.database_disposals
+        assert not s.native.calls
+
+        original_drained.set()
+        assert s.runtime.close(grace_seconds=1) is True
+        assert all(not thread.is_alive() for thread in s.runtime._threads)
+        assert Counter(s.closed) == ALL_STARTUP_CLOSED
+        assert stream.database_disposals == [True] and not s.native.calls
+        assert s.runtime.close(grace_seconds=1) is True
+        assert Counter(s.closed) == ALL_STARTUP_CLOSED
+        assert stream.database_disposals == [True] and not s.native.calls
+    finally:
+        original_drained.set()
+
+
 def test_closing_wins_authenticated_pre_admission_gap_without_business(startup_case):
     import threading
 
@@ -1094,6 +1259,106 @@ def test_runtime_close_before_start_and_repeat_are_true_without_native_calls(
     assert s.runtime.close(grace_seconds=0) is True
     assert s.runtime.close() is True
     assert s.calls == ["disposed"] and not s.native.calls
+
+
+def test_close_signals_drained_maintenance_before_joining_consumers(startup_case):
+    import threading
+
+    s = startup_case
+    entered, release = threading.Event(), threading.Event()
+    stopped, exited = threading.Event(), threading.Event()
+    exit_resources = []
+
+    def probe():
+        entered.set()
+        while not release.is_set():
+            if s.runtime._stop.wait(0.01):
+                stopped.set()
+                break
+        exit_resources.append((s.alive[0], tuple(s.closed)))
+        exited.set()
+
+    try:
+        s.runtime.start_background(background_identity=s.identity)
+        s.runtime._launch("quiescence-probe", probe, 0.01, maintenance=True)
+        assert entered.wait(1)
+        with s.runtime._condition:
+            assert s.runtime._condition.wait_for(
+                lambda: not s.runtime._regular_work, timeout=1
+            )
+            s.runtime._check_drain()
+            assert s.runtime._drained.is_set()
+        result = s.runtime.close(grace_seconds=1)
+        if result is False:
+            assert s.runtime._drained.is_set()
+            assert not s.runtime._stop.is_set() and not exited.is_set()
+            assert s.alive[0] and not s.closed
+        assert result is True
+        assert stopped.is_set() and exited.is_set()
+        assert exit_resources == [(True, ())]
+        assert all(not thread.is_alive() for thread in s.runtime._threads)
+        assert Counter(s.closed) == ALL_STARTUP_CLOSED and not s.native.calls
+        assert s.runtime.close(grace_seconds=1) is True
+        assert Counter(s.closed) == ALL_STARTUP_CLOSED and not s.native.calls
+    finally:
+        release.set()
+        s.runtime._stop.set()
+        s.runtime.close(grace_seconds=1)
+        assert all(not thread.is_alive() for thread in s.runtime._threads)
+
+
+def test_close_retains_maintenance_until_original_verification_drains(
+    startup_case, monkeypatch
+):
+    import threading
+
+    s = startup_case
+    entered, release = threading.Event(), threading.Event()
+    stopped, exited = threading.Event(), threading.Event()
+    original_drained = threading.Event()
+    monkeypatch.setattr(
+        s.runtime._verifications,
+        "has_outstanding",
+        lambda: not original_drained.is_set(),
+    )
+
+    def probe():
+        entered.set()
+        while not release.is_set():
+            if s.runtime._stop.wait(0.01):
+                stopped.set()
+                break
+        exited.set()
+
+    try:
+        s.runtime.start_background(background_identity=s.identity)
+        s.runtime._launch("quiescence-probe", probe, 0.01, maintenance=True)
+        assert entered.wait(1)
+        s.runtime._check_drain()
+        assert not s.runtime._drained.is_set()
+        assert s.runtime.close(grace_seconds=0.02) is False
+        assert not s.runtime._stop.is_set() and not stopped.is_set()
+        assert not exited.is_set() and s.alive[0] and not s.closed
+        assert not s.native.calls
+        original_drained.set()
+        with s.runtime._condition:
+            assert s.runtime._condition.wait_for(
+                lambda: not s.runtime._regular_work, timeout=1
+            )
+            s.runtime._check_drain()
+            assert s.runtime._drained.is_set()
+        assert s.runtime.close(grace_seconds=1) is True
+        assert stopped.is_set() and exited.is_set()
+        assert all(not thread.is_alive() for thread in s.runtime._threads)
+        assert Counter(s.closed) == ALL_STARTUP_CLOSED and not s.native.calls
+        assert s.runtime.close(grace_seconds=1) is True
+        assert Counter(s.closed) == ALL_STARTUP_CLOSED and not s.native.calls
+    finally:
+        original_drained.set()
+        release.set()
+        s.runtime._stop.set()
+        s.runtime.close(grace_seconds=1)
+        assert all(not thread.is_alive() for thread in s.runtime._threads)
 
 
 def test_close_does_not_report_complete_while_first_owned_disposer_is_held(
@@ -1326,6 +1591,8 @@ def test_public_runtime_composes_existing_business_ticks_and_same_saved_reposito
         options["scheduler"]["native_services"] is options["owner"]["native_services"]
     )
     assert options["collaboration"]["scan_all_workspaces"] is True
+    assert options["notification"].get("auto_baseline") is True
+    assert options["notification"]["owner_check"] is options["planning"]["owner_check"]
     assert (
         options["result"]["repository_resolver"]
         is options["owner"]["repository_resolver"]
@@ -1638,3 +1905,212 @@ def test_worker_close_missing_original_link_cannot_authorize_or_mutate(
     monkeypatch.setattr(s.runtime, "_uow", lambda: nullcontext(uow))
     s.runtime._request_original_worker_stop(expected)
     assert reads == ["link"] and s.calls == [] and not s.native.calls
+
+
+@pytest.fixture
+def original_drain_runtime(schema_runtime, monkeypatch):
+    from sidera_control_plane.application.execution_authority import (
+        ExecutionAuthorityReader,
+    )
+    from tests.unit.test_native_handoff_drain import NOW, make_drain_case
+
+    s = schema_runtime
+    case = make_drain_case()
+    scheduled, disposed = [], []
+    s.runtime._settings = s.runtime._settings.model_copy(
+        update={"local_actor_id": "operator"}
+    )
+    monkeypatch.setattr(s.runtime, "_uow", case.uow_factory)
+    monkeypatch.setattr(
+        s.runtime, "_launch", lambda *args, **kwargs: scheduled.append((args, kwargs))
+    )
+    s.runtime._execution_authorizer = ExecutionAuthorityReader(
+        case.uow_factory,
+        principal=lambda: "operator",
+        authorizer=None,
+        clock=lambda: NOW,
+    )
+    s.runtime._owner = SimpleNamespace(
+        gateway_runtime=SimpleNamespace(owner_check=lambda: case.owner),
+        handoff_runtime=SimpleNamespace(coordinator=case.coordinator),
+        close=lambda: disposed.append("owner"),
+    )
+    s.runtime._verifications = SimpleNamespace(has_outstanding=lambda: False)
+    try:
+        yield SimpleNamespace(
+            runtime=s.runtime, case=case, scheduled=scheduled, disposed=disposed
+        )
+    finally:
+        s.runtime._owner = None
+        s.runtime._planning = None
+
+
+def test_close_handoff_queries_original_stop_instead_of_rejected_ordinary_stop(
+    original_drain_runtime,
+):
+    from sidera_control_plane.domain.handoffs import HandoffPhase
+    from tests.unit.test_native_handoff_drain import known_stop, source_resources
+
+    s = original_drain_runtime
+    case = s.case
+    before = source_resources(case)
+    assert s.runtime.close(grace_seconds=0) is False
+    s.runtime._check_drain()
+    assert case.public.calls == [("get_stop", case.operation_id)]
+    assert not case.uow.commands.applied and not case.uow.commands.rejected
+    assert source_resources(case) == before
+    assert not s.runtime._drained.is_set()
+    assert s.runtime.close(grace_seconds=0) is False
+    known_stop(case)
+    s.runtime._check_drain()
+    assert case.uow.handoff_transitions.item.phase is HandoffPhase.STOP_SOURCE
+    assert not s.runtime._drained.is_set()
+    assert s.runtime.close(grace_seconds=0) is False
+    case.link = replace(case.link, status="stopped", event_cursor=2)
+    s.runtime._check_drain()
+    assert s.runtime._drained.is_set()
+    assert s.runtime.close(grace_seconds=0) is True
+    assert s.disposed == ["owner"]
+    assert case.uow.handoff_transitions.item.target_execution_id is None
+    assert [command.command_type for command in case.uow.commands.applied] == [
+        "StopHandoffSource"
+    ]
+    assert not case.uow.commands.rejected
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "other_phase",
+        "legacy",
+        "blocked",
+        "blocked_unknown",
+        "failed",
+        "no_service",
+        "no_owner",
+    ],
+)
+def test_close_active_handoff_cannot_fall_back_to_ordinary_stop(
+    original_drain_runtime,
+    kind,
+):
+    from sidera_control_plane.domain.handoffs import (
+        HandoffPhase,
+        HandoffTransitionStatus,
+    )
+    from tests.unit.test_native_handoff_drain import source_resources
+
+    s = original_drain_runtime
+    case = s.case
+    current = case.uow.handoff_transitions.item
+    if kind == "other_phase":
+        current.phase = HandoffPhase.CREATE_TARGET_EXECUTION
+    elif kind == "legacy":
+        current.handoff_schema_version, current.native_payload = 1, None
+    elif kind == "no_service":
+        case.coordinator._native_handoff = None
+    elif kind == "no_owner":
+        s.runtime._owner = None
+    else:
+        current.status = HandoffTransitionStatus(kind)
+    before = source_resources(case)
+    s.runtime._request_original_worker_stop(case.link)
+    assert source_resources(case) == before and not case.public.calls
+    assert not case.uow.commands.applied and not case.uow.commands.rejected
+
+
+def test_close_without_handoff_retains_real_ordinary_stop(original_drain_runtime):
+    s = original_drain_runtime
+    case = s.case
+    case.uow.handoff_transitions.item = None
+    s.runtime._request_original_worker_stop(case.link)
+    assert case.uow.executions.values[case.link.execution_id].stop_requested
+    assert [command.command_type for command in case.uow.commands.applied] == [
+        "StopExecution"
+    ]
+    assert [event.event_type for event in case.events] == ["ExecutionStopRequested"]
+    assert not case.uow.commands.rejected and not case.public.calls
+
+
+@pytest.mark.parametrize("first_receipt", ["unknown", "failed"])
+def test_close_unknown_or_failed_handoff_still_attempts_other_worker_and_planner(
+    original_drain_runtime,
+    first_receipt,
+):
+    from sidera_agents.contracts import StopReceipt
+
+    from tests.unit.test_native_handoff_drain import make_drain_case
+
+    s = original_drain_runtime
+    first, second = s.case, make_drain_case()
+    first.receipt = StopReceipt(
+        operation_id=first.operation_id,
+        run_id=first.link.run_id,
+        status=first_receipt,
+        reason_code=None,
+        evidence_sequence=None,
+    )
+    for name in (
+        "executions",
+        "sessions",
+        "leases",
+        "workers",
+        "bindings",
+        "workspaces",
+    ):
+        getattr(first.uow, name).values.update(getattr(second.uow, name).values)
+    cases = {case.link.workspace_id: case for case in (first, second)}
+    first.uow.execution_authorities.get = lambda identifier, **kwargs: next(
+        (case.authority for case in cases.values() if case.authority.id == identifier),
+        None,
+    )
+    first.uow.execution_authorities.get_link = (
+        lambda workspace_id, execution_id, **kwargs: (
+            cases[workspace_id].link
+            if workspace_id in cases
+            and cases[workspace_id].link.execution_id == execution_id
+            else None
+        )
+    )
+    first.uow.execution_authorities.list_reconciliation_links = lambda *a, **k: (
+        first.link,
+        second.link,
+    )
+    first.uow.agent_bindings.history = lambda workspace_id, *a, **k: (
+        cases[workspace_id].original_selected,
+    )
+    first.uow.agent_bindings.get = lambda workspace_id, *a, **k: (
+        cases[workspace_id].selected
+    )
+    planner, attempted = object(), []
+    first.uow.planning_authorities.list_reconciliation_links = lambda *a, **k: (
+        planner,
+    )
+    s.runtime._planning = SimpleNamespace(
+        runner=SimpleNamespace(
+            drain_original_run=lambda link: attempted.append(link) or True
+        )
+    )
+    assert s.runtime.close(grace_seconds=0) is False
+    s.runtime._check_drain()
+    assert first.public.calls == [("get_stop", first.operation_id)]
+    assert first.uow.executions.values[second.link.execution_id].stop_requested
+    assert attempted == [planner]
+    assert not first.uow.commands.rejected and not s.runtime._drained.is_set()
+    assert s.runtime.close(grace_seconds=0) is False
+
+
+@pytest.mark.parametrize("held", ["_admitted", "_regular_work"])
+def test_close_drain_retains_admitted_and_regular_work_fence(
+    original_drain_runtime,
+    held,
+):
+    s = original_drain_runtime
+    setattr(s.runtime, held, 1)
+    try:
+        assert s.runtime.close(grace_seconds=0) is False
+        s.runtime._check_drain()
+        assert not s.case.public.calls and not s.runtime._drained.is_set()
+        assert not s.case.uow.commands.applied and not s.case.uow.commands.rejected
+    finally:
+        setattr(s.runtime, held, 0)

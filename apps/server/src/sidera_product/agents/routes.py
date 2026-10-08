@@ -41,6 +41,7 @@ from .schemas import (
     RuntimeRegisterBody,
     RuntimeStatusBody,
     StatusBody,
+    ToolConnectionView,
 )
 
 if TYPE_CHECKING:
@@ -621,6 +622,24 @@ def product_management_router(owner: ProductRuntime) -> APIRouter:
         prefix="/product/v1/workspaces/{workspace_id}",
         dependencies=[Depends(_no_store)],
     )
+
+    @router.get(
+        "/tool-connections",
+        response_model=tuple[ToolConnectionView, ...],
+        operation_id="listProductToolConnections",
+    )
+    async def tool_connections(
+        workspace_id: UUID, request: Request
+    ) -> tuple[ToolConnectionView, ...]:
+        await current_human(owner, request, workspace_id)
+        return (
+            ToolConnectionView(
+                workspace_id=owner.settings.workspace_id,
+                connection_id=owner.task_tool_connections.connection_id,
+                name="SIDERA Task Tools",
+                availability="configured",
+            ),
+        )
 
     @router.get(
         "/configuration-requests",

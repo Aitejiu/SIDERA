@@ -1,5 +1,8 @@
 import json
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from sidera_control_plane.api.openapi_contract import export_openapi
 
@@ -218,6 +221,66 @@ EXPECTED_NOTIFICATION_WORKFLOW_SCHEMAS = {
 }
 
 
+def _assert_no_orm_schema_identifiers(document: dict[str, Any]) -> None:
+    schemas = document.get("components", {}).get("schemas", {})
+    for schema_name in schemas:
+        assert not schema_name.endswith("Model"), schema_name
+
+    schema_prefix = "#/components/schemas/"
+
+    def check_references(value: object) -> None:
+        if isinstance(value, dict):
+            reference = value.get("$ref")
+            if isinstance(reference, str) and reference.startswith(schema_prefix):
+                schema_name = reference.removeprefix(schema_prefix).split("/", 1)[0]
+                assert not schema_name.endswith("Model"), reference
+            for nested in value.values():
+                check_references(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                check_references(nested)
+
+    check_references(document)
+
+
+def test_orm_schema_guard_allows_public_model_titles() -> None:
+    document = {
+        "components": {
+            "schemas": {
+                "NativeRunView": {
+                    "type": "object",
+                    "properties": {
+                        "observed_model": {"title": "Observed Model", "type": "string"},
+                        "selected_model": {"title": "Selected Model", "type": "string"},
+                    },
+                }
+            }
+        }
+    }
+
+    _assert_no_orm_schema_identifiers(document)
+
+
+def test_orm_schema_guard_rejects_orm_component_name() -> None:
+    document = {"components": {"schemas": {"TaskModel": {"type": "object"}}}}
+
+    with pytest.raises(AssertionError):
+        _assert_no_orm_schema_identifiers(document)
+
+
+def test_orm_schema_guard_rejects_dangling_orm_reference() -> None:
+    document = {
+        "components": {
+            "schemas": {
+                "TaskResponse": {"allOf": [{"$ref": "#/components/schemas/TaskModel"}]}
+            }
+        }
+    }
+
+    with pytest.raises(AssertionError):
+        _assert_no_orm_schema_identifiers(document)
+
+
 def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) -> None:
     output = tmp_path / "nested" / "openapi.json"
 
@@ -229,7 +292,7 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
     assert first_bytes == output.read_bytes()
     assert first_bytes.endswith(b"\n")
     assert set(first["paths"]) >= EXPECTED_PATHS
-    assert "Model" not in first_bytes.decode("utf-8")
+    _assert_no_orm_schema_identifiers(first)
 
     for path, schema_name in EXPECTED_TYPED_RESPONSES.items():
         response_schema = first["paths"][path]["get"]["responses"]["200"]["content"][

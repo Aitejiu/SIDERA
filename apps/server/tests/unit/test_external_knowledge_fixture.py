@@ -114,6 +114,39 @@ def test_external_known_empty_catalog_denies_other_scopes_and_references(case):
     assert server.facts()["thread_alive"] is False
 
 
+@pytest.mark.parametrize("include_page_list", [False, True])
+def test_owned_page_list_opt_in_preserves_search_and_scope(include_page_list):
+    server = knowledge_fixture_module().OwnedKnowledgeServer(
+        uuid4(), include_page_list=include_page_list
+    )
+    server.start()
+    try:
+        with httpx.Client(trust_env=False, timeout=2) as client:
+            headers = {"Authorization": "Bearer " + server.token.get_secret_value()}
+            base = f"{server.url}/api/v1/workspaces/{server.workspace}/knowledge"
+            listed = client.get(base + "/pages", headers=headers)
+            assert listed.status_code == (200 if include_page_list else 404)
+            if include_page_list:
+                assert listed.json() == {"items": [], "next_cursor": None}
+            assert client.get(base + "/search?q=owned", headers=headers).json() == {
+                "items": [],
+                "next_cursor": None,
+            }
+            assert client.get(base + "/pages").status_code == 401
+            assert (
+                client.get(
+                    f"{server.url}/api/v1/workspaces/{uuid4()}/knowledge/pages",
+                    headers=headers,
+                ).status_code
+                == 403
+            )
+            assert client.post(base + "/pages", headers=headers).status_code == 404
+            assert client.get(base + "/other", headers=headers).status_code == 404
+        assert server.token.get_secret_value() not in json.dumps(server.facts())
+    finally:
+        assert server.close()
+
+
 def test_lifecycle_fixture_budget_fits_actual_mandatory_native_schema_guidance():
     from tests.support import product_lab
 

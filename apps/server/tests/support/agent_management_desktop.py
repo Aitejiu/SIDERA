@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from contextlib import redirect_stdout, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 from urllib.error import URLError
 from urllib.request import urlopen
 from uuid import UUID
@@ -22,6 +23,7 @@ from uuid import UUID
 import pytest
 import uvicorn
 from fastapi import FastAPI
+from pydantic import SecretStr
 from sidera_agents.contracts import (
     CapabilitySupport,
     NativeCancelOutcome,
@@ -339,6 +341,13 @@ class OwnedBootstrapExport:
                 os.close(descriptor)
 
 
+class OwnedProcessPort(Protocol):
+    backend: OwnedUvicorn | None
+    vite: subprocess.Popen[bytes] | None
+    bootstrap_export: OwnedBootstrapExport | None
+    owned: dict[str, object]
+
+
 @dataclass
 class FreshDesktopLab:
     admission: FreshDesktopAdmission
@@ -517,6 +526,21 @@ def _validate_fresh_context(
     return value
 
 
+class _FreshContextListenerCleanupError(ProductTargetError):
+    pass
+
+
+def _close_rejected_fresh_context_listener(listener: socket.socket) -> None:
+    try:
+        listener.close()
+        closed = listener.fileno() == -1
+    except OSError:
+        closed = False
+    if not closed:
+        _retained_desktop_resources.append(listener)
+        raise _FreshContextListenerCleanupError("fresh_context_refused") from None
+
+
 def load_or_create_fresh_context(
     admission: FreshDesktopAdmission,
 ) -> tuple[dict[str, object], socket.socket]:
@@ -543,7 +567,7 @@ def load_or_create_fresh_context(
             raise ProductTargetError("fresh_context_refused") from None
         listener, bound_port = _bind_listener("127.0.0.1", context["backend_port"])
         if bound_port != context["backend_port"]:
-            listener.close()
+            _close_rejected_fresh_context_listener(listener)
             raise ProductTargetError("fresh_context_refused")
         return context, listener
 
@@ -567,8 +591,7 @@ def load_or_create_fresh_context(
         context = _validate_fresh_context(context, admission)
         write_private_json(context_file, context)
     except (OSError, ProductTargetError, TypeError, ValueError):
-        with suppress(OSError):
-            listener.close()
+        _close_rejected_fresh_context_listener(listener)
         raise ProductTargetError("fresh_context_refused") from None
     return context, listener
 
@@ -894,7 +917,7 @@ def start_owned_backend(
     settings: ProductSettings,
     *,
     listener: socket.socket | None = None,
-    resource_owner: FreshDesktopLab,
+    resource_owner: OwnedProcessPort,
 ) -> OwnedUvicorn:
     if listener is None:
         listener, port = _bind_listener(settings.bind_host)
@@ -977,8 +1000,17 @@ def start_owned_vite(
     web_root: Path,
     backend_url: str,
     port: int,
-    resource_owner: FreshDesktopLab,
+    resource_owner: OwnedProcessPort,
+    knowledge_port: int | None = None,
+    knowledge_token: SecretStr | None = None,
 ) -> subprocess.Popen[bytes]:
+    if (knowledge_port is not None or knowledge_token is not None) and (
+        type(knowledge_port) is not int
+        or not 1 <= knowledge_port <= 65535
+        or not isinstance(knowledge_token, SecretStr)
+        or not knowledge_token.get_secret_value().strip()
+    ):
+        raise ProductTargetError("fresh_knowledge_binding_refused")
     environment, node, vite_script = _vite_environment(tmp_path, web_root)
     environment.update(
         {
@@ -986,6 +1018,11 @@ def start_owned_vite(
             "SIDERA_WEB_PRODUCT_URL": backend_url,
         }
     )
+    if knowledge_port is not None and knowledge_token is not None:
+        environment.update(
+            SIDERA_WEB_KNOWLEDGE_SERVICE_PORT=str(knowledge_port),
+            SIDERA_WEB_KNOWLEDGE_TOKEN=knowledge_token.get_secret_value(),
+        )
     try:
         process = subprocess.Popen(
             [
@@ -1043,7 +1080,7 @@ def _stop_owned_process(process: subprocess.Popen[bytes]) -> bool:
 def create_cli_bootstrap(
     settings: ProductSettings,
     *,
-    resource_owner: FreshDesktopLab,
+    resource_owner: OwnedProcessPort,
 ) -> dict[str, str]:
     captured = io.StringIO()
     try:
@@ -1115,6 +1152,7 @@ def management_desktop_lab(tmp_path):
     lab: FreshDesktopLab | None = None
     released = False
     backend_listener: socket.socket | None = None
+    context_cleanup_complete = True
     unowned_listener_closed = backend_listener is None
     try:
         transfer_intent = {
@@ -1143,7 +1181,11 @@ def management_desktop_lab(tmp_path):
         else:
             empty = saved["empty_inventory"]
 
-        context, backend_listener = load_or_create_fresh_context(admission)
+        try:
+            context, backend_listener = load_or_create_fresh_context(admission)
+        except _FreshContextListenerCleanupError:
+            context_cleanup_complete = False
+            raise
         context_paths = fresh_desktop_context_paths(admission)
         for directory in (
             context_paths["repository"],
@@ -1273,7 +1315,11 @@ def management_desktop_lab(tmp_path):
                 unowned_listener_closed = False
             if not unowned_listener_closed:
                 _retained_desktop_resources.append(backend_listener)
-        clean = unowned_listener_closed and (True if lab is None else lab.close())
+        clean = (
+            context_cleanup_complete
+            and unowned_listener_closed
+            and (True if lab is None else lab.close())
+        )
         if clean:
             try:
                 idle = [guard.inspect()["idle"] for guard in guards]

@@ -96,13 +96,20 @@ def test_internal_service_identity_is_stable_and_not_http_auth(
         ProductSettings.model_validate(settings_values)
     )
     queried = []
+    grant_queries = []
 
     def missing_session(*, session_id=None, token_digest=None):
         assert session_id == UUID(int=789) and token_digest is None
         queried.append(session_id)
         return None
 
+    def missing_grant(*, grant_id=None, bearer_digest=None):
+        assert grant_id == UUID(int=789) and bearer_digest is None
+        grant_queries.append(grant_id)
+        return None
+
     monkeypatch.setattr(first.authority_store, "find_session", missing_session)
+    monkeypatch.setattr(first.authority_store, "find_grant", missing_grant)
     try:
         assert first.background_identity == second.background_identity
         identity = first.background_identity
@@ -112,8 +119,10 @@ def test_internal_service_identity_is_stable_and_not_http_auth(
             first.request_authorizer.identity_for_grant(identity.grant_id) is identity
         )
         assert queried == []
+        assert grant_queries == []
         assert first.request_authorizer.identity_for_grant(UUID(int=789)) is None
         assert queried == [UUID(int=789)]
+        assert grant_queries == [UUID(int=789)]
         first.request_authorizer.require(
             identity.grant_id, "profile.list", identity_workspace(first)
         )
@@ -126,6 +135,7 @@ def test_internal_service_identity_is_stable_and_not_http_auth(
                 identity.grant_id, "profile.list", UUID(int=321)
             )
         assert queried == [UUID(int=789)]
+        assert grant_queries == [UUID(int=789)]
     finally:
         assert first.close(grace_seconds=0) is True
         assert second.close(grace_seconds=0) is True
@@ -227,7 +237,11 @@ async def test_mount_keeps_cp_api_path_and_inert_health_denies_anonymous(
         assert response.json()["execution"]["ready"] is False
         assert response.json()["knowledge"]["available"] is False
         assert response.json()["main_agent"]["available"] is False
-        assert (
-            await client.get("/agents/v1/workspaces/unknown/profiles")
-        ).status_code == 401
+        anonymous = await client.get(
+            f"/agents/v1/workspaces/{app.state.product_runtime.settings.workspace_id}/profiles"
+        )
+        assert anonymous.status_code == 401
+        assert anonymous.json()["detail"]["code"] == "local_session_required"
+        invalid = await client.get("/agents/v1/workspaces/unknown/profiles")
+        assert invalid.status_code == 422
     assert app.state.product_runtime.close(grace_seconds=0) is True

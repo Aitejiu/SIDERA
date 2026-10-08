@@ -235,6 +235,11 @@ describe("composed Profile create route", () => {
       expect(app.router.state.location.search).toBe("?view=settings");
       expect(await screen.findByRole("heading", { name: createdDraft.name })).toBeInTheDocument();
       expect(screen.getByLabelText("名称")).toHaveValue(createdDraft.name);
+      await waitFor(() => {
+        const state = loadTabs(WS);
+        expect(state.activeTabId).toBe(`agent:${PROFILE_ID}`);
+        expect(state.tabs.some(tab => tab.id === "agent:new")).toBe(false);
+      });
       const state = loadTabs(WS);
       expect(state.activeTabId).toBe(`agent:${PROFILE_ID}`);
       expect(state.tabs.some(tab => tab.id === "agent:new")).toBe(false);

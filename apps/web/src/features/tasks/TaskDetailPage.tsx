@@ -7,7 +7,9 @@ import { AsyncState } from "@/shared/ui/AsyncState";
 import { useTaskDetailsState } from "@/app/WorkspaceViewState";
 import { useWorkspaceStreamOptional } from "@/app/WorkspaceStreamProvider";
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
-import { AttentionPanel } from "@/features/attention/AttentionPanel";
+import { AttentionPanel, type NativeAttentionPanelAction } from "@/features/attention/AttentionPanel";
+import { NativeAttentionRecovery } from "@/features/attention/NativeAttentionRecovery";
+import { useNativeAttentionAcknowledgement } from "@/features/attention/useNativeAttentionAcknowledgement";
 import { CollaborationSummary } from "@/features/collaboration/CollaborationSummary";
 
 import {
@@ -54,6 +56,12 @@ export function TaskDetailPage() {
     enabled: resolvedWorkspaceId.length > 0
       && resolvedRootTaskId.length > 0
       && (graphQuery.data?.overview.attention_items.length ?? 0) > 0,
+  });
+  const attentionAction = useNativeAttentionAcknowledgement({
+    workspaceId: resolvedWorkspaceId, rootTaskId: resolvedRootTaskId,
+    onRefresh: async () => {
+      await Promise.all([graphQuery.refetch({ throwOnError: true }), rootTaskQuery.refetch({ throwOnError: true })]);
+    },
   });
   const activityQuery = useInfiniteQuery({
     queryKey: taskActivityQueryKey(resolvedWorkspaceId, resolvedRootTaskId),
@@ -106,6 +114,7 @@ export function TaskDetailPage() {
       <div className="breadcrumb">
         <Link to={`/workspaces/${resolvedWorkspaceId}/tasks`}>任务</Link> / {graphQuery.data?.overview.title ?? "任务详情"}
       </div>
+      <NativeAttentionRecovery workspaceId={resolvedWorkspaceId} actions={attentionAction} />
       <AsyncState
         isLoading={graphQuery.isPending}
         isError={graphQuery.isError}
@@ -115,7 +124,7 @@ export function TaskDetailPage() {
       >
         {graphQuery.data ? (
           <TaskDeliveryContent
-            key={resolvedRootTaskId}
+            key={`${resolvedWorkspaceId}:${resolvedRootTaskId}`}
             graph={graphQuery.data}
             activity={activity}
             activityError={activityQuery.isError}
@@ -125,14 +134,15 @@ export function TaskDetailPage() {
             onRetryActivity={() => void activityQuery.refetch()}
             onOpenSubtask={openSubtask}
             rootTaskVersion={rootTaskQuery.data?.version}
+            nativeAttentionAction={attentionAction.authority?.kind === "legacy" ? undefined : attentionAction}
             viewMode={viewMode}
             onViewModeChange={setViewMode}
             workspaceId={resolvedWorkspaceId}
             rootTaskId={resolvedRootTaskId}
-            onAcknowledged={() => {
+            onAcknowledged={attentionAction.authority?.kind === "legacy" ? () => {
               void graphQuery.refetch();
               void rootTaskQuery.refetch();
-            }}
+            } : undefined}
             onRefreshAttention={async () => {
               await Promise.all([graphQuery.refetch(), rootTaskQuery.refetch()]);
             }}
@@ -153,6 +163,7 @@ function TaskDeliveryContent({
   onRetryActivity,
   onOpenSubtask,
   rootTaskVersion,
+  nativeAttentionAction,
   viewMode,
   onViewModeChange,
   workspaceId,
@@ -169,11 +180,12 @@ function TaskDeliveryContent({
   onRetryActivity: () => void;
   onOpenSubtask: (subtaskKey: string) => void;
   rootTaskVersion: number | undefined;
+  nativeAttentionAction: NativeAttentionPanelAction | undefined;
   viewMode: "board" | "dag" | "results";
   onViewModeChange: (mode: "board" | "dag" | "results") => void;
   workspaceId: string;
   rootTaskId: string;
-  onAcknowledged: () => void;
+  onAcknowledged: (() => void) | undefined;
   onRefreshAttention: () => Promise<void>;
 }) {
   const detailsRef = useRef<HTMLDetailsElement>(null);
@@ -258,6 +270,7 @@ function TaskDeliveryContent({
             workspaceId={workspaceId}
             rootTaskId={rootTaskId}
             rootTaskVersion={rootTaskVersion}
+            nativeAction={nativeAttentionAction}
             rootTaskTitle={graph.overview.title}
             items={graph.overview.attention_items}
             onAcknowledged={onAcknowledged}

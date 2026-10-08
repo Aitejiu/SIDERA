@@ -312,6 +312,7 @@ class SessionEventIngestor:
                     "session.completed": "succeeded",
                     "session.failed": "failed",
                     "session.closed": "stopped",
+                    "native.stop.stopped": "stopped",
                     "native.run.started": "running",
                 }.get(event.event_type, link.status)
                 if link.status in {"succeeded", "failed", "stopped", "cancelled"}:

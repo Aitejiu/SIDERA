@@ -14,14 +14,14 @@ import {
   ServerCog,
 } from "lucide-react";
 import { Link } from "react-router-dom";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 import { AssigneeAppointment } from "../assignments/AssigneeAppointment";
 import type { AssigneeValue } from "../assignments/types";
 
 import { workerCollaborationLabel } from "../collaboration/types";
-import { WorkerGovernancePanel } from "../collaboration/WorkerGovernancePanel";
+import { WorkerGovernancePanel, type NativeWorkerGovernanceOwner } from "../collaboration/WorkerGovernancePanel";
 import { WorkerContextSummary } from "../context/WorkerContextSummary";
 import type { ResultInputAction, WorkerResultInputsView } from "../result-inputs/api";
 import { ResultInputPanel } from "../result-inputs/ResultInputPanel";
@@ -53,6 +53,8 @@ export function WorkerSidebar({
   resultViewError,
   onRetryResultView,
   onOpenResults,
+  nativeActions,
+  nativeResultActionRecovery,
 }: {
   workspace: WorkerWorkspace;
   legacyExecutionEligible: boolean;
@@ -79,6 +81,8 @@ export function WorkerSidebar({
   resultViewError: boolean;
   onRetryResultView: () => void;
   onOpenResults: (candidateId: string | undefined) => void;
+  nativeActions?: NativeWorkerGovernanceOwner;
+  nativeResultActionRecovery?: ReactNode;
 }) {
   const { worker_item: workerItem, current_runtime: runtime } = workspace;
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -133,6 +137,8 @@ export function WorkerSidebar({
           </button>
         ) : null}
       </section>
+
+      {nativeResultActionRecovery}
 
       <details className="worker-item-sidebar__collapsible">
         <summary className="worker-item-sidebar__collapsible-summary">
@@ -252,6 +258,7 @@ export function WorkerSidebar({
         canIntervene={workspace.can_intervene}
         collaboration={workspace.collaboration}
         {...(resultInputs === undefined ? {} : { resultInputs })}
+        {...(nativeActions === undefined ? {} : { nativeActions })}
         onRefresh={onRefresh}
       />
 

@@ -78,6 +78,7 @@ class ExecutionFact:
     requires_operator: bool = False
     blocked_since: datetime | None = None
     native_binding_version: int | None = None
+    is_result_verification: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -495,7 +496,10 @@ class WorkerItemProjectionService:
         active_lease_by_execution = {
             item.execution_id: item for item in self.leases if item.status == "active"
         }
-        current_execution = execution_values[0] if execution_values else None
+        current_execution = next(
+            (item for item in execution_values if not item.is_result_verification),
+            None,
+        )
         current_session = (
             session_by_execution.get(current_execution.id)
             if current_execution is not None

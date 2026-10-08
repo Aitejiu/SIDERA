@@ -1,15 +1,31 @@
+from copy import deepcopy
 from dataclasses import fields, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from sidera_agents.contracts import ProfileRef
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sidera_agents.contracts import ProfileRef, RunSnapshot
 
+from sidera_control_plane.api.schemas import (
+    CommandResponse,
+    NativeHandoffProposalResponse,
+    NativeHandoffTransitionResponse,
+)
+from sidera_control_plane.application.assignments import TrustedAssignmentIdentity
+from sidera_control_plane.application.profile_handoff import (
+    ProfileHandoffValidator,
+    native_proposal_projection,
+    native_transition_projection,
+)
 from sidera_control_plane.application.workspace_handoff import (
     WorkspaceHandoffError,
     WorkspaceHandoffService,
 )
+from sidera_control_plane.domain.agent_bindings import AssignmentDenied
+from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.handoff_evidence import (
     HandoffCheckpointEvidence,
@@ -602,3 +618,721 @@ def test_native_evidence_decoder_rejects_single_bad_field(kind, mutation):
         facts["schema_version"] = {"float": 2.0, "string": "2", "bool": True}[mutation]
     with pytest.raises(ValidationError):
         type(value).from_native_mapping(facts)
+
+
+@pytest.fixture
+def native_handoff_validator_case(monkeypatch):
+    from tests.unit.test_native_handoff_drain import NOW as DRAIN_NOW
+    from tests.unit.test_native_handoff_drain import make_drain_case
+
+    case = make_drain_case()
+    stored_payload = case.uow.handoff_transitions.item.native_payload
+    stored_bytes = stored_payload.canonical_bytes()
+    case.payload = replace(
+        stored_payload,
+        input_plan={"pending_inputs": ["input:original"]},
+        impact_summary={
+            "worker_item_context_version": 1,
+            "capability_requirements": ["code"],
+        },
+    )
+    payload = case.payload
+    original_bytes, original_hash = payload.canonical_bytes(), payload.content_hash
+    case.snapshots = [payload, payload]
+    case.collect_calls, case.read_calls = [], []
+    case.target_calls, case.authorize_calls, case.collected = [], [], []
+    case.deny_read_at = None
+    case.address = {
+        "worker_item_id": payload.worker_item_id,
+        "execution_id": payload.source_execution_id,
+        "session_id": payload.source_session_id,
+        "worker_id": payload.source_worker_id,
+        "run_id": payload.source_run_id,
+        "binding_version": payload.source_binding_version,
+        "session_version": payload.source_session_version,
+        "context_version": 1,
+        "plan_generation": payload.observed_plan_generation,
+    }
+    run = case.snapshot.model_dump()
+    run.update(state="running", input_open=True)
+    case.snapshot = RunSnapshot.model_validate(run)
+
+    def authorize_target(workspace_id, target_type, target_id):
+        assert (workspace_id, target_type, target_id) == (
+            payload.workspace_id,
+            "worker_item",
+            payload.worker_item_id,
+        )
+        case.authorize_calls.append((workspace_id, target_type, target_id))
+
+    def resolve_profile(workspace_id, profile_id, revision, requirements):
+        assert (workspace_id, profile_id, revision, requirements) == (
+            payload.workspace_id,
+            payload.target_profile_ref.profile_id,
+            payload.target_profile_ref.revision,
+            frozenset({"code"}),
+        )
+        case.target_calls.append((workspace_id, profile_id, revision, requirements))
+        return payload.target_profile_ref, ()
+
+    def require(authority_id, operation, workspace_id):
+        assert (authority_id, operation, workspace_id) == (
+            payload.source_authority_id,
+            "run.read",
+            payload.workspace_id,
+        )
+        case.read_calls.append((authority_id, operation, workspace_id))
+        if len(case.read_calls) == case.deny_read_at:
+            raise AssignmentDenied("controlled source read denied")
+        return case.authority
+
+    def collect(
+        uow,
+        workspace_id,
+        address,
+        assignee,
+        profile,
+        *,
+        reason,
+        instruction,
+        input_plan,
+        expected_version,
+        lock=False,
+    ):
+        assert uow is case.uow and workspace_id == payload.workspace_id
+        assert address in (
+            case.address,
+            {**case.address, "execution_mode": "native_profile"},
+        )
+        assert (assignee, profile, reason, instruction, expected_version) == (
+            payload.target_assignee,
+            payload.target_profile_ref,
+            payload.handoff_reason,
+            payload.handoff_instruction,
+            payload.source_worker_item_version,
+        )
+        assert input_plan in (
+            payload.input_plan,
+            payload.canonical_payload()["input_plan"],
+        )
+        snapshot = case.snapshots[len(case.collect_calls)]
+        case.collect_calls.append(lock)
+        case.collected.append(
+            (snapshot, snapshot.canonical_bytes(), snapshot.content_hash)
+        )
+        return snapshot
+
+    def forbidden_command(*args, **kwargs):
+        pytest.fail("Native handoff validation attempted a command mutation")
+
+    case.validator = ProfileHandoffValidator(
+        assignments=SimpleNamespace(
+            authorize_target=authorize_target, resolve_profile=resolve_profile
+        ),
+        identity=TrustedAssignmentIdentity(
+            case.authority.principal_id, case.services.catalog_grant_id
+        ),
+        native_services=case.services,
+        clock=lambda: DRAIN_NOW,
+    )
+    monkeypatch.setattr(case.validator, "collect", collect)
+    monkeypatch.setattr(
+        case.validator, "reader", lambda uow: SimpleNamespace(require=require)
+    )
+    monkeypatch.setattr(case.uow.commands, "record_applied", forbidden_command)
+    monkeypatch.setattr(case.uow.commands, "record_rejected", forbidden_command)
+    yield case
+    assert payload.canonical_bytes() == original_bytes
+    assert payload.content_hash == original_hash
+    assert stored_payload.canonical_bytes() == stored_bytes
+    for snapshot, canonical_bytes, content_hash in case.collected:
+        assert snapshot.canonical_bytes() == canonical_bytes
+        assert snapshot.content_hash == content_hash
+    assert case.uow.commands.applied == case.uow.commands.rejected == []
+    assert case.events == []
+    for name in (
+        "executions",
+        "sessions",
+        "leases",
+        "workers",
+        "bindings",
+        "workspaces",
+        "gateway_operations",
+    ):
+        repository = getattr(case.uow, name)
+        assert repository.saved == repository.added == []
+
+
+def native_heartbeat_prepare_envelope(case):
+    payload = case.payload
+    return CommandEnvelope(
+        id=uuid4(),
+        workspace_id=payload.workspace_id,
+        command_type="PrepareProfileHandoff",
+        target_type="worker_item",
+        actor_type="user",
+        actor_id=case.authority.principal_id,
+        target_id=payload.worker_item_id,
+        payload={
+            "proposal_schema_version": 2,
+            "context": {
+                "execution_mode": "native_profile",
+                **{
+                    key: str(value) if key.endswith("_id") else value
+                    for key, value in case.address.items()
+                },
+            },
+            "target_assignee": {
+                "kind": payload.target_assignee.kind,
+                "id": str(payload.target_assignee.id),
+            },
+            "target_profile_ref": payload.target_profile_ref.model_dump(mode="json"),
+            "handoff_reason": payload.handoff_reason,
+            "handoff_instruction": payload.handoff_instruction,
+            "input_plan": payload.canonical_payload()["input_plan"],
+            "proposal_ttl_seconds": 300,
+        },
+        expected_version=payload.source_worker_item_version,
+        idempotency_key="native-heartbeat-prepare",
+        correlation_id=uuid4(),
+    )
+
+
+def assert_native_heartbeat_inspection(case, *, authorizations):
+    payload = case.payload
+    assert case.collect_calls == [False, True]
+    assert (
+        case.read_calls
+        == [(payload.source_authority_id, "run.read", payload.workspace_id)] * 2
+    )
+    assert case.public.calls == [("get_run", payload.source_run_id)]
+    assert len(case.target_calls) == 2
+    assert len(case.authorize_calls) == authorizations
+
+
+@pytest.mark.parametrize(
+    ("first_delta", "locked_delta"),
+    [(1, 2), (0, 1)],
+    ids=["before-and-locked", "locked-only"],
+)
+def test_native_handoff_validator_tolerates_worker_heartbeats(
+    native_handoff_validator_case, first_delta, locked_delta
+):
+    case = native_handoff_validator_case
+    case.snapshots = [
+        replace(
+            case.payload,
+            source_worker_version=case.payload.source_worker_version + delta,
+        )
+        for delta in (first_delta, locked_delta)
+    ]
+    case.validator.validate_payload(case.uow, case.payload)
+    assert_native_heartbeat_inspection(case, authorizations=2)
+
+
+def test_native_handoff_prepare_records_latest_worker_heartbeat(
+    native_handoff_validator_case,
+):
+    case = native_handoff_validator_case
+    latest = replace(
+        case.payload, source_worker_version=case.payload.source_worker_version + 1
+    )
+    case.snapshots = [case.payload, latest]
+    envelope = native_heartbeat_prepare_envelope(case)
+    original_command = deepcopy(envelope)
+    result = case.validator.prepare_payload(
+        case.uow, envelope, max_proposal_ttl_seconds=300
+    )
+    assert result is latest
+    assert result.source_worker_version == case.payload.source_worker_version + 1
+    for field in fields(case.payload):
+        if field.name != "source_worker_version":
+            assert getattr(result, field.name) == getattr(case.payload, field.name)
+    assert envelope == original_command
+    assert_native_heartbeat_inspection(case, authorizations=1)
+
+
+@pytest.mark.parametrize("boundary", ["before", "locked"])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "source_execution_version",
+        "source_session_version",
+        "source_session_last_sequence",
+        "source_worker_id",
+        "source_workspace_manifest_version",
+        "source_context_package_hash",
+        "observed_plan_generation",
+        "observed_plan_head_version",
+        "source_run_id",
+        "source_authority_id",
+        "source_binding_version",
+        "source_profile_ref",
+        "work_context_version",
+        "work_context_hash",
+        "target_profile_ref",
+    ],
+)
+def test_native_handoff_validator_rejects_changed_pin_despite_heartbeat(
+    native_handoff_validator_case, field, boundary
+):
+    case = native_handoff_validator_case
+    original = getattr(case.payload, field)
+    if field.endswith("_profile_ref"):
+        changed = ProfileRef(
+            workspace_id=original.workspace_id,
+            profile_id=original.profile_id,
+            revision=original.revision + 1,
+        )
+    elif field.endswith("_id"):
+        changed = uuid4()
+    elif field.endswith("_hash"):
+        changed = "f" * 64 if original != "f" * 64 else "e" * 64
+    else:
+        changed = original + 1
+    mismatch = replace(
+        case.payload,
+        source_worker_version=case.payload.source_worker_version + 1,
+        **{field: changed},
+    )
+    case.snapshots[0 if boundary == "before" else 1] = mismatch
+    message = (
+        "native handoff proposal source is stale"
+        if boundary == "before"
+        else "native handoff proposal changed during inspection"
+    )
+    with pytest.raises(ValidationError, match=message):
+        case.validator.validate_payload(case.uow, case.payload)
+    if boundary == "locked":
+        assert_native_heartbeat_inspection(case, authorizations=2)
+    else:
+        assert case.collect_calls == [False]
+        assert case.read_calls == case.public.calls == case.target_calls == []
+        assert len(case.authorize_calls) == 1
+
+
+@pytest.mark.parametrize("method", ["validate", "prepare"])
+@pytest.mark.parametrize(
+    "mismatch", ["completed", "stopped", "failed", "run", "profile"]
+)
+def test_native_handoff_validator_denies_inactive_or_wrong_source_run(
+    native_handoff_validator_case, method, mismatch
+):
+    case = native_handoff_validator_case
+    run = case.snapshot.model_dump()
+    if mismatch == "run":
+        run["run_id"] = uuid4()
+    elif mismatch == "profile":
+        profile = ProfileRef(
+            workspace_id=case.payload.workspace_id,
+            profile_id=case.payload.source_profile_ref.profile_id,
+            revision=case.payload.source_profile_ref.revision + 1,
+        )
+        run["profile_ref"] = profile.model_dump()
+        run["effective_config"]["profile_ref"] = profile.model_dump()
+    else:
+        run.update(state=mismatch, input_open=False)
+    case.snapshot = RunSnapshot.model_validate(run)
+    envelope = native_heartbeat_prepare_envelope(case)
+    original_command = deepcopy(envelope)
+    with pytest.raises(AssignmentDenied, match="(?:no longer active|not active)"):
+        if method == "validate":
+            case.validator.validate_payload(case.uow, case.payload)
+        else:
+            case.validator.prepare_payload(
+                case.uow, envelope, max_proposal_ttl_seconds=300
+            )
+    assert case.collect_calls == [False]
+    assert len(case.read_calls) == len(case.target_calls) == 1
+    assert case.public.calls == [("get_run", case.payload.source_run_id)]
+    assert len(case.authorize_calls) == (1 if method == "validate" else 0)
+    assert envelope == original_command
+
+
+@pytest.mark.parametrize("method", ["validate", "prepare"])
+@pytest.mark.parametrize("deny_read_at", [1, 2])
+def test_native_handoff_validator_keeps_both_authority_read_guards(
+    native_handoff_validator_case, method, deny_read_at
+):
+    case = native_handoff_validator_case
+    case.deny_read_at = deny_read_at
+    envelope = native_heartbeat_prepare_envelope(case)
+    original_command = deepcopy(envelope)
+    with pytest.raises(AssignmentDenied, match="controlled source read denied"):
+        if method == "validate":
+            case.validator.validate_payload(case.uow, case.payload)
+        else:
+            case.validator.prepare_payload(
+                case.uow, envelope, max_proposal_ttl_seconds=300
+            )
+    assert case.collect_calls == [False]
+    assert len(case.read_calls) == deny_read_at
+    assert len(case.target_calls) == 1
+    assert case.public.calls == (
+        [] if deny_read_at == 1 else [("get_run", case.payload.source_run_id)]
+    )
+    assert len(case.authorize_calls) == (1 if method == "validate" else 0)
+    assert envelope == original_command
+
+
+PROJECTION_TIMEZONES = [
+    pytest.param(timezone(timedelta(hours=8)), id="+08:00"),
+    pytest.param(timezone(timedelta(hours=-5)), id="-05:00"),
+    pytest.param(timezone(timedelta(hours=5, minutes=30)), id="+05:30"),
+]
+
+
+@pytest.fixture
+def native_projection_case():
+    from sidera_control_plane.domain.handoffs import HandoffProposal
+    from tests.unit.test_native_handoff_drain import make_drain_case
+
+    transition = make_drain_case().uow.handoff_transitions.item
+    created_at = datetime(2026, 10, 8, 8, 10, 39, 427454, tzinfo=UTC)
+    proposal = HandoffProposal.create(
+        id=transition.proposal_id,
+        payload=transition.native_payload,
+        created_by_type="user",
+        created_by_id="unit",
+        source_channel="web",
+        created_at=created_at,
+        expires_at=created_at + timedelta(minutes=15),
+    )
+    return proposal, replace(transition)
+
+
+@pytest.mark.parametrize("offset", PROJECTION_TIMEZONES)
+@pytest.mark.parametrize("status", ["prepared", "confirmed", "cancelled"])
+def test_native_proposal_projection_uses_same_utc_timestamps(
+    native_projection_case, offset, status
+):
+    proposal, _ = native_projection_case
+    changed_at = proposal.created_at + timedelta(minutes=1)
+    if status == "confirmed":
+        proposal.mark_confirmed(now=changed_at)
+    elif status == "cancelled":
+        proposal.mark_cancelled(now=changed_at)
+    timestamp_fields = ("created_at", "expires_at", "confirmed_at", "cancelled_at")
+    offset_proposal = replace(
+        proposal,
+        **{
+            name: value.astimezone(offset)
+            for name in timestamp_fields
+            if (value := getattr(proposal, name)) is not None
+        },
+    )
+    proposals = (proposal, offset_proposal)
+    original_payloads = [value.payload.canonical_bytes() for value in proposals]
+    original_hashes = [value.proposal_hash for value in proposals]
+    original_dates = [
+        {name: getattr(value, name) for name in timestamp_fields} for value in proposals
+    ]
+    original_timezones = [
+        {name: date.tzinfo for name, date in dates.items() if date is not None}
+        for dates in original_dates
+    ]
+
+    utc_projection = native_proposal_projection(proposal)
+    offset_projection = native_proposal_projection(offset_proposal)
+
+    assert offset_projection == utc_projection
+    assert utc_projection["id"] == str(proposal.id)
+    assert utc_projection["status"] == status
+    assert utc_projection["version"] == (1 if status == "prepared" else 2)
+    assert utc_projection["proposal_hash"] == original_hashes[0]
+    assert utc_projection["created_at"] == "2026-10-08T08:10:39.427454Z"
+    assert utc_projection["expires_at"] == "2026-10-08T08:25:39.427454Z"
+    assert utc_projection["confirmed_at"] == (
+        "2026-10-08T08:11:39.427454Z" if status == "confirmed" else None
+    )
+    assert utc_projection["cancelled_at"] == (
+        "2026-10-08T08:11:39.427454Z" if status == "cancelled" else None
+    )
+    for value, payload, proposal_hash, dates, timezones in zip(
+        proposals,
+        original_payloads,
+        original_hashes,
+        original_dates,
+        original_timezones,
+    ):
+        assert value.payload.canonical_bytes() == payload
+        assert value.proposal_hash == proposal_hash
+        for name, date in dates.items():
+            assert getattr(value, name) is date
+            if date is not None:
+                assert date.tzinfo is timezones[name]
+
+
+@pytest.mark.parametrize("offset", PROJECTION_TIMEZONES)
+@pytest.mark.parametrize("optional_dates", [False, True], ids=["absent", "populated"])
+def test_native_transition_projection_uses_same_utc_timestamps(
+    native_projection_case, offset, optional_dates
+):
+    proposal, transition = native_projection_case
+    confirmed_at = proposal.created_at + timedelta(minutes=1)
+    transition = replace(
+        transition,
+        confirmed_at=confirmed_at,
+        next_attempt_at=confirmed_at + timedelta(seconds=2) if optional_dates else None,
+        started_at=confirmed_at + timedelta(seconds=1) if optional_dates else None,
+        completed_at=confirmed_at + timedelta(seconds=3) if optional_dates else None,
+    )
+    timestamp_fields = ("confirmed_at", "next_attempt_at", "started_at", "completed_at")
+    offset_transition = replace(
+        transition,
+        **{
+            name: value.astimezone(offset)
+            for name in timestamp_fields
+            if (value := getattr(transition, name)) is not None
+        },
+    )
+    transitions = (transition, offset_transition)
+    original_payloads = [
+        value.native_payload.canonical_bytes() for value in transitions
+    ]
+    original_hash = proposal.proposal_hash
+    original_dates = [
+        {name: getattr(value, name) for name in timestamp_fields}
+        for value in transitions
+    ]
+    original_timezones = [
+        {name: date.tzinfo for name, date in dates.items() if date is not None}
+        for dates in original_dates
+    ]
+    target_run_id = uuid4() if optional_dates else None
+
+    utc_projection = native_transition_projection(
+        transition, target_run_id=target_run_id
+    )
+    offset_projection = native_transition_projection(
+        offset_transition, target_run_id=target_run_id
+    )
+
+    assert offset_projection == utc_projection
+    assert utc_projection["id"] == str(transition.id)
+    assert utc_projection["proposal_id"] == str(proposal.id)
+    assert utc_projection["version"] == transition.version
+    assert utc_projection["status"] == transition.status.value
+    assert utc_projection["confirmed_at"] == "2026-10-08T08:11:39.427454Z"
+    for name, expected in (
+        ("next_attempt_at", "2026-10-08T08:11:41.427454Z"),
+        ("started_at", "2026-10-08T08:11:40.427454Z"),
+        ("completed_at", "2026-10-08T08:11:42.427454Z"),
+    ):
+        assert utc_projection[name] == (expected if optional_dates else None)
+    assert proposal.proposal_hash == original_hash
+    for value, payload, dates, timezones in zip(
+        transitions, original_payloads, original_dates, original_timezones
+    ):
+        assert value.native_payload.canonical_bytes() == payload
+        for name, date in dates.items():
+            assert getattr(value, name) is date
+            if date is not None:
+                assert date.tzinfo is timezones[name]
+
+
+@pytest.mark.parametrize(
+    ("kind", "timestamp"),
+    [
+        ("proposal", "created_at"),
+        ("proposal", "expires_at"),
+        ("proposal", "confirmed_at"),
+        ("proposal", "cancelled_at"),
+        ("transition", "confirmed_at"),
+        ("transition", "next_attempt_at"),
+        ("transition", "started_at"),
+        ("transition", "completed_at"),
+    ],
+)
+def test_native_handoff_projection_keeps_distinct_microsecond_instants(
+    native_projection_case, kind, timestamp
+):
+    proposal, transition = native_projection_case
+    if kind == "proposal":
+        if timestamp == "confirmed_at":
+            proposal.mark_confirmed(now=proposal.created_at)
+        elif timestamp == "cancelled_at":
+            proposal.mark_cancelled(now=proposal.created_at)
+        value = proposal
+        project = native_proposal_projection
+    else:
+        value = replace(
+            transition,
+            confirmed_at=proposal.created_at,
+            next_attempt_at=proposal.created_at,
+            started_at=proposal.created_at,
+            completed_at=proposal.created_at,
+        )
+        project = native_transition_projection
+    later = replace(
+        value,
+        **{timestamp: getattr(value, timestamp) + timedelta(microseconds=1)},
+    )
+
+    projection = project(value)
+    later_projection = project(later)
+
+    assert projection[timestamp].endswith(".427454Z")
+    assert later_projection[timestamp].endswith(".427455Z")
+    assert projection != later_projection
+    assert later_projection == projection | {timestamp: later_projection[timestamp]}
+
+
+@pytest.mark.parametrize("offset", PROJECTION_TIMEZONES)
+@pytest.mark.parametrize("status", ["prepared", "confirmed", "cancelled"])
+@pytest.mark.parametrize("microsecond", [0, 1, 100000, 427454, 999999])
+def test_native_proposal_http_serialization_preserves_projection(
+    native_projection_case, offset, status, microsecond
+):
+    proposal, _ = native_projection_case
+    proposal = replace(
+        proposal,
+        created_at=proposal.created_at.replace(microsecond=microsecond).astimezone(
+            offset
+        ),
+        expires_at=proposal.expires_at.replace(microsecond=microsecond).astimezone(
+            offset
+        ),
+    )
+    changed_at = proposal.created_at + timedelta(minutes=1)
+    if status == "confirmed":
+        proposal.mark_confirmed(now=changed_at)
+    elif status == "cancelled":
+        proposal.mark_cancelled(now=changed_at)
+    timestamp_fields = ("created_at", "expires_at", "confirmed_at", "cancelled_at")
+    original_payload = proposal.payload.canonical_bytes()
+    original_hash = proposal.proposal_hash
+    original_proposal = replace(proposal)
+    original_dates = {name: getattr(proposal, name) for name in timestamp_fields}
+    original_timezones = {
+        name: date.tzinfo for name, date in original_dates.items() if date is not None
+    }
+    projection = native_proposal_projection(proposal)
+    original_projection = deepcopy(projection)
+    document_kind = "proposal"
+    document_id = proposal.id
+    document_version = proposal.version
+    command_id = uuid4()
+    app = FastAPI()
+
+    @app.get("/command", response_model=CommandResponse)
+    def get_command():
+        return {
+            "command_id": command_id,
+            "aggregate_id": document_id,
+            "aggregate_version": document_version,
+            "event_ids": (),
+            "data": {document_kind: projection},
+        }
+
+    @app.get("/document", response_model=NativeHandoffProposalResponse)
+    def get_document():
+        return projection
+
+    with TestClient(app) as client:
+        command_response = client.get("/command")
+        document_response = client.get("/document")
+        assert command_response.status_code == document_response.status_code == 200
+        command_json = command_response.json()
+        get_json = document_response.json()
+
+    assert command_json["data"][document_kind] == get_json == projection
+    assert projection == original_projection
+    assert projection["id"] == str(document_id)
+    assert projection["status"] == status
+    assert projection["version"] == (1 if status == "prepared" else 2)
+    assert projection["proposal_hash"] == original_hash
+    assert proposal == original_proposal
+    assert proposal.payload.canonical_bytes() == original_payload
+    assert proposal.proposal_hash == original_hash
+    for name, date in original_dates.items():
+        assert getattr(proposal, name) is date
+        if date is None:
+            assert projection[name] is None
+        else:
+            assert date.tzinfo is original_timezones[name]
+            assert projection[name] == date.astimezone(UTC).isoformat().replace(
+                "+00:00", "Z"
+            )
+            if microsecond == 427454:
+                assert projection[name].endswith(".427454Z")
+
+
+@pytest.mark.parametrize("offset", PROJECTION_TIMEZONES)
+@pytest.mark.parametrize("optional_dates", [False, True], ids=["absent", "populated"])
+@pytest.mark.parametrize("microsecond", [0, 1, 100000, 427454, 999999])
+def test_native_transition_http_serialization_preserves_projection(
+    native_projection_case, offset, optional_dates, microsecond
+):
+    proposal, transition = native_projection_case
+    confirmed_at = (
+        proposal.created_at.replace(microsecond=microsecond) + timedelta(minutes=1)
+    ).astimezone(offset)
+    transition = replace(
+        transition,
+        confirmed_at=confirmed_at,
+        next_attempt_at=confirmed_at + timedelta(seconds=2) if optional_dates else None,
+        started_at=confirmed_at + timedelta(seconds=1) if optional_dates else None,
+        completed_at=confirmed_at + timedelta(seconds=3) if optional_dates else None,
+    )
+    timestamp_fields = ("confirmed_at", "next_attempt_at", "started_at", "completed_at")
+    original_payload = transition.native_payload.canonical_bytes()
+    original_hash = proposal.proposal_hash
+    original_transition = replace(transition)
+    original_dates = {name: getattr(transition, name) for name in timestamp_fields}
+    original_timezones = {
+        name: date.tzinfo for name, date in original_dates.items() if date is not None
+    }
+    target_run_id = uuid4() if optional_dates else None
+    projection = native_transition_projection(transition, target_run_id=target_run_id)
+    original_projection = deepcopy(projection)
+    document_kind = "transition"
+    document_id = transition.id
+    document_version = transition.version
+    command_id = uuid4()
+    app = FastAPI()
+
+    @app.get("/command", response_model=CommandResponse)
+    def get_command():
+        return {
+            "command_id": command_id,
+            "aggregate_id": document_id,
+            "aggregate_version": document_version,
+            "event_ids": (),
+            "data": {document_kind: projection},
+        }
+
+    @app.get("/document", response_model=NativeHandoffTransitionResponse)
+    def get_document():
+        return projection
+
+    with TestClient(app) as client:
+        command_response = client.get("/command")
+        document_response = client.get("/document")
+        assert command_response.status_code == document_response.status_code == 200
+        command_json = command_response.json()
+        get_json = document_response.json()
+
+    assert command_json["data"][document_kind] == get_json == projection
+    assert projection == original_projection
+    assert projection["id"] == str(document_id)
+    assert projection["proposal_id"] == str(proposal.id)
+    assert projection["version"] == document_version
+    assert projection["status"] == transition.status.value
+    assert projection["target_run_id"] == (
+        None if target_run_id is None else str(target_run_id)
+    )
+    assert transition == original_transition
+    assert transition.native_payload.canonical_bytes() == original_payload
+    assert proposal.proposal_hash == original_hash
+    for name, date in original_dates.items():
+        assert getattr(transition, name) is date
+        if date is None:
+            assert projection[name] is None
+        else:
+            assert date.tzinfo is original_timezones[name]
+            assert projection[name] == date.astimezone(UTC).isoformat().replace(
+                "+00:00", "Z"
+            )
+            if microsecond == 427454:
+                assert projection[name].endswith(".427454Z")

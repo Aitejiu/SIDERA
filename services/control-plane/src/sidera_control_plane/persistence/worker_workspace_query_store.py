@@ -47,6 +47,7 @@ from sidera_control_plane.persistence.models import (
     ExecutionEventModel,
     ExecutionInputModel,
     ExecutionModel,
+    ExecutionRequestModel,
     ExecutionSessionModel,
     PlanSnapshotModel,
     ProjectionChangeModel,
@@ -118,6 +119,13 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                 .order_by(ExecutionModel.created_at.asc(), ExecutionModel.id.asc())
             ).all()
             execution_ids = {row.id for row in execution_rows}
+            result_verification_ids = _result_verification_execution_ids(
+                session,
+                workspace_id,
+                worker_item_id,
+                worker_item.root_task_id,
+                execution_ids,
+            )
             native_versions = _native_progress_bindings(
                 session, workspace_id, worker_item_id, execution_ids
             )
@@ -357,6 +365,7 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                         row,
                         active_blocks.get(row.id),
                         native_binding_version=native_versions.get(row.id),
+                        is_result_verification=row.id in result_verification_ids,
                     )
                     for row in execution_rows
                 ),
@@ -376,6 +385,44 @@ class SqlAlchemyWorkerWorkspaceQueryStore:
                 root_task_status=root_task_status,
                 progress_reports=progress_reports,
             )
+
+
+def _result_verification_execution_ids(
+    session: Session,
+    workspace_id: UUID,
+    worker_item_id: UUID,
+    root_task_id: UUID,
+    execution_ids: set[UUID],
+) -> set[UUID]:
+    if not execution_ids:
+        return set()
+    return set(
+        session.scalars(
+            select(ExecutionModel.id)
+            .join(
+                ExecutionRequestModel,
+                (ExecutionModel.workspace_id == ExecutionRequestModel.workspace_id)
+                & (
+                    ExecutionModel.worker_item_id
+                    == ExecutionRequestModel.worker_item_id
+                )
+                & (
+                    ExecutionModel.lineage_id
+                    == ExecutionRequestModel.execution_lineage_id
+                ),
+            )
+            .where(
+                ExecutionModel.workspace_id == workspace_id,
+                ExecutionModel.worker_item_id == worker_item_id,
+                ExecutionRequestModel.workspace_id == workspace_id,
+                ExecutionRequestModel.worker_item_id == worker_item_id,
+                ExecutionRequestModel.root_task_id == root_task_id,
+                ExecutionRequestModel.result_derivation_kind == "verification",
+                ExecutionRequestModel.source_candidate_id.is_not(None),
+                ExecutionModel.id.in_(execution_ids),
+            )
+        )
+    )
 
 
 def _native_progress_bindings(
@@ -505,6 +552,7 @@ def _execution(
     active_block: SchedulingBlockModel | None,
     *,
     native_binding_version: int | None = None,
+    is_result_verification: bool = False,
 ) -> ExecutionFact:
     if row.worker_item_id is None:
         raise ValueError("WorkerItem execution must have worker_item_id")
@@ -525,6 +573,7 @@ def _execution(
         finished_at=_as_utc_optional(row.finished_at),
         version=row.version,
         native_binding_version=native_binding_version,
+        is_result_verification=is_result_verification,
         capability_requirements=tuple(sorted(row.capability_requirements or ())),
         adapter_preferences=tuple(row.adapter_preferences or ()),
         adapter_forbidden=tuple(sorted(row.adapter_forbidden or ())),

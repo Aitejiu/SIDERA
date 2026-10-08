@@ -18,6 +18,22 @@ const draft: components["schemas"]["ProfileDraft-Input"] = {
 afterEach(() => { document.cookie = "sidera_csrf=; Max-Age=0; Path=/"; });
 
 describe("typed native agents client", () => {
+  it("reads Product task tool metadata with the current local session and no write", async () => {
+    let reads = 0;
+    const metadata = [{ workspace_id: WS, connection_id: ID, name: "SIDERA Task Tools", availability: "configured" }];
+    document.cookie = "sidera_csrf=owned-csrf; Path=/";
+    server.use(http.get(`/product/v1/workspaces/${WS}/tool-connections`, ({ request }) => {
+      reads += 1;
+      expect(request.credentials).toBe("same-origin");
+      expect(request.cache).toBe("no-store");
+      expect(request.headers.get("Accept")).toBe("application/json");
+      expect(request.headers.get("X-Sidera-CSRF")).toBeNull();
+      return HttpResponse.json(metadata);
+    }));
+    expect(await api.listProductToolConnections(WS)).toEqual(metadata);
+    expect(reads).toBe(1);
+  });
+
   it("preserves exact operation/draft, same-origin CSRF and pending202 without another write", async () => {
     let writes = 0;
     const operationId = " original/save 1 ";

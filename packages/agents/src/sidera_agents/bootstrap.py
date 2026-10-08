@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from datetime import datetime
 from threading import Event, Lock, Thread, current_thread
 from time import monotonic
 from typing import TYPE_CHECKING, Any
@@ -31,7 +32,7 @@ class AgentService:
         authorizer: ExecutionAuthorizer,
         sources: ContextSourceReader,
         secrets: SecretReader,
-        clock,
+        clock: Callable[[], datetime],
         tool_connections: ToolConnectionReader | None,
     ) -> None:
         self._store = store
@@ -203,7 +204,7 @@ def create_agent_service(
     authorizer: ExecutionAuthorizer,
     sources: ContextSourceReader,
     secrets: SecretReader,
-    clock,
+    clock: Callable[[], datetime],
     tool_connections: ToolConnectionReader | None = None,
 ) -> AgentService:
     return AgentService(

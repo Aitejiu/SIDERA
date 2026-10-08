@@ -513,7 +513,7 @@ class ChatLab:
                 == "on"
             )
             assert verify_objects(guard.connection, guard.target)["heads"] == [
-                "0003_conversations"
+                "0004_configuration_requests"
             ]
             conversations = [
                 dict(row)

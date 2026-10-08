@@ -36,6 +36,7 @@ from sidera_control_plane.domain.notifications import (
 )
 from sidera_control_plane.domain.task import Task
 from sidera_control_plane.persistence.database import Database
+from sidera_control_plane.persistence.models import NotificationRouteModel
 from sidera_control_plane.persistence.notification_query_store import (
     SqlAlchemyNotificationQueryStore,
 )
@@ -437,6 +438,54 @@ def test_notification_thread_detail_and_attempts_are_safe_and_route_scoped(
         f"/api/v1/workspaces/{workspace_id}/notification-routes/{uuid4()}/threads"
     )
     assert missing_route.status_code == 404, missing_route.text
+
+
+def test_notification_thread_detail_exposes_only_its_current_route_version(
+    client: TestClient,
+    database: Database,
+    workspace_id: UUID,
+) -> None:
+    ids = _seed_notifications(database, workspace_id)
+    with database.session() as session:
+        route = session.get(NotificationRouteModel, ids["route"])
+        assert route is not None
+        assert route.workspace_id == workspace_id
+        route.version = 3
+        session.commit()
+
+    detail = client.get(
+        f"/api/v1/workspaces/{workspace_id}/notification-threads/{ids['action_b']}"
+    )
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert body["thread"]["id"] == str(ids["action_b"])
+    assert len(body["deliveries"]) == 1
+    delivery = body["deliveries"][0]
+    assert delivery["delivery_id"] == str(ids["delivery"])
+    assert delivery["route_id"] == str(ids["route"])
+    assert delivery["route_version"] == 3
+    assert delivery["contract_version"] == 1
+    assert delivery["status"] == "pending"
+    for private_field in (
+        "source_ref",
+        "credential_ref",
+        "claim_token",
+        "provider_message_ref",
+    ):
+        assert private_field not in str(body)
+
+    other_thread = client.get(
+        f"/api/v1/workspaces/{workspace_id}/notification-threads/{ids['action_a']}"
+    )
+    assert other_thread.status_code == 200, other_thread.text
+    assert other_thread.json()["deliveries"] == []
+
+    foreign_detail = client.get(
+        f"/api/v1/workspaces/{uuid4()}/notification-threads/{ids['action_b']}"
+    )
+    assert foreign_detail.status_code == 404, foreign_detail.text
+    assert "route_version" not in foreign_detail.text
+    assert "source_ref" not in foreign_detail.text
 
 
 def test_notification_route_lookup_fails_closed_when_api_is_not_loopback(

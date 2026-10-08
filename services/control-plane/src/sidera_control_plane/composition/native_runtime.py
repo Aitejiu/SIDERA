@@ -249,6 +249,7 @@ class ControlPlaneRuntime:
             request_authorizer=request_authorizer,
             admission_check=self._check_request,
             request_admission=self._request_admission,
+            projection_stream_shutdown_check=lambda: self._closing or self._closed,
         )
 
         def identity(request: Request) -> ControlPlaneIdentity | None:
@@ -469,7 +470,9 @@ class ControlPlaneRuntime:
                 None
                 if not settings.notification_enabled
                 else retain(
-                    build_notification_worker(settings, owner_check=owner_check)
+                    build_notification_worker(
+                        settings, owner_check=owner_check, auto_baseline=True
+                    )
                 )
             )
             with self._condition:
@@ -682,14 +685,20 @@ class ControlPlaneRuntime:
                 None, limit=200
             )
         for link in workers:
-            if link.run_id is None and link.status in {
-                "pending",
-                "waiting_capacity",
-                "failed",
-            }:
-                self._cancel_unadmitted_worker(link)
-            else:
-                self._request_original_worker_stop(link)
+            try:
+                if link.run_id is None and link.status in {
+                    "pending",
+                    "waiting_capacity",
+                    "failed",
+                }:
+                    self._cancel_unadmitted_worker(link)
+                else:
+                    self._request_original_worker_stop(link)
+            except Exception as exc:  # noqa: BLE001 - Retain this original for retry.
+                logger.warning(
+                    "control_plane_drain_worker_failed exception=%s",
+                    type(exc).__name__,
+                )
         planner_results = [
             self._planning is not None
             and self._planning.runner is not None
@@ -981,6 +990,17 @@ class ControlPlaneRuntime:
                 or session.status is not ExecutionSessionStatus.ACTIVE
             ):
                 return
+            handoff = (
+                None
+                if execution.worker_item_id is None
+                else uow.handoff_transitions.get_active_for_worker_item(
+                    execution.worker_item_id, execution.workspace_id, for_update=True
+                )
+            )
+        if handoff is not None:
+            if self._owner is not None:
+                self._owner.handoff_runtime.coordinator.drain_original_source_stop(link)
+            return
         self._execution_authorizer.require(
             link.authority_id, "run.stop", link.workspace_id
         )
@@ -1086,7 +1106,7 @@ class ControlPlaneRuntime:
             while (
                 self._starting
                 or self._admitted
-                or self._active_work
+                or self._regular_work
                 or (
                     self._owner is not None
                     and not self._stop.is_set()

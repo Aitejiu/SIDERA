@@ -100,6 +100,7 @@ async def submit_goal(client, lab, profile, setup):
     command_id = str(uuid4())
     response = await client.post(
         "/api/v1/commands",
+        headers={"X-Sidera-CSRF": client.cookies["sidera_csrf"]},
         json={
             "command_id": command_id,
             "workspace_id": str(lab.principal.workspace),
@@ -126,7 +127,9 @@ async def submit_goal(client, lab, profile, setup):
     return response.json()
 
 
-async def capture_original_planning(lab, app, goal, receipts, knowledge):
+async def capture_original_planning(
+    lab, app, goal, receipts, knowledge, *, browser_cookies
+):
     request_id = UUID(goal["data"]["planning_request_id"])
     prefix = f"/api/v1/workspaces/{lab.principal.workspace}"
     evidence = {
@@ -143,7 +146,8 @@ async def capture_original_planning(lab, app, goal, receipts, knowledge):
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
         base_url=lab.runtime.settings.local_url,
-        headers={"authorization": "Bearer " + str(lab.principal.identity.grant_id)},
+        headers={"Origin": lab.runtime.settings.web_origin},
+        cookies=browser_cookies,
     ) as client:
         detail = await client.get(f"{prefix}/planning-requests/{request_id}")
         runs = await client.get(f"{prefix}/planning-requests/{request_id}/runs")
@@ -368,13 +372,21 @@ async def test_browser_close_does_not_stop_real_background_cp_and_unknown_drain_
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
         base_url=lab.runtime.settings.local_url,
-        headers={"authorization": "Bearer " + str(lab.principal.identity.grant_id)},
+        headers={"Origin": lab.runtime.settings.web_origin},
     ) as client:
+        bootstrap = lab.runtime.local_sessions.create_bootstrap()
+        exchange = await client.post(
+            "/product/v1/session/bootstrap",
+            json={"token": bootstrap.token.get_secret_value()},
+        )
+        assert exchange.status_code == 200
         goal = await submit_goal(client, lab, profile, setup)
         assert (await client.get("/healthz")).status_code == 200
+        browser_cookies = httpx.Cookies(client.cookies)
+    assert client.is_closed
     entered = await anyio.to_thread.run_sync(lab.native.entered.wait, 10)
     observation = await capture_original_planning(
-        lab, app, goal, native_receipts, knowledge
+        lab, app, goal, native_receipts, knowledge, browser_cookies=browser_cookies
     )
     assert entered, observation
     assert observation["native_call_counts"]["prompt"] == 1

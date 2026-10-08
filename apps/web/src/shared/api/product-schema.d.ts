@@ -759,6 +759,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/product/v1/workspaces/{workspace_id}/tool-connections": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Tool Connections */
+        get: operations["listProductToolConnections"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/readyz": {
         parameters: {
             query?: never;
@@ -1679,6 +1696,29 @@ export interface components {
              * Format: date-time
              */
             updatedAt: string;
+        };
+        /** ToolConnectionView */
+        ToolConnectionView: {
+            /**
+             * Availability
+             * @constant
+             */
+            availability: "configured";
+            /**
+             * Connection Id
+             * Format: uuid
+             */
+            connection_id: string;
+            /**
+             * Name
+             * @constant
+             */
+            name: "SIDERA Task Tools";
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
         };
         /** TurnItem */
         TurnItem: {
@@ -3450,6 +3490,37 @@ export interface operations {
                     "application/json": {
                         [key: string]: components["schemas"]["pydantic__types__JsonValue"];
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    listProductToolConnections: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolConnectionView"][];
                 };
             };
             /** @description Validation Error */

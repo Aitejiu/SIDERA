@@ -308,6 +308,144 @@ def test_milestone_difference_and_root_completion_are_sparse() -> None:
     assert root_replay.fact is None
 
 
+@pytest.mark.parametrize("status", ("succeeded", "completed"))
+def test_root_completion_replay_preserves_state_without_fact(status: str) -> None:
+    policy = _policy()
+    first_observation = _observation(
+        kind=NotificationKind.TASK_COMPLETED,
+        status=status,
+        topic="task_completed",
+        transition=NotificationTransition.COMPLETED,
+    )
+    first = policy.evaluate(
+        first_observation, now=NOW, mode=NotificationEvaluationMode.LIVE
+    )
+
+    assert first.fact is not None
+    assert first.fact.kind == NotificationKind.TASK_COMPLETED.value
+    assert first.fact.priority is NotificationPriority.PROGRESS
+    assert first.fact.transition is NotificationTransition.COMPLETED
+    assert first.policy_state.observed_status == status
+    assert first.policy_state.last_notified_fingerprint == "a" * 64
+
+    replay_time = NOW + timedelta(seconds=1)
+    replay = policy.evaluate(
+        replace(
+            first_observation,
+            source_projection_cursor=13,
+            source_resource_version=5,
+        ),
+        state=first.policy_state,
+        now=replay_time,
+        mode=NotificationEvaluationMode.LIVE,
+    )
+
+    assert replay.fact is None
+    assert replay.reason == "root_completion_seen"
+    assert replay.policy_state.observed_payload["resource_version"] == 5
+    assert (
+        replay.policy_state.resource_version == first.policy_state.resource_version + 1
+    )
+    assert replay.policy_state.updated_at == replay_time
+    assert replay.policy_state.last_notified_fingerprint == "a" * 64
+    assert replay.policy_state.observed_status == status
+    assert replay.policy_state.observed_payload["status"] == status
+
+
+def test_root_completion_changed_fingerprint_does_not_start_new_episode() -> None:
+    policy = _policy()
+    observation = _observation(
+        kind=NotificationKind.TASK_COMPLETED,
+        status="succeeded",
+        topic="task_completed",
+    )
+    first = policy.evaluate(observation, now=NOW, mode=NotificationEvaluationMode.LIVE)
+    assert first.fact is not None
+
+    changed = policy.evaluate(
+        replace(observation, authoritative_fingerprint="b" * 64),
+        state=first.policy_state,
+        now=NOW + timedelta(seconds=1),
+        mode=NotificationEvaluationMode.LIVE,
+    )
+
+    assert changed.fact is None
+    assert changed.reason == "root_completion_seen"
+    assert changed.policy_state.observed_status == "succeeded"
+    assert changed.policy_state.observed_fingerprint == "b" * 64
+    assert changed.policy_state.last_notified_fingerprint == "a" * 64
+
+
+def test_root_completion_after_reopened_episode_creates_new_fact() -> None:
+    policy = _policy()
+    observation = _observation(
+        kind=NotificationKind.TASK_COMPLETED,
+        status="succeeded",
+        topic="task_completed",
+    )
+    first = policy.evaluate(observation, now=NOW, mode=NotificationEvaluationMode.LIVE)
+    assert first.fact is not None
+
+    running = policy.evaluate(
+        replace(
+            observation,
+            kind="worker_step",
+            observed_status="running",
+            authoritative_fingerprint="b" * 64,
+        ),
+        state=first.policy_state,
+        now=NOW + timedelta(seconds=1),
+        mode=NotificationEvaluationMode.LIVE,
+    )
+    assert running.fact is None
+    assert running.policy_state.observed_status == "running"
+    assert running.policy_state.last_notified_fingerprint == "a" * 64
+
+    completed = policy.evaluate(
+        replace(observation, authoritative_fingerprint="c" * 64),
+        state=running.policy_state,
+        now=NOW + timedelta(seconds=2),
+        mode=NotificationEvaluationMode.LIVE,
+    )
+
+    assert completed.fact is not None
+    assert completed.fact.id != first.fact.id
+    assert completed.fact.kind == NotificationKind.TASK_COMPLETED.value
+    assert completed.fact.transition is NotificationTransition.COMPLETED
+    assert completed.policy_state.observed_status == "succeeded"
+    assert completed.policy_state.last_notified_fingerprint == "c" * 64
+
+
+@pytest.mark.parametrize("status", ("succeeded", "completed"))
+def test_root_completion_resync_remains_silent_when_live_resumes(status: str) -> None:
+    policy = _policy()
+    observation = _observation(
+        kind=NotificationKind.TASK_COMPLETED,
+        status=status,
+        topic="task_completed",
+    )
+    historical = policy.evaluate(
+        observation, now=NOW, mode=NotificationEvaluationMode.RESYNC
+    )
+    assert historical.fact is None
+    assert historical.reason == "resync_suppresses_historical_fact"
+    assert historical.policy_state.observed_status == status
+    assert historical.policy_state.last_notified_fingerprint is None
+
+    live = policy.evaluate(
+        replace(observation, source_projection_cursor=13, source_resource_version=5),
+        state=historical.policy_state,
+        now=NOW + timedelta(seconds=1),
+        mode=NotificationEvaluationMode.LIVE,
+    )
+
+    assert live.fact is None
+    assert live.reason == "root_completion_seen"
+    assert live.policy_state.observed_status == status
+    assert live.policy_state.last_notified_fingerprint is None
+    assert live.policy_state.observed_payload["resource_version"] == 5
+
+
 def test_baseline_is_web_only_and_operations_never_route_to_failing_channel() -> None:
     baseline = _policy().evaluate(
         _observation(

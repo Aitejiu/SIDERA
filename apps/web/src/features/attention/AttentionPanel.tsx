@@ -8,8 +8,11 @@ import {
   createCommandIdentity,
 } from "@/shared/api/client";
 import type { components } from "@/shared/api/schema";
+import type { useNativeAttentionAcknowledgement } from "./useNativeAttentionAcknowledgement";
 
 type AttentionItem = components["schemas"]["TaskConsoleAttentionProjectionResponse"];
+export type NativeAttentionPanelAction = Pick<ReturnType<typeof useNativeAttentionAcknowledgement>,
+  "acknowledge" | "canAcknowledge" | "busy" | "pendingKey" | "state">;
 
 export function AttentionPanel({
   workspaceId,
@@ -19,6 +22,7 @@ export function AttentionPanel({
   items,
   onAcknowledged,
   onRefresh,
+  nativeAction,
   compact = false,
 }: {
   workspaceId: string;
@@ -26,16 +30,32 @@ export function AttentionPanel({
   rootTaskVersion: number | undefined;
   rootTaskTitle?: string;
   items: AttentionItem[];
-  onAcknowledged?: () => void;
+  onAcknowledged?: (() => void) | undefined;
   onRefresh?: () => Promise<void>;
+  nativeAction?: NativeAttentionPanelAction | undefined;
   compact?: boolean;
 }) {
   const [acknowledgedKeys, setAcknowledgedKeys] = useState<Set<string>>(() => new Set());
+  const [acknowledgedFacts, setAcknowledgedFacts] = useState<Set<string>>(() => new Set());
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const visibleItems = items.filter((item) => !acknowledgedKeys.has(item.key));
+  const factKey = (item: AttentionItem) => JSON.stringify([
+    workspaceId, rootTaskId, nativeAction?.state?.scope.principalId, item.key, item.correlation_id, item.resource_version,
+  ]);
+  const visibleItems = items.filter((item) => nativeAction
+    ? !acknowledgedFacts.has(factKey(item)) : !acknowledgedKeys.has(item.key));
+  const currentPendingKey = nativeAction ? nativeAction.pendingKey : pendingKey;
 
   const acknowledge = async (item: AttentionItem) => {
+    if (nativeAction) {
+      if (!nativeAction.canAcknowledge || nativeAction.busy || rootTaskVersion === undefined) return;
+      const key = factKey(item);
+      if (await nativeAction.acknowledge(item, rootTaskVersion)) {
+        setAcknowledgedFacts((current) => new Set(current).add(key));
+        onAcknowledged?.();
+      }
+      return;
+    }
     if (rootTaskVersion === undefined || pendingKey !== null) {
       return;
     }
@@ -130,10 +150,10 @@ export function AttentionPanel({
                   className="quiet-button attention-item__action"
                   type="button"
                   onClick={() => void acknowledge(item)}
-                  disabled={pendingKey !== null || rootTaskVersion === undefined}
+                  disabled={rootTaskVersion === undefined || (nativeAction ? !nativeAction.canAcknowledge || nativeAction.busy : pendingKey !== null)}
                 >
                   <Check size={14} aria-hidden="true" />
-                  {pendingKey === item.key ? "正在确认" : "确认已处理"}
+                  {currentPendingKey === item.key ? "正在确认" : "确认已处理"}
                 </button>
               )}
             </article>

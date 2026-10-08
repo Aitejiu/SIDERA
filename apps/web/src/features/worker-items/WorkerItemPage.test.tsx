@@ -515,6 +515,7 @@ describe("WorkerItemPage", () => {
   beforeEach(() => {
     server.resetHandlers();
     server.use(
+      http.get("/main-agent/v1/health", () => HttpResponse.json({ status: "ok", service: "sidera-main-agent-gateway" })),
       http.get("/product/v1/session", () => HttpResponse.json(APPOINTMENT_SESSION)),
       http.get(`${BASE}/assignments/worker_item/${WORKER_ITEM_ID}`, () => HttpResponse.json(null)),
       http.get(`${BASE}/worker-items/${WORKER_ITEM_ID}/native-context`, () => HttpResponse.json(legacyNativeContext())),
@@ -920,6 +921,30 @@ describe("WorkerItemPage", () => {
 
     await screen.findByRole("heading", { name: "实现回调幂等" });
     expect(screen.queryByRole("button", { name: "恢复计划同步" })).not.toBeInTheDocument();
+  });
+
+  it("keeps genuine gateway recovery on the existing local command path", async () => {
+    const posts: Record<string, unknown>[] = [];
+    server.use(
+      http.get(`${BASE}/worker-transitions/${WORKER_TRANSITION_ID}`, () => HttpResponse.json({ worker_transition_id: WORKER_TRANSITION_ID, version: 17 })),
+      http.post("/api/v1/commands", async ({ request }) => {
+        const command = await request.json() as Record<string, unknown>; posts.push(command);
+        return HttpResponse.json({ command_id: command.command_id, aggregate_id: WORKER_TRANSITION_ID,
+          aggregate_version: 17, event_ids: [], data: {} });
+      }),
+    );
+    const user = userEvent.setup(); renderPage();
+    await user.click(await screen.findByRole("button", { name: "恢复计划同步" }));
+    const dialog = screen.getByRole("dialog", { name: "恢复计划同步" });
+    expect(within(dialog).queryByText("Transition V17")).not.toBeInTheDocument();
+    await user.type(within(dialog).getByRole("textbox", { name: "恢复原因" }), "legacy review");
+    await user.type(within(dialog).getByRole("textbox", { name: "证据引用" }), "event:legacy");
+    await user.click(within(dialog).getByRole("button", { name: "提交恢复策略" }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]).toMatchObject({ command_type: "RecoverWorkerTransition", target_type: "worker_transition",
+      target_id: WORKER_TRANSITION_ID, expected_version: 17, actor: { type: "local", id: "aitejiu" },
+      payload: { strategy: "reconcile_adapter", reason: "legacy review", evidence_refs: ["event:legacy"] } });
+    expect(screen.queryByRole("region", { name: "计划同步恢复记录" })).not.toBeInTheDocument();
   });
 
   it("loads older activity without duplicating an existing item", async () => {

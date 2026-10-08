@@ -26,6 +26,7 @@ from sidera_control_plane.domain.worker_item_projections import (
     WorkerItemFact,
     WorkerItemPlacementFact,
     WorkerItemProjectionService,
+    WorkerProgressFact,
 )
 
 WORKSPACE_ID = UUID("22000000-0000-0000-0000-000000000001")
@@ -286,6 +287,211 @@ def test_no_execution_does_not_borrow_historical_progress():
     workspace = _service(executions=()).compose_workspace()
     assert workspace.current_step is None
     assert workspace.latest_checkpoint is None
+
+
+@pytest.mark.parametrize(
+    "verifier_status", ("queued", "running", "failed", "succeeded")
+)
+@pytest.mark.parametrize("completed", (False, True), ids=("active", "completed"))
+def test_result_verification_keeps_assignee_runtime_and_history(
+    verifier_status: str, completed: bool
+) -> None:
+    ordinary = replace(
+        _executions()[1],
+        status="succeeded" if completed else "running",
+        finished_at=NOW + timedelta(minutes=8) if completed else None,
+        native_binding_version=3,
+    )
+    assert getattr(ordinary, "is_result_verification", None) is False
+    ordinary_session = replace(
+        _sessions()[1], status="closed" if completed else "active"
+    )
+    progress = WorkerProgressFact(
+        report_id=UUID(int=901),
+        event_id=UUID(int=901),
+        execution_id=ordinary.id,
+        binding_version=3,
+        run_id=UUID(int=902),
+        response_id=UUID(int=903),
+        summary="Assignee report",
+        steps=({"stage": "implementation"},),
+        reported_at=NOW + timedelta(minutes=8),
+    )
+    baseline_service = _service(
+        executions=(ordinary,),
+        sessions=(ordinary_session,),
+        progress_reports=(progress,),
+        root_task_status="succeeded" if completed else None,
+    )
+    baseline = baseline_service.compose_workspace()
+    verifier = replace(
+        ordinary,
+        id=UUID(int=904),
+        task_id=UUID(int=905),
+        lineage_id=UUID(int=904),
+        attempt=1,
+        status=verifier_status,
+        created_at=NOW + timedelta(minutes=9),
+        updated_at=NOW + timedelta(minutes=12),
+        started_at=None if verifier_status == "queued" else NOW + timedelta(minutes=9),
+        finished_at=(
+            NOW + timedelta(minutes=12)
+            if verifier_status in {"failed", "succeeded"}
+            else None
+        ),
+        native_binding_version=None,
+        is_result_verification=True,
+    )
+    verifier_session = replace(
+        ordinary_session,
+        id=UUID(int=906),
+        execution_id=verifier.id,
+        adapter_session_id="verification-session",
+        status="active",
+        created_at=NOW + timedelta(minutes=9),
+        last_activity_at=NOW + timedelta(minutes=12),
+    )
+    verifier_events = tuple(
+        replace(
+            event,
+            id=UUID(int=907 + index),
+            execution_id=verifier.id,
+            session_id=verifier_session.id,
+            payload={"title": "Verifier checkpoint", "summary": "Verifier result"},
+            occurred_at=NOW + timedelta(minutes=11 + index),
+        )
+        for index, event in enumerate(_events())
+    )
+    verifier_artifact = replace(
+        baseline_service.artifacts[0],
+        artifact_id=UUID(int=909),
+        task_id=verifier.task_id,
+        execution_id=verifier.id,
+        created_at=NOW + timedelta(minutes=12),
+    )
+    verifier_evidence = replace(
+        baseline_service.evidence[0],
+        evidence_id=UUID(int=910),
+        task_id=verifier.task_id,
+        execution_id=verifier.id,
+        artifact_ids=(verifier_artifact.artifact_id,),
+        created_at=NOW + timedelta(minutes=12),
+    )
+    service = _service(
+        executions=(ordinary, verifier),
+        sessions=(ordinary_session, verifier_session),
+        events=(*_events(), *verifier_events),
+        progress_reports=(progress,),
+        artifacts=(*baseline_service.artifacts, verifier_artifact),
+        evidence=(*baseline_service.evidence, verifier_evidence),
+        root_task_status="succeeded" if completed else None,
+    )
+
+    workspace = service.compose_workspace()
+
+    assert workspace.current_runtime == baseline.current_runtime
+    assert workspace.current_runtime is not None
+    assert workspace.current_runtime.execution_id == EXECUTION_TWO_ID
+    assert workspace.current_runtime.session_id == SESSION_TWO_ID
+    assert workspace.current_step == baseline.current_step
+    assert workspace.latest_checkpoint == baseline.latest_checkpoint
+    assert workspace.latest_checkpoint.execution_id == ordinary.id
+    assert workspace.current_progress == baseline.current_progress
+    assert workspace.current_progress.report_id == progress.report_id
+    assert workspace.current_progress.execution_id == ordinary.id
+    assert workspace.trace_descriptor == baseline.trace_descriptor
+    assert workspace.intervention_context == baseline.intervention_context
+    assert workspace.can_intervene is (not completed)
+    assert workspace.read_only_reason == baseline.read_only_reason
+    assert [item.execution_id for item in workspace.execution_history] == [
+        verifier.id,
+        ordinary.id,
+    ]
+    assert workspace.execution_history[0].status == verifier_status
+    assert workspace.execution_history[1] == baseline.execution_history[0]
+    assert workspace.artifacts == (*baseline.artifacts, verifier_artifact)
+    assert workspace.evidence == (*baseline.evidence, verifier_evidence)
+    activity = service.compose_activity(service.activity_facts(), limit=200)
+    assert {item.source_id for item in activity.items} >= {
+        *(event.id for event in verifier_events),
+        verifier_artifact.artifact_id,
+        verifier_evidence.evidence_id,
+    }
+
+
+@pytest.mark.parametrize(
+    "verifier_status", ("queued", "running", "failed", "succeeded")
+)
+def test_only_result_verification_has_history_without_current_runtime(
+    verifier_status: str,
+) -> None:
+    execution = _executions()[1]
+    assert getattr(execution, "is_result_verification", None) is False
+    verifier = replace(execution, status=verifier_status, is_result_verification=True)
+    service = _service(executions=(verifier,))
+
+    workspace = service.compose_workspace()
+
+    assert workspace.current_runtime is None
+    assert workspace.intervention_context is None
+    assert workspace.trace_descriptor is None
+    assert workspace.current_step is None
+    assert workspace.latest_checkpoint is None
+    assert workspace.current_progress is None
+    assert workspace.can_intervene is False
+    assert workspace.read_only_reason == "no_active_session"
+    assert [item.execution_id for item in workspace.execution_history] == [verifier.id]
+    assert workspace.execution_history[0].status == verifier_status
+    assert {item.source_id for item in service.activity_facts()} >= {
+        event.id for event in _events()
+    }
+
+
+@pytest.mark.parametrize(
+    ("attempt", "lineage_id", "binding_version"),
+    ((3, EXECUTION_ONE_ID, None), (1, UUID(int=911), 3), (1, UUID(int=912), 4)),
+    ids=("retry", "rework", "changed_profile"),
+)
+def test_newer_ordinary_execution_remains_current(
+    attempt: int, lineage_id: UUID, binding_version: int | None
+) -> None:
+    previous = _executions()[1]
+    assert getattr(previous, "is_result_verification", None) is False
+    verifier = replace(
+        previous,
+        id=UUID(int=913),
+        created_at=NOW + timedelta(minutes=9),
+        updated_at=NOW + timedelta(minutes=10),
+        is_result_verification=True,
+    )
+    newest = replace(
+        previous,
+        id=UUID(int=914),
+        task_id=UUID(int=915),
+        lineage_id=lineage_id,
+        attempt=attempt,
+        capability_requirements=("verification",),
+        native_binding_version=binding_version,
+        created_at=NOW + timedelta(minutes=11),
+        updated_at=NOW + timedelta(minutes=12),
+    )
+    session = replace(_sessions()[1], id=UUID(int=916), execution_id=newest.id)
+    service = _service(
+        executions=(previous, verifier, newest), sessions=(*_sessions(), session)
+    )
+
+    workspace = service.compose_workspace()
+
+    assert newest.is_result_verification is False
+    assert workspace.current_runtime is not None
+    assert workspace.current_runtime.execution_id == newest.id
+    assert workspace.current_runtime.session_id == session.id
+    assert workspace.can_intervene is True
+    assert [item.execution_id for item in workspace.execution_history] == [
+        newest.id,
+        verifier.id,
+        previous.id,
+    ]
 
 
 def test_worker_workspace_exposes_current_runtime_and_placement_history() -> None:

@@ -25,6 +25,28 @@ class ControlPlaneRequestTarget:
     command: CommandEnvelope | None = None
 
 
+def is_result_acceptance_basis_query(target: ControlPlaneRequestTarget) -> bool:
+    if (
+        target.method != "POST"
+        or target.route
+        != "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/results/{candidate_id}/acceptance-basis"
+        or target.command is not None
+        or len(target.path_parameters) != 3
+        or {key for key, _ in target.path_parameters}
+        != {"workspace_id", "root_task_id", "candidate_id"}
+    ):
+        return False
+    try:
+        paths = {key: UUID(value) for key, value in target.path_parameters}
+        return paths["workspace_id"] == target.workspace_id and all(
+            UUID(value) == target.workspace_id
+            for key, value in target.query_parameters
+            if key == "workspace_id"
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 class ControlPlaneRequestAuthorizer(ExecutionAuthorizer, Protocol):
     def authenticate_request(self, request: Request) -> ControlPlaneIdentity | None: ...
 

@@ -121,6 +121,13 @@ class Records:
         assert task_id == self.state.task.id
         return self.state.execution.status is ExecutionStatus.RUNNING
 
+    def get_active_for_execution(self, execution_id, *, for_update=False):
+        assert self.name == "session" and execution_id == self.state.execution.id
+        if self.state.other_active_session is not None:
+            return self.state.other_active_session
+        row = self.state.session
+        return row if row.status is ExecutionSessionStatus.ACTIVE else None
+
 
 class ExecutionEvents:
     def __init__(self, state):
@@ -241,7 +248,15 @@ def preparation(authority):
 def terminal_stop_factory(monkeypatch):
     io_sessions = []
 
-    def build(*, terminal="succeeded", closed=True, expired=False, ingest=False):
+    def build(
+        *,
+        terminal="succeeded",
+        closed=True,
+        expired=False,
+        ingest=False,
+        completed=False,
+        operation_status=GatewayOperationStatus.UNKNOWN,
+    ):
         authority = make_authority()
         now = NOW
         worker = Worker.register(
@@ -407,7 +422,10 @@ def terminal_stop_factory(monkeypatch):
             now=now,
         )
         operation.start(now=now)
-        operation.mark_unknown(failure_code="native_stop_unconfirmed", now=now)
+        if operation_status is GatewayOperationStatus.UNKNOWN:
+            operation.mark_unknown(failure_code="native_stop_unconfirmed", now=now)
+        else:
+            assert operation_status is GatewayOperationStatus.RUNNING
         link = AgentExecutionLink(
             authority.workspace_id,
             execution.id,
@@ -427,7 +445,7 @@ def terminal_stop_factory(monkeypatch):
             kind="stop.stopped",
             operation_id=operation_id,
             response_id=None,
-            data={"status": "stopped"},
+            data={"reason_code": None},
         )
         projected = project_run_event(native_event)
         persisted = ExecutionEvent(
@@ -446,7 +464,9 @@ def terminal_stop_factory(monkeypatch):
             workspace_id=authority.workspace_id,
             profile_ref=authority.profile_ref,
             policy="bounded",
-            state="completed" if terminal == "succeeded" else "failed",
+            state={"succeeded": "completed", "failed": "failed"}.get(
+                terminal, "stopped"
+            ),
             input_open=False,
             active_response_id=None,
             last_event_sequence=2,
@@ -472,11 +492,13 @@ def terminal_stop_factory(monkeypatch):
             lease=lease,
             worker=worker,
             session=session,
+            other_active_session=None,
             binding=binding,
             selected=selected,
             original_selected=selected,
             link=link,
             operation=operation,
+            modules={row.id: row for row in (adapter_instance, workspace_instance)},
             original_operation_id=operation_id,
             owner=True,
             native_reads=[],
@@ -496,7 +518,7 @@ def terminal_stop_factory(monkeypatch):
             execution_events={} if ingest else {2: persisted},
             link_saves=[],
         )
-        modules = {row.id: row for row in (adapter_instance, workspace_instance)}
+        modules = state.modules
         definitions = {
             row.id: row for row in (adapter_definition, workspace_definition)
         }
@@ -645,6 +667,19 @@ def terminal_stop_factory(monkeypatch):
                 )
             )
         state.initial_business_count = len(state.business_events)
+        if completed:
+            if terminal == "succeeded":
+                execution.succeed(lease_id=lease.id, fencing_token=1, now=now)
+            else:
+                assert terminal == "failed"
+                execution.fail(
+                    lease_id=lease.id,
+                    fencing_token=1,
+                    failure_code="controlled_original_failure",
+                    now=now,
+                )
+            lease.revoke(now=now)
+            worker.release()
         return state
 
     try:
@@ -768,6 +803,41 @@ def cleanup_facts(s):
     )
 
 
+@pytest.mark.parametrize("terminal", ("running", "waiting", "closing"))
+def test_original_raw_stop_closes_nonterminal_link_and_cleans_up_once(
+    terminal_stop_factory,
+    terminal,
+):
+    s = terminal_stop_factory(terminal=terminal, closed=False, ingest=True)
+    task_version = s.task.version
+    deadline = s.lease.expires_at
+    result = s.gateway.handle_stop(s.message)
+
+    assert result.operation_id == s.original_operation_id
+    assert result.accepted_sequence == 2
+    assert s.native_reads == ["get_stop", "get_run", "get_run", "list_events"]
+    assert s.operation.status is GatewayOperationStatus.SUCCEEDED
+    assert s.link.status == "stopped" and s.link.event_cursor == 2
+    assert s.session.last_sequence == 2
+    assert s.execution_events[2].event_type == "native.stop.stopped"
+    assert s.execution_events[2].payload["native_kind"] == "stop.stopped"
+    assert s.execution_events[2].payload["reason_code"] is None
+    assert "status" not in s.execution_events[2].payload
+    assert s.session.status is ExecutionSessionStatus.CLOSED
+    assert s.execution.status is ExecutionStatus.CANCELED
+    assert s.execution.active_lease_id is None
+    assert s.lease.status is LeaseStatus.RELEASED
+    assert s.lease.expires_at == deadline and s.lease.renewed_at is None
+    assert s.worker.current_load == 0
+    assert s.task.status.value == "waiting" and s.task.version == task_version + 1
+
+    before = (cleanup_facts(s), tuple(s.saves), tuple(s.link_saves))
+    replay = s.gateway.handle_stop(s.message)
+    assert replay == result
+    assert (cleanup_facts(s), tuple(s.saves), tuple(s.link_saves)) == before
+    assert s.native_reads == ["get_stop", "get_run", "get_run", "list_events"]
+
+
 def persist_original(s):
     s.gateway._persist_stop_success(
         s.context,
@@ -778,7 +848,115 @@ def persist_original(s):
     )
 
 
-@pytest.mark.parametrize("stage", ("cleanup", "replay"))
+@pytest.mark.parametrize("terminal", ("succeeded", "failed"))
+@pytest.mark.parametrize(
+    "operation_status", (GatewayOperationStatus.RUNNING, GatewayOperationStatus.UNKNOWN)
+)
+def test_completed_original_stop_confirms_receipt_without_changing_result(
+    terminal_stop_factory,
+    terminal,
+    operation_status,
+):
+    s = terminal_stop_factory(
+        terminal=terminal, completed=True, operation_status=operation_status
+    )
+    s.worker.reserve()
+    before = cleanup_facts(s)
+    operation_version = s.operation.version
+
+    persist_original(s)
+
+    assert cleanup_facts(s) == before
+    assert s.execution.status.value == terminal
+    assert s.operation.status is GatewayOperationStatus.SUCCEEDED
+    assert s.operation.result_ref == "sequence:2"
+    assert s.saves == [("operation", operation_version, operation_version + 1)]
+    assert s.worker.current_load == 1
+    assert not s.native_reads and not s.link_saves
+
+    before_replay = (cleanup_facts(s), tuple(s.saves), s.operation.version)
+    replay = s.gateway.handle_stop(s.message)
+    assert (
+        replay.operation_id == s.original_operation_id and replay.accepted_sequence == 2
+    )
+    assert (cleanup_facts(s), tuple(s.saves), s.operation.version) == before_replay
+    assert not s.native_reads and not s.link_saves
+
+
+@pytest.mark.parametrize("terminal", ("succeeded", "failed"))
+@pytest.mark.parametrize("ingest", (False, True))
+@pytest.mark.parametrize(
+    "operation_status", (GatewayOperationStatus.RUNNING, GatewayOperationStatus.UNKNOWN)
+)
+def test_completed_original_stop_queries_saved_receipt_without_cleanup(
+    terminal_stop_factory,
+    terminal,
+    ingest,
+    operation_status,
+):
+    s = terminal_stop_factory(
+        terminal=terminal,
+        completed=True,
+        ingest=ingest,
+        operation_status=operation_status,
+    )
+    s.worker.reserve()
+    before = tuple(replace(row) for row in (s.execution, s.lease, s.worker, s.task))
+    before_events = tuple(s.business_events)
+    session_version, operation_version = s.session.version, s.operation.version
+    original_link = s.link
+
+    result = s.gateway.handle_stop(s.message)
+
+    assert (
+        result.operation_id == s.original_operation_id and result.accepted_sequence == 2
+    )
+    assert tuple(replace(row) for row in (s.execution, s.lease, s.worker, s.task)) == before
+    assert tuple(s.business_events) == before_events
+    assert s.execution.status.value == terminal and s.worker.current_load == 1
+    assert s.session.status is ExecutionSessionStatus.CLOSED
+    assert (
+        s.session.version == session_version + ingest and s.session.last_sequence == 2
+    )
+    assert s.link == replace(original_link, event_cursor=2)
+    assert s.execution_events[2].event_type == "native.stop.stopped"
+    assert s.operation.status is GatewayOperationStatus.SUCCEEDED
+    assert s.operation.result_ref == "sequence:2"
+    assert s.saves == (
+        [("session", session_version, session_version + 1)] if ingest else []
+    ) + [("operation", operation_version, operation_version + 1)]
+    assert bool(s.link_saves) is ingest
+    assert s.native_reads == ["get_stop", "get_run", "get_run", "list_events"]
+    before_replay = (
+        cleanup_facts(s),
+        tuple(s.saves),
+        tuple(s.link_saves),
+        tuple(s.native_reads),
+        s.operation.version,
+    )
+    assert s.gateway.handle_stop(s.message) == result
+    assert (
+        cleanup_facts(s),
+        tuple(s.saves),
+        tuple(s.link_saves),
+        tuple(s.native_reads),
+        s.operation.version,
+    ) == before_replay
+
+
+@pytest.mark.parametrize(
+    "completed,stage,terminal",
+    [
+        (False, stage, terminal)
+        for stage in ("cleanup", "replay")
+        for terminal in ("succeeded", "failed", "stopped")
+    ]
+    + [
+        (True, stage, terminal)
+        for stage in ("cleanup", "query", "replay")
+        for terminal in ("succeeded", "failed")
+    ],
+)
 @pytest.mark.parametrize(
     "bad",
     (
@@ -793,6 +971,10 @@ def persist_original(s):
         "operation",
         "no_raw_ref",
         "bad_raw_ref",
+        "nonstring_raw_ref",
+        "missing_native_kind",
+        "missing_run",
+        "missing_operation",
         "session_cursor",
         "link_cursor",
         "contradictory_terminal",
@@ -801,9 +983,11 @@ def persist_original(s):
 def test_terminal_stop_requires_exact_saved_positive_event(
     terminal_stop_factory,
     stage,
+    terminal,
     bad,
+    completed,
 ):
-    s = terminal_stop_factory()
+    s = terminal_stop_factory(terminal=terminal, completed=completed)
     if stage == "replay":
         persist_original(s)
     event = s.execution_events[2]
@@ -811,8 +995,10 @@ def test_terminal_stop_requires_exact_saved_positive_event(
         s.execution_events.clear()
     elif bad == "session_cursor":
         s.session.last_sequence = 1
+        s.native_events = ()
     elif bad == "link_cursor":
         s.link = replace(s.link, event_cursor=1)
+        s.native_events = ()
     elif bad == "contradictory_terminal":
         s.link = replace(s.link, status="cancelled")
     else:
@@ -829,6 +1015,28 @@ def test_terminal_stop_requires_exact_saved_positive_event(
             "operation": {"payload": {**event.payload, "operation_id": str(uuid4())}},
             "no_raw_ref": {"raw_ref": None},
             "bad_raw_ref": {"raw_ref": "native-event-sha256:not-a-hash"},
+            "nonstring_raw_ref": {"raw_ref": 1},
+            "missing_native_kind": {
+                "payload": {
+                    key: value
+                    for key, value in event.payload.items()
+                    if key != "native_kind"
+                }
+            },
+            "missing_run": {
+                "payload": {
+                    key: value
+                    for key, value in event.payload.items()
+                    if key != "run_id"
+                }
+            },
+            "missing_operation": {
+                "payload": {
+                    key: value
+                    for key, value in event.payload.items()
+                    if key != "operation_id"
+                }
+            },
         }
         s.execution_events[2] = replace(event, **changes[bad])
     before = cleanup_facts(s)
@@ -837,46 +1045,179 @@ def test_terminal_stop_requires_exact_saved_positive_event(
             persist_original(s)
         else:
             s.gateway.handle_stop(s.message)
+    assert cleanup_facts(s) == before
+    assert not s.link_saves
+    if stage != "query":
+        assert not s.native_reads
+
+
+@pytest.mark.parametrize("kind", ("run.stopped", "run.closed"))
+def test_original_stop_accepts_durable_natural_closure_and_replays_once(
+    terminal_stop_factory,
+    kind,
+):
+    s = terminal_stop_factory(terminal="running", closed=False, ingest=True)
+    s.native_events = (
+        s.native_events[0].model_copy(
+            update={"kind": kind, "operation_id": None, "data": {"state": "stopped"}}
+        ),
+    )
+
+    result = s.gateway.handle_stop(s.message)
+
+    assert result.accepted_sequence == 2
+    assert s.native_reads == ["get_stop", "get_run", "get_run", "list_events"]
+    assert s.link.status == "stopped" and s.link.event_cursor == 2
+    assert s.execution_events[2].event_type == "session.closed"
+    assert s.execution_events[2].payload["native_kind"] == kind
+    assert "operation_id" not in s.execution_events[2].payload
+    assert s.operation.status is GatewayOperationStatus.SUCCEEDED
+    assert s.session.status is ExecutionSessionStatus.CLOSED
+    assert s.lease.status is LeaseStatus.RELEASED and s.worker.current_load == 0
+    before = (cleanup_facts(s), tuple(s.saves), tuple(s.link_saves))
+    assert s.gateway.handle_stop(s.message) == result
+    assert (cleanup_facts(s), tuple(s.saves), tuple(s.link_saves)) == before
+
+
+@pytest.mark.parametrize("terminal", ("succeeded", "failed", "stopped"))
+@pytest.mark.parametrize(
+    "kind",
+    ("run.completed", "run.failed", "stop.accepted", "stop.unknown", "stop.failed"),
+)
+def test_original_stop_denies_other_durable_event_kinds(
+    terminal_stop_factory,
+    terminal,
+    kind,
+):
+    s = terminal_stop_factory(terminal=terminal, closed=False)
+    projected = project_run_event(s.native_events[0].model_copy(update={"kind": kind}))
+    s.execution_events[2] = replace(
+        s.execution_events[2],
+        event_type=projected.event_type,
+        payload=projected.payload,
+        raw_ref=projected.raw_ref,
+    )
+    before = cleanup_facts(s)
+    with pytest.raises(GatewayRecoveryRequired):
+        persist_original(s)
     assert cleanup_facts(s) == before and not s.native_reads
 
 
+@pytest.mark.parametrize("terminal", ("succeeded", "failed"))
+@pytest.mark.parametrize("kind", ("run.stopped", "run.closed"))
+@pytest.mark.parametrize("completed", (False, True))
 @pytest.mark.parametrize("stage", ("cleanup", "query"))
+def test_natural_closure_cannot_confirm_stop_for_other_terminal_outcome(
+    terminal_stop_factory,
+    terminal,
+    kind,
+    completed,
+    stage,
+):
+    s = terminal_stop_factory(terminal=terminal, completed=completed)
+    event = project_run_event(
+        s.native_events[0].model_copy(
+            update={"kind": kind, "operation_id": None, "data": {"state": "stopped"}}
+        )
+    )
+    s.execution_events[2] = replace(
+        s.execution_events[2],
+        event_type=event.event_type,
+        payload=event.payload,
+        raw_ref=event.raw_ref,
+    )
+    before = cleanup_facts(s)
+    with pytest.raises(GatewayRecoveryRequired):
+        if stage == "cleanup":
+            persist_original(s)
+        else:
+            s.gateway.handle_stop(s.message)
+    assert cleanup_facts(s) == before
+
+
+OWNERSHIP_CHANGES = (
+    "binding",
+    "profile",
+    "binding_version",
+    "revoked",
+    "authority_lease",
+    "authority_fence",
+    "worker",
+    "execution_lease",
+    "execution_fence",
+    "lease_workspace",
+    "lease_execution",
+    "lease_worker",
+    "lease_fence",
+    "released",
+    "expired",
+    "session_worker",
+    "session_module",
+    "session_config",
+    "session_run",
+    "operation_session",
+    "operation_type",
+    "operation_requested",
+    "operation_failed",
+    "stop_not_requested",
+    "owner",
+)
+COMPLETED_OWNERSHIP_CHANGES = (
+    "active_lease",
+    "running_without_lease",
+    "lost_execution",
+    "canceled_execution",
+    "link_outcome",
+    "session_active",
+    "session_lost",
+    "other_active_session",
+    "session_workspace_module",
+    "session_workspace_config",
+    "session_capabilities",
+    "task",
+    "binding_workspace",
+    "binding_execution",
+    "lease_id",
+    "worker_workspace",
+    "adapter_current_config",
+    "workspace_current_config",
+    "authority_principal",
+    "authority_execution",
+    "authority_target",
+    "authority_actions",
+    "operation_task",
+    "operation_workspace",
+    "operation_execution",
+)
+
+
 @pytest.mark.parametrize(
-    "bad",
-    (
-        "binding",
-        "profile",
-        "binding_version",
-        "revoked",
-        "authority_lease",
-        "authority_fence",
-        "worker",
-        "execution_lease",
-        "execution_fence",
-        "lease_workspace",
-        "lease_execution",
-        "lease_worker",
-        "lease_fence",
-        "released",
-        "expired",
-        "session_worker",
-        "session_module",
-        "session_config",
-        "session_run",
-        "operation_session",
-        "operation_type",
-        "operation_requested",
-        "operation_failed",
-        "stop_not_requested",
-        "owner",
-    ),
+    "completed,stage,bad",
+    [
+        (False, stage, bad)
+        for stage in ("cleanup", "query")
+        for bad in OWNERSHIP_CHANGES
+    ]
+    + [
+        (True, stage, bad)
+        for stage in ("cleanup", "query", "replay")
+        for bad in (*OWNERSHIP_CHANGES, *COMPLETED_OWNERSHIP_CHANGES)
+        if bad != "released"
+        and not (
+            stage == "replay"
+            and bad in {"canceled_execution", "operation_requested", "operation_failed"}
+        )
+    ],
 )
 def test_original_stop_denies_changed_current_ownership_without_cleanup(
     terminal_stop_factory,
     stage,
     bad,
+    completed,
 ):
-    s = terminal_stop_factory(expired=stage == "query")
+    s = terminal_stop_factory(expired=stage == "query", completed=completed)
+    if stage == "replay":
+        persist_original(s)
     if bad == "binding":
         s.binding = replace(s.binding, adapter_config_version=2)
     elif bad == "profile":
@@ -909,7 +1250,10 @@ def test_original_stop_denies_changed_current_ownership_without_cleanup(
     elif bad == "released":
         s.lease.revoke(now=NOW)
     elif bad == "expired":
-        s.lease.expire(now=s.lease.expires_at)
+        if completed:
+            s.lease.status = LeaseStatus.EXPIRED
+        else:
+            s.lease.expire(now=s.lease.expires_at)
     elif bad == "session_worker":
         s.session.worker_id = uuid4()
     elif bad == "session_module":
@@ -941,6 +1285,66 @@ def test_original_stop_denies_changed_current_ownership_without_cleanup(
         s.operation.resolve_stop(now=NOW, failure_code="controlled_failure")
     elif bad == "stop_not_requested":
         s.execution.stop_requested = False
+    elif bad == "active_lease":
+        s.lease.status = LeaseStatus.ACTIVE
+    elif bad == "running_without_lease":
+        s.execution.status = ExecutionStatus.RUNNING
+    elif bad == "lost_execution":
+        s.execution.status = ExecutionStatus.LOST
+    elif bad == "canceled_execution":
+        s.execution.status = ExecutionStatus.CANCELED
+    elif bad == "link_outcome":
+        s.link = replace(s.link, status="failed")
+    elif bad == "session_active":
+        s.session.status = ExecutionSessionStatus.ACTIVE
+    elif bad == "session_lost":
+        s.session.status = ExecutionSessionStatus.LOST
+    elif bad == "other_active_session":
+        s.other_active_session = ExecutionSession.start(
+            session_id=uuid4(),
+            workspace_id=s.execution.workspace_id,
+            execution_id=s.execution.id,
+            worker_id=s.worker.id,
+            adapter_session_id="controlled-other-session",
+            now=NOW,
+        )
+    elif bad == "session_workspace_module":
+        s.session.workspace_module_id = uuid4()
+    elif bad == "session_workspace_config":
+        s.session.workspace_config_version = 2
+    elif bad == "session_capabilities":
+        s.session.capability_snapshot = None
+    elif bad == "task":
+        s.execution.task_id = uuid4()
+    elif bad == "binding_workspace":
+        s.binding = replace(s.binding, workspace_id=uuid4())
+    elif bad == "binding_execution":
+        s.binding = replace(s.binding, execution_id=uuid4())
+    elif bad == "lease_id":
+        s.lease.id = uuid4()
+    elif bad == "worker_workspace":
+        s.worker.workspace_id = uuid4()
+    elif bad in {"adapter_current_config", "workspace_current_config"}:
+        module_id = (
+            s.binding.adapter_module_id
+            if bad == "adapter_current_config"
+            else s.binding.workspace_module_id
+        )
+        s.modules[module_id] = replace(s.modules[module_id], config_version=2)
+    elif bad == "authority_principal":
+        s.authority = replace(s.authority, principal_id="other-principal")
+    elif bad == "authority_execution":
+        s.authority = replace(s.authority, execution_id=uuid4())
+    elif bad == "authority_target":
+        s.authority = replace(s.authority, target_id=uuid4())
+    elif bad == "authority_actions":
+        s.authority = replace(s.authority, actions=frozenset())
+    elif bad == "operation_task":
+        s.operation.task_id = uuid4()
+    elif bad == "operation_workspace":
+        s.operation.workspace_id = uuid4()
+    elif bad == "operation_execution":
+        s.operation.execution_id = uuid4()
     else:
         s.owner = False
     before = cleanup_facts(s)
@@ -950,6 +1354,7 @@ def test_original_stop_denies_changed_current_ownership_without_cleanup(
         else:
             s.gateway.handle_stop(s.message)
     assert cleanup_facts(s) == before and not s.native_reads
+    assert not s.link_saves
 
 
 @pytest.mark.parametrize(
@@ -965,12 +1370,14 @@ def test_original_stop_denies_changed_current_ownership_without_cleanup(
         "missing_event",
     ),
 )
+@pytest.mark.parametrize("completed", (False, True))
 def test_expired_original_uncertainty_never_reissues_or_cleans_up(
     terminal_stop_factory,
     monkeypatch,
     bad,
+    completed,
 ):
-    s = terminal_stop_factory(expired=True, ingest=True)
+    s = terminal_stop_factory(expired=True, ingest=True, completed=completed)
     if bad in {"accepted", "unknown", "failed"}:
         s.receipt = StopReceipt.model_validate(
             {**s.receipt.model_dump(), "status": bad, "evidence_sequence": None}
@@ -999,14 +1406,17 @@ def test_expired_original_uncertainty_never_reissues_or_cleans_up(
     assert cleanup_facts(s) == before
     assert s.native_reads[0] == "get_stop"
     assert not s.link_saves and not s.execution_events
+    assert s.operation.status is not GatewayOperationStatus.SUCCEEDED
 
 
 @pytest.mark.parametrize("kind", ("fresh_stop", "legacy_stop", "start", "input"))
+@pytest.mark.parametrize("completed", (False, True))
 def test_expired_original_read_does_not_admit_fresh_or_other_actions(
     terminal_stop_factory,
     kind,
+    completed,
 ):
-    s = terminal_stop_factory(expired=True)
+    s = terminal_stop_factory(expired=True, completed=completed)
     if kind == "fresh_stop":
         s.operation = None
     elif kind == "legacy_stop":

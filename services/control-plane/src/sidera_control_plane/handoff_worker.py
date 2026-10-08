@@ -26,6 +26,7 @@ from sidera_control_plane.application.worker_policy import LowestCostWorkerPolic
 from sidera_control_plane.application.worker_runtime import WorkerRuntimeResolver
 from sidera_control_plane.application.workspace_handoff import WorkspaceHandoffService
 from sidera_control_plane.config import Settings
+from sidera_control_plane.domain.agent_bindings import AgentExecutionLink
 from sidera_control_plane.gateway_worker import GatewayRuntime
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
@@ -33,6 +34,9 @@ from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
 class HandoffCoordinatorPort(Protocol):
     def run_once(self, limit: int) -> HandoffRunResult:
+        raise NotImplementedError
+
+    def drain_original_source_stop(self, expected: AgentExecutionLink) -> bool:
         raise NotImplementedError
 
 

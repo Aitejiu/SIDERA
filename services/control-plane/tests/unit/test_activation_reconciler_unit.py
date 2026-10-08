@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from typing import cast
 from uuid import UUID, uuid4
 
+import pytest
+
 from sidera_control_plane.application.activation_reconciler import (
     ActivationReconciler,
 )
@@ -15,7 +17,9 @@ from sidera_control_plane.domain.artifacts import Artifact, ArtifactType, Eviden
 from sidera_control_plane.domain.collaboration import (
     CollaborationGateMode,
     CollaborationRunStatus,
+    RuntimeRelease,
 )
+from sidera_control_plane.domain.context_packages import ContextAssemblyRequest
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution import Execution, ExecutionStatus
 from sidera_control_plane.domain.execution_requests import (
@@ -32,7 +36,10 @@ from sidera_control_plane.domain.input_selections import (
     InputSelectionHardInputV1,
 )
 from sidera_control_plane.domain.planning import PlanningRequestStatus
-from sidera_control_plane.domain.task import TaskStatus
+from sidera_control_plane.domain.task import Task, TaskStatus
+from sidera_control_plane.domain.worker_item import WorkerItem
+
+from .test_execution_code_inputs import CodeInputCase, code_input_case, rehash_selection
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 WORKSPACE_ID = UUID("70000000-0000-0000-0000-000000000001")
@@ -620,3 +627,377 @@ def test_successful_lineage_fact_requires_real_artifacts_and_evidence() -> None:
     assert fact.execution_lineage_id == upstream.execution_lineage_id
     assert fact.artifact_refs == ("artifact_type:diff",)
     assert fact.evidence_refs == ("acceptance:done",)
+
+
+class MaterializationRequests(FakeExecutionRequestRepository):
+    def __init__(self, case: CodeInputCase) -> None:
+        super().__init__(case.request)
+        self.sources = {item.id: item for item in case.source_requests}
+
+    def get(self, request_id, workspace_id, *, for_update=False):
+        return super().get(request_id, workspace_id, for_update=for_update) or (
+            self.sources.get(request_id)
+            if workspace_id == self.request.workspace_id
+            else None
+        )
+
+    def list_activation_candidates(self, *, status, now, limit):
+        del now, limit
+        return (self.request,) if self.request.status is status else ()
+
+
+class MaterializationUnitOfWork(FakeUnitOfWork):
+    def __init__(self, case: CodeInputCase) -> None:
+        from .test_context_requests import fixed_planning_inputs
+
+        super().__init__(case.request)
+        self.execution_requests = MaterializationRequests(case)
+        self.added_executions: list[Execution] = []
+        self.assemblies: list[ContextAssemblyRequest] = []
+        self.rolled_back = False
+        repositories = case.uow()
+        self.executions = SimpleNamespace(
+            get=repositories.executions.get, add=self.added_executions.append
+        )
+        self.results = repositories.results
+        self.results.get_head = lambda *_args: None
+        self.plans = repositories.plans
+        self.plans.get_current_for_root = lambda *_args: case.plan
+        self.plans.get_head = lambda *_args, **_kwargs: SimpleNamespace(
+            workspace_id=case.plan.workspace_id,
+            root_task_id=case.plan.root_task_id,
+            active_snapshot_id=case.plan.id,
+            active_generation=case.plan.generation,
+            active_snapshot_hash=case.selection.plan_content_hash,
+        )
+        self.release = RuntimeRelease(
+            id=UUID(int=910),
+            workspace_id=case.selection.workspace_id,
+            run_id=case.selection.run_id,
+            plan_snapshot_id=case.selection.plan_snapshot_id,
+            plan_generation=case.selection.plan_generation,
+            plan_content_hash=case.selection.plan_content_hash,
+            decision_id=case.selection.decision_id,
+            intent_id=case.selection.intent_id,
+            execution_request_id=case.request.id,
+            request_version_at_release=case.selection.target_request_version,
+            issued_at=case.selection.created_at,
+            input_selection_id=case.request.input_selection_id,
+            input_selection_hash=case.request.input_selection_hash,
+        )
+        self.collaboration_ledger = SimpleNamespace(
+            get_release_for_request=lambda *_args: self.release
+        )
+        self.input_selections = SimpleNamespace(get=lambda *_args: case.selection)
+        self.collaboration_runs = SimpleNamespace(
+            get_current=lambda *_args: SimpleNamespace(
+                id=case.selection.run_id,
+                workspace_id=case.selection.workspace_id,
+                root_task_id=case.selection.root_task_id,
+                plan_snapshot_id=case.selection.plan_snapshot_id,
+                plan_generation=case.selection.plan_generation,
+                plan_content_hash=case.selection.plan_content_hash,
+                status=CollaborationRunStatus.ACTIVE,
+            )
+        )
+        planning_request = SimpleNamespace(
+            id=case.request.planning_request_id,
+            workspace_id=case.request.workspace_id,
+            current_proposal_revision=1,
+            status=PlanningRequestStatus.MATERIALIZED,
+        )
+        self.planning_requests = SimpleNamespace(get=lambda *_args: planning_request)
+        self.planning_records = SimpleNamespace(
+            get_current_proposal=lambda *_args: SimpleNamespace(
+                id=case.request.proposal_revision_id
+            )
+        )
+        task = Task.create(
+            task_id=case.request.subtask_id,
+            workspace_id=case.request.workspace_id,
+            title="Code consumer",
+            description="Consume fixed code",
+            acceptance_criteria=("done",),
+            priority=1,
+            requested_by="test",
+        )
+        task.mark_ready()
+        self.tasks = SimpleNamespace(get=lambda *_args, **_kwargs: task)
+        self.worker = WorkerItem.create(
+            item_id=case.request.worker_item_id,
+            workspace_id=case.request.workspace_id,
+            root_task_id=case.request.root_task_id,
+            title="Code consumer",
+            responsibility="Consume fixed code",
+            now=case.selection.created_at,
+            stable_key=case.request.worker_item_key,
+        )
+        self.worker_items = SimpleNamespace(
+            get=lambda *_args, **_kwargs: self.worker,
+            get_current_placement=lambda *_args: SimpleNamespace(
+                plan_generation=case.plan.generation
+            ),
+        )
+        _, _, revision, _ = fixed_planning_inputs()
+        self.revision = replace(revision, workspace_id=case.request.workspace_id)
+        work_context = SimpleNamespace(current_revision_id=self.revision.revision_id)
+        self.work_contexts = SimpleNamespace(
+            get_by_planning_request=lambda *_args: work_context,
+            get_by_root_task=lambda *_args: work_context,
+            get_revision=lambda *_args: self.revision,
+        )
+        self.context_assemblies = SimpleNamespace(
+            add=self.assemblies.append,
+            get_for_consumer=lambda purpose, execution_id, workspace_id, *, manifest_schema_version: (
+                next(
+                    (
+                        item
+                        for item in self.assemblies
+                        if item.consumer_id == execution_id
+                        and item.workspace_id == workspace_id
+                        and item.manifest_schema_version == manifest_schema_version
+                    ),
+                    None,
+                )
+            ),
+        )
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        super().__exit__(exc_type, exc_value, traceback)
+        if exc_type is not None:
+            self.rolled_back = True
+            self.added_executions.clear()
+            self.assemblies.clear()
+
+
+@pytest.mark.parametrize("hard_only", (False, True))
+def test_normal_activation_saves_v3_with_fixed_code_and_result_selection(
+    hard_only: bool,
+) -> None:
+    case = code_input_case(hard_only=hard_only)
+    uow = MaterializationUnitOfWork(case)
+    reconciler = ActivationReconciler(
+        uow_factory=lambda: cast(ControlPlaneUnitOfWork, uow),
+        owner_id="test-code-activation",
+        clock=lambda: case.selection.created_at,
+    )
+    execution_id, deferred = reconciler._materialize_ready(
+        cast(ControlPlaneUnitOfWork, uow), case.request, now=case.selection.created_at
+    )
+    assert execution_id is not None and not deferred
+    assert len(uow.assemblies) == 1
+    assembly = uow.assemblies[0]
+    assert assembly.manifest_schema_version == 3
+    assert assembly.input_selection_id == case.selection.id
+    assert assembly.input_selection_hash == case.selection.selection_hash
+    manifest = assembly.code_input_manifest
+    assert manifest is not None
+    assert (manifest.request_id, manifest.execution_id) == (
+        case.request.id,
+        execution_id,
+    )
+    assert (manifest.selection_id, manifest.selection_hash) == (
+        case.selection.id,
+        case.selection.selection_hash,
+    )
+    assert assembly.verification_manifest is None
+    assert case.request.status is ExecutionRequestStatus.MATERIALIZED
+    assert case.request.version == case.selection.target_request_version + 1
+    assert (
+        uow.release.request_version_at_release == case.selection.target_request_version
+    )
+    assert uow.execution_requests.saved[0][1] == case.selection.target_request_version
+    from sidera_control_plane.application.context_requests import (
+        execution_context_manifest_schema_version,
+    )
+
+    uow.execution_requests.get_effective_by_execution_lineage = lambda *_args: (
+        case.request
+    )
+    assert (
+        execution_context_manifest_schema_version(
+            cast(ControlPlaneUnitOfWork, uow), uow.added_executions[0]
+        )
+        == 3
+    )
+
+
+def test_invalid_selected_code_rolls_back_activation_without_materializing() -> None:
+    case = replace(code_input_case(hard_only=True), snapshots=())
+    uow = MaterializationUnitOfWork(case)
+    reconciler = ActivationReconciler(
+        uow_factory=lambda: cast(ControlPlaneUnitOfWork, uow),
+        owner_id="test-code-activation",
+        clock=lambda: case.selection.created_at,
+    )
+    result = reconciler.run_once(limit=1)
+    assert result.failed == 1
+    assert result.materialized == 0
+    assert result.execution_ids == ()
+    assert uow.rolled_back
+    assert uow.assemblies == []
+    assert uow.added_executions == []
+    assert case.request.status is ExecutionRequestStatus.READY
+    assert case.request.version == case.selection.target_request_version
+    assert case.request.first_execution_id is None
+    assert uow.events.events == []
+
+
+@pytest.mark.parametrize("branch", ("source", "text", "legacy_diff"))
+def test_normal_activation_retains_legacy_schema_choices(branch: str) -> None:
+    case = code_input_case()
+    if branch == "source":
+        case = replace(
+            case,
+            request=replace(
+                case.request,
+                input_selection_id=None,
+                input_selection_hash=None,
+                collaboration_gate_mode=CollaborationGateMode.UNMANAGED,
+            ),
+        )
+    elif branch == "text":
+        group = case.selection.groups[0]
+        source = group.sources[0]
+        selection = rehash_selection(
+            replace(
+                case.selection,
+                groups=(
+                    replace(
+                        group,
+                        sources=(
+                            replace(
+                                source,
+                                artifacts=(
+                                    replace(
+                                        source.artifacts[0],
+                                        artifact_type=ArtifactType.REPORT,
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        )
+        case = replace(
+            case,
+            selection=selection,
+            request=replace(
+                case.request, input_selection_hash=selection.selection_hash
+            ),
+        )
+    else:
+        case = replace(case, plan=replace(case.plan, integration_spec=None))
+    uow = MaterializationUnitOfWork(case)
+    reconciler = ActivationReconciler(
+        uow_factory=lambda: cast(ControlPlaneUnitOfWork, uow), owner_id="test-legacy"
+    )
+    reconciler._materialize_ready(
+        cast(ControlPlaneUnitOfWork, uow), case.request, now=case.selection.created_at
+    )
+    assert uow.assemblies[0].manifest_schema_version == (1 if branch == "source" else 2)
+    assert uow.assemblies[0].code_input_manifest is None
+
+
+@pytest.mark.parametrize("branch", ("verification", "rework", "reintegration"))
+def test_result_activation_preserves_existing_v3_owners(branch: str) -> None:
+    from sidera_control_plane.application.result_integration import (
+        ResultIntegrationService,
+    )
+    from sidera_control_plane.domain.result_operations import (
+        ReworkMode,
+        ReworkRecordV1,
+        ReworkStatus,
+    )
+
+    from .result_integration_fixtures import head_fixture
+
+    case = code_input_case()
+    snapshot = case.snapshots[0]
+    candidate = ResultIntegrationService._build_candidate(
+        candidate_id=UUID(int=930),
+        workspace_id=case.request.workspace_id,
+        root_task_id=case.request.root_task_id,
+        plan_snapshot_id=case.plan.id,
+        plan_content_hash=case.selection.plan_content_hash,
+        integration_execution_id=snapshot.execution_id,
+        base_commit="a" * 40,
+        source_result_ids=(snapshot.id,),
+        input_selection_id=case.selection.id,
+        input_selection_hash=case.selection.selection_hash,
+        code_result_id=snapshot.id,
+        previous_candidate_id=None,
+        created_at=case.selection.created_at,
+    )
+    request = replace(
+        case.request,
+        result_derivation_kind="verification" if branch == "verification" else "rework",
+        source_candidate_id=candidate.id,
+        rework_record_id=None if branch == "verification" else UUID(int=931),
+        purpose="reintegrate" if branch == "reintegration" else case.request.purpose,
+    )
+    if branch != "reintegration":
+        request = replace(
+            request,
+            input_selection_id=None,
+            input_selection_hash=None,
+            collaboration_gate_mode=CollaborationGateMode.UNMANAGED,
+        )
+    case = replace(case, request=request)
+    uow = MaterializationUnitOfWork(case)
+    records = {
+        ("candidate", candidate.id): candidate,
+        ("code_snapshot", snapshot.id): snapshot,
+    }
+    if branch == "rework":
+        record = ReworkRecordV1(
+            id=UUID(int=931),
+            workspace_id=request.workspace_id,
+            root_task_id=request.root_task_id,
+            candidate_id=candidate.id,
+            source_issue_keys=("login",),
+            target_worker_item_ids=(request.worker_item_id,),
+            impact_worker_item_ids=(request.worker_item_id,),
+            reason="Repair login",
+            mode=ReworkMode.USER,
+            round_number=None,
+            source_command_id=UUID(int=932),
+            request_ids=(request.id,),
+            status=ReworkStatus.REQUESTED,
+            created_at=case.selection.created_at,
+        )
+        records[("rework", record.id)] = record
+    uow.results.get_record = lambda kind, result_id, _workspace_id: records.get(
+        (kind, result_id)
+    )
+    uow.results.get_head = lambda *_args: head_fixture(
+        workspace_id=request.workspace_id,
+        root_task_id=request.root_task_id,
+        current_candidate_id=candidate.id,
+        current_acceptance_id=None,
+        result_version=1,
+        active_operation_id=None,
+    )
+    source_request = case.source_requests[0]
+    if branch == "verification":
+        source_request = replace(source_request, worker_item_key="backend")
+    uow.execution_requests.get_by_execution_lineage = lambda *_args: source_request
+    reconciler = ActivationReconciler(
+        uow_factory=lambda: cast(ControlPlaneUnitOfWork, uow), owner_id="test-v3-owners"
+    )
+    execution_id, deferred = reconciler._materialize_ready(
+        cast(ControlPlaneUnitOfWork, uow), request, now=case.selection.created_at
+    )
+    assert execution_id is not None and not deferred
+    assembly = uow.assemblies[0]
+    assert assembly.manifest_schema_version == 3
+    if branch == "verification":
+        assert assembly.code_input_manifest is None
+        assert assembly.verification_manifest is not None
+        assert assembly.verification_manifest.candidate_id == candidate.id
+    else:
+        assert assembly.verification_manifest is None
+        assert assembly.code_input_manifest is not None
+        assert assembly.code_input_manifest.execution_id == execution_id
+        assert assembly.code_input_manifest.selection_id == case.selection.id

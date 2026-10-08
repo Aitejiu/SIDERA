@@ -9,7 +9,8 @@ from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 from sidera_agents.errors import AgentError
 
-from sidera_control_plane.api.dependencies import get_database
+from sidera_control_plane.api.dependencies import get_database, get_result_query_service
+from sidera_control_plane.application import request_authority
 from sidera_control_plane.application.assignments import TrustedAssignmentIdentity
 from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.config import Settings
@@ -25,6 +26,130 @@ def runtime_module():
     name = "sidera_control_plane.composition.native_runtime"
     assert importlib.util.find_spec(name) is not None, "Public CP runtime is missing"
     return importlib.import_module(name)
+
+
+def acceptance_basis_target():
+    workspace_id = uuid4()
+    return request_authority.ControlPlaneRequestTarget(
+        workspace_id,
+        "operator",
+        "POST",
+        "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/results/{candidate_id}/acceptance-basis",
+        (
+            ("workspace_id", str(workspace_id)),
+            ("root_task_id", str(uuid4())),
+            ("candidate_id", str(uuid4())),
+        ),
+        (),
+    )
+
+
+@pytest.mark.parametrize("query", ["none", "same_workspace", "repeated", "other_key"])
+def test_result_acceptance_basis_query_accepts_exact_typed_target(query):
+    target = acceptance_basis_target()
+    workspace_pair = ("workspace_id", str(target.workspace_id))
+    queries = {
+        "none": (),
+        "same_workspace": (workspace_pair,),
+        "repeated": (workspace_pair, workspace_pair),
+        "other_key": (("tag", "a"),),
+    }
+    predicate = getattr(request_authority, "is_result_acceptance_basis_query", None)
+    assert callable(predicate), "Exact acceptance-basis query predicate is missing"
+    assert predicate(replace(target, query_parameters=queries[query])) is True
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "get",
+        "head",
+        "put",
+        "lowercase_post",
+        "other_route",
+        "route_suffix",
+        "missing_path",
+        "extra_path",
+        "duplicate_path",
+        "duplicate_with_three_paths",
+        "workspace_uuid",
+        "root_uuid",
+        "candidate_uuid",
+        "path_workspace",
+        "target_workspace",
+        "command",
+        "query_workspace",
+        "query_uuid",
+        "conflicting_queries",
+    ],
+)
+def test_result_acceptance_basis_query_rejects_inexact_typed_target(variant):
+    target = acceptance_basis_target()
+    if variant in {"get", "head", "put", "lowercase_post"}:
+        target = replace(
+            target, method="post" if variant == "lowercase_post" else variant.upper()
+        )
+    elif variant == "other_route":
+        target = replace(target, route="/api/v1/other/acceptance-basis")
+    elif variant == "route_suffix":
+        target = replace(target, route=target.route + "/extra")
+    elif variant == "missing_path":
+        target = replace(target, path_parameters=target.path_parameters[:-1])
+    elif variant == "extra_path":
+        target = replace(
+            target, path_parameters=(*target.path_parameters, ("extra", str(uuid4())))
+        )
+    elif variant == "duplicate_path":
+        target = replace(
+            target,
+            path_parameters=(*target.path_parameters, target.path_parameters[-1]),
+        )
+    elif variant == "duplicate_with_three_paths":
+        target = replace(
+            target,
+            path_parameters=(*target.path_parameters[:2], target.path_parameters[1]),
+        )
+    elif variant in {"workspace_uuid", "root_uuid", "candidate_uuid", "path_workspace"}:
+        key = {
+            "workspace_uuid": "workspace_id",
+            "root_uuid": "root_task_id",
+            "candidate_uuid": "candidate_id",
+            "path_workspace": "workspace_id",
+        }[variant]
+        value = str(uuid4()) if variant == "path_workspace" else "not-a-uuid"
+        target = replace(
+            target,
+            path_parameters=tuple(
+                (name, value if name == key else old)
+                for name, old in target.path_parameters
+            ),
+        )
+    elif variant == "target_workspace":
+        target = replace(target, workspace_id=uuid4())
+    elif variant == "command":
+        command = CommandEnvelope(
+            uuid4(),
+            target.workspace_id,
+            "CompleteTask",
+            "task",
+            "user",
+            "operator",
+            uuid4(),
+            {},
+            1,
+            "complete-task",
+            uuid4(),
+        )
+        target = replace(target, command=command)
+    else:
+        value = "not-a-uuid" if variant == "query_uuid" else str(uuid4())
+        queries = (("workspace_id", value),)
+        if variant == "conflicting_queries":
+            queries = (("workspace_id", str(target.workspace_id)), *queries)
+        target = replace(target, query_parameters=queries)
+    predicate = getattr(request_authority, "is_result_acceptance_basis_query", None)
+    assert callable(predicate), "Exact acceptance-basis query predicate is missing"
+    assert predicate(target) is False
 
 
 def test_cancelled_public_http_request_releases_lifetime_counter():
@@ -169,6 +294,71 @@ def native_http():
             )
     finally:
         runtime.close()
+
+
+def test_native_acceptance_basis_post_is_query_before_result_dependency(native_http):
+    s = native_http
+    root_task_id, candidate_id = uuid4(), uuid4()
+    reached_after_authority = []
+
+    def result_dependency_marker():
+        s.business_calls.append("result_query")
+        reached_after_authority.append(s.authority.calls[-1])
+        raise HTTPException(418, detail={"code": "inert_result_dependency"})
+
+    s.runtime.app.dependency_overrides[get_result_query_service] = (
+        result_dependency_marker
+    )
+    path = (
+        f"/api/v1/workspaces/{s.workspace_id}/tasks/{root_task_id}"
+        f"/results/{candidate_id}/acceptance-basis"
+    )
+    body = {
+        "criteria": [
+            {"criterion_key": "C1", "decision": "manual_passed", "reason": "verified"}
+        ]
+    }
+    response = s.client.post(path, json=body, headers={"X-Trusted-Test": "human"})
+    assert response.status_code == 418
+    assert s.business_calls == ["result_query"] and not s.native.calls
+    grant, action, target = reached_after_authority[0]
+    assert grant == s.authority.human.grant_id
+    assert action == "control_plane.query"
+    assert target.command is None and target.method == "POST"
+    assert target.route == (
+        "/api/v1/workspaces/{workspace_id}/tasks/{root_task_id}/results/{candidate_id}/acceptance-basis"
+    )
+    assert target.path_parameters == (
+        ("workspace_id", str(s.workspace_id)),
+        ("root_task_id", str(root_task_id)),
+        ("candidate_id", str(candidate_id)),
+    )
+    s.authority.revoked = True
+    denied = s.client.post(path, json=body, headers={"X-Trusted-Test": "human"})
+    assert denied.status_code == 403
+    assert denied.json()["error"]["code"] == "permission_denied"
+    assert s.business_calls == ["result_query"] and not s.native.calls
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        "/api/v1/workspaces/{workspace}/context-packages/{resource}/materialize",
+        "/api/v1/workspaces/{workspace}/notification-deliveries/claims",
+    ],
+)
+def test_native_other_noncommand_posts_remain_mutation_scoped(native_http, route):
+    s = native_http
+    s.authority.revoked = True
+    response = s.client.post(
+        route.format(workspace=s.workspace_id, resource=uuid4()),
+        json={},
+        headers={"X-Trusted-Test": "human"},
+    )
+    assert response.status_code == 403
+    assert s.authority.calls[-1][1] == "control_plane.mutate"
+    assert s.authority.calls[-1][2].command is None
+    assert not s.business_calls and not s.native.calls
 
 
 @pytest.mark.parametrize(

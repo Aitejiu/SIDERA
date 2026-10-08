@@ -82,6 +82,7 @@ from sidera_control_plane.api.worker_trace_queries import (
 from sidera_control_plane.application.request_authority import (
     ControlPlaneRequestAuthorizer,
     ControlPlaneRequestTarget,
+    is_result_acceptance_basis_query,
     require_command_authority,
     require_request_identity,
     require_request_scope,
@@ -95,10 +96,17 @@ from sidera_control_plane.persistence.migration_resources import migration_confi
 _PROJECT_ROOT = Path(__file__).resolve().parents[5]
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    projection_stream_shutdown_check: Callable[[], bool] | None = None,
+) -> FastAPI:
     """Build the control-plane HTTP application."""
     resolved_settings = settings or Settings()  # pyright: ignore[reportCallIssue]
-    return _build_app(resolved_settings)
+    return _build_app(
+        resolved_settings,
+        projection_stream_shutdown_check=projection_stream_shutdown_check,
+    )
 
 
 def _build_app(
@@ -109,6 +117,7 @@ def _build_app(
     request_authorizer: ControlPlaneRequestAuthorizer | None = None,
     admission_check: Callable[[Request], None] | None = None,
     request_admission: Callable[[Request], AbstractContextManager[None]] | None = None,
+    projection_stream_shutdown_check: Callable[[], bool] | None = None,
 ) -> FastAPI:
 
     async def authorize_native_target(request: Request, route_path: str) -> None:
@@ -184,6 +193,7 @@ def _build_app(
             action = (
                 "control_plane.query"
                 if request.method in {"GET", "HEAD"}
+                or is_result_acceptance_basis_query(target)
                 else "control_plane.mutate"
             )
             await run_in_threadpool(
@@ -233,6 +243,7 @@ def _build_app(
         allow_credentials=False,
     )
     app.state.settings = resolved_settings
+    app.state.projection_stream_shutdown_check = projection_stream_shutdown_check
     if database is not None:
         app.state.database = database
 

@@ -1,3 +1,4 @@
+from typing import Literal
 from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictBool, StrictInt
@@ -90,6 +91,13 @@ class ResourceListView(ManagementModel):
 
 class RuntimeListView(ManagementModel):
     items: tuple[RuntimeSnapshot, ...]
+
+
+class ToolConnectionView(ManagementModel):
+    workspace_id: UUID
+    connection_id: UUID
+    name: Literal["SIDERA Task Tools"]
+    availability: Literal["configured"]
 
 
 class ConversationWorkView(ManagementModel):

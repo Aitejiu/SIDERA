@@ -465,6 +465,9 @@ function installHandlers(options: {
   };
 
   server.use(
+    http.get("/main-agent/v1/health", () => HttpResponse.json({
+      status: "ok", service: "sidera-product",
+    })),
     http.get("/product/v1/session", () => HttpResponse.json(SESSION)),
     http.get("/api/v1/workspaces/:workspaceId/assignments/worker_item/:workerItemId", ({ params }) => {
       const current = worldFor(String(params.workerItemId));
