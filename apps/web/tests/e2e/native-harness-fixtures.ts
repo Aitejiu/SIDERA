@@ -247,7 +247,8 @@ export function realFocusedRecords(manifest: NativeManifest, selected: RealCase,
     noSecrets(record, true);
     if (record.schema_version !== 1 || record.owner_uid !== uid() || record.allocation_id !== manifest.allocation_id ||
       record.workspace_id !== manifest.workspace_id || record.config_hash !== manifest.config_hash ||
-      canonical(record.source_pins) !== canonical(manifest.source_pins) || !["input", "handoff"].includes(record.case) || !uuid(record.case_uuid) ||
+      (record.case === selected && record.case_uuid === caseId && canonical(record.source_pins) !== canonical(manifest.source_pins)) ||
+      !["input", "handoff"].includes(record.case) || !uuid(record.case_uuid) ||
       !NATIVE_STAGES.includes(record.step) || !["pending", "passed", "failed", "incomplete"].includes(record.status) ||
       !Number.isSafeInteger(record.sequence) || !object(record.original_ids) || !object(record.observed)) throw new Error("native_real_focused_receipt_refused");
     return record;

@@ -67,10 +67,10 @@ print(json.dumps(opaque_repository_ref(Path(json.load(sys.stdin)["directory"])))
 export function realProposalShape(proposal: Proposal, selected: RealCase) {
   if (proposal.proposal_schema_version !== 6 || !object(proposal.display)) throw new Error("native_real_proposal_schema_required");
   const workers = items(proposal.display.worker_items), subtasks = items(proposal.display.subtasks);
-  const expected = selected === "main" ? ["contract", "cli", "tests", "integration"] : [`${selected}-work`];
+  const expected = selected === "main" ? ["contract", "cli", "tests", "integration"] : [`${selected}-work`, `${selected}-integration`];
   if (!same(workers.map(item => item.key).sort(), [...expected].sort()) || new Set(subtasks.map(item => item.key)).size !== subtasks.length ||
     workers.some(worker => !subtasks.some(task => task.key === worker.subtask_key))) throw new Error("native_real_worker_keys_required");
-  if (!object(proposal.display.integration_spec) || proposal.display.integration_spec.integration_worker_item_key !== (selected === "main" ? "integration" : expected[0])) {
+  if (!object(proposal.display.integration_spec) || proposal.display.integration_spec.integration_worker_item_key !== expected.at(-1)) {
     throw new Error("native_real_integration_required");
   }
   if (selected === "main") {
@@ -83,8 +83,41 @@ export function realProposalShape(proposal: Proposal, selected: RealCase) {
       if (groups.length !== 1 || groups[0]!.mode !== "all" || groups[0]!.requirements.execution_status !== "succeeded" ||
         !same(groups[0]!.candidates.map(item => item.worker_item_key).sort(), [...sources].sort())) throw new Error("native_real_code_inputs_required");
     }
+  } else {
+    const [source, consumer] = expected, groupKey = `${selected}-integration-inputs`;
+    const edges = proposal.display.worker_item_dependencies;
+    if (!Array.isArray(edges) || edges.length !== 1 || !object(edges[0]) || edges[0].kind !== "hard" ||
+      edges[0].upstream_worker_item_key !== source || edges[0].downstream_worker_item_key !== consumer) throw new Error("native_real_dependencies_required");
+    const collaboration = proposal.collaboration, groups = collaboration.input_groups;
+    if (collaboration.mode !== "enabled" || collaboration.provider !== "sidera-collaboration" || collaboration.default_strategy !== "all_required" ||
+      collaboration.runtime_interface !== "sidera.collaboration.v1" || collaboration.runtime_config_version !== 1 || groups.length !== 1) throw new Error("native_real_code_inputs_required");
+    const group = groups[0]!;
+    if (group.group_key !== groupKey || group.consumer_worker_item_key !== consumer || group.mode !== "all" || group.minimum_count !== null ||
+      group.selection_strategy !== "plan_order" || group.requirements.execution_status !== "succeeded" || group.requirements.evidence_status !== "candidate" ||
+      !same(group.requirements.required_artifact_refs, ["artifact_type:diff"]) || !same(group.requirements.required_evidence_refs, []) ||
+      group.candidates.length !== 1 || group.candidates[0]!.worker_item_key !== source || group.candidates[0]!.priority !== 1 ||
+      !same(proposal.display.integration_spec.input_group_keys, [groupKey])) throw new Error("native_real_code_inputs_required");
   }
   return { workers, subtasks };
+}
+
+export function realFocusedGoal(selected: "input" | "handoff") {
+  return `Use schema 6 with exactly two WorkerItem keys ${selected}-work and ${selected}-integration.
+Use exactly one hard dependency ${selected}-work -> ${selected}-integration.
+Enable collaboration with mode enabled, provider sidera-collaboration, default_strategy all_required,
+runtime_interface sidera.collaboration.v1 and runtime_config_version 1.
+Use exactly one input group: group_key ${selected}-integration-inputs, consumer ${selected}-integration,
+only candidate ${selected}-work with priority 1, mode all, minimum_count null, selection_strategy plan_order,
+execution_status succeeded, evidence_status candidate, required_artifact_refs ["artifact_type:diff"] and required_evidence_refs [].
+Set integration_worker_item_key ${selected}-integration and input_group_keys ["${selected}-integration-inputs"].
+${selected}-work implements ${selected}_catalog.py and test_${selected}_catalog.py using standard library only.
+The catalog must normalize and index at least 2000 generated named records, preserve stable round trips, reject invalid entries and duplicates,
+and include substantive unittest coverage for all records, Unicode names, empty collections and malformed entries. Execute that unittest suite.
+${selected}-integration consumes the immutable diff from ${selected}-work and independently executes the produced unittest suite.
+Do not change README.md, verify_demo.py or inputs. This is an independent catalog workload, not a replay of the JSON CLI task.
+Keep max attempts 1, no automatic apply, no fabricated facts, artificial prompt holds, fixed sleeps or reopened Runs.
+Use the existing repository, profile defaults and planner setup, preserving configured checks and criteria binding.
+Wait for explicit confirmation before executing.`;
 }
 
 export function realRunOverlap(left: NativeTrace, right: NativeTrace): "OBSERVED" | "NOT_OBSERVED" {
@@ -301,7 +334,7 @@ export async function proposalReady(native: NativeFixture, selected: RealCase): 
       await native.page.getByRole("button", { name: "要求修改", exact: true }).click();
       await native.page.getByRole("textbox", { name: "修改意见", exact: true }).fill(selected === "main"
         ? "Keep this original Task and repository contract. Repair schema 6 to exactly contract, cli, tests, integration; hard edges contract->cli, contract->tests, cli->integration, tests->integration. Use one all-required immutable code-result input group for each consumer: cli=[contract], tests=[contract], integration=[cli,tests]. Keep explicit confirmation and configured owned-check."
-        : `Keep this original Task and substantive workload. Repair schema 6 to exactly one WorkerItem key ${selected}-work; keep explicit confirmation and the existing repository contract.`);
+        : `Keep this original Task and substantive workload. ${realFocusedGoal(selected)}`);
       await native.page.getByRole("button", { name: "提交修改意见", exact: true }).click();
       await expect.poll(async () => (await native.get<Planning>(path)).current_proposal_revision, { timeout: 900_000 }).toBeGreaterThan(proposal.revision);
     }
@@ -315,13 +348,19 @@ async function readProposal(native: NativeFixture) {
   return proposal;
 }
 
-async function confirmPlan(native: NativeFixture, selected: RealCase): Promise<Ids> {
+export async function confirmPlan(native: NativeFixture, selected: RealCase): Promise<Ids> {
   const proposal = await readProposal(native), shape = realProposalShape(proposal, selected), { page } = native;
   const before = await native.get<Planning>(native.prefix() + `planning-requests/${native.id("planning_request_id")}`);
+  expect(proposal.planning_request_id).toBe(native.id("planning_request_id")); expect(proposal.revision).toBe(native.ids.proposal_revision);
+  expect(before.id).toBe(native.id("planning_request_id")); expect(before.source_type).toBe("root_task");
+  expect(before.source_ref).toBe(native.id("root_task_id")); expect(before.workspace_id).toBe(native.manifest.workspace_id);
   expect(before.status).toBe("proposal_ready");
-  const overview = await native.get<CP["schemas"]["TaskConsoleOverviewProjectionResponse"]>(`/api/v1/tasks/${native.id("root_task_id")}/overview?workspace_id=${native.manifest.workspace_id}`);
-  expect(overview.root_task_id).toBe(native.id("root_task_id")); expect(overview.workspace_id).toBe(native.manifest.workspace_id);
-  expect(overview.subtask_count).toBe(0); expect(overview.running_subtask_count).toBe(0);
+  expect(before.version).toBe(native.versions.planning_request);
+  expect(before.current_proposal_revision).toBe(native.ids.proposal_revision); expect(before.current_proposal_content_hash).toBe(native.ids.proposal_content_hash);
+  const response = await page.request.get(native.manifest.base_url + native.prefix() + `planning-requests/${native.id("planning_request_id")}/materialization`, {
+    headers: { Origin: native.manifest.base_url }, timeout: 10_000,
+  });
+  expect(response.status()).toBe(404);
   expect(await native.get<CP["schemas"]["ExecutionResponse"][]>(`/api/v1/executions?workspace_id=${native.manifest.workspace_id}&task_id=${native.id("root_task_id")}`)).toEqual([]);
   native.record("pending", { canonical_workers_before_confirmation: 0 });
   await page.goto(native.path(`planning/${native.id("planning_request_id")}`));
@@ -374,21 +413,31 @@ function retainSource(native: NativeFixture, source: WorkerObservation) {
   native.ids.original_trace_cursor = source.trace.next_sequence;
 }
 
-async function sendInput(native: NativeFixture): Promise<{ status: "passed" | "failed" | "incomplete"; observed: Ids }> {
+export async function sendInput(native: NativeFixture): Promise<{ status: "passed" | "failed" | "incomplete"; observed: Ids }> {
   const { page } = native;
-  const before = await native.get<NativeContext>(native.prefix() + `worker-items/${native.id("source_worker_item_id")}/native-context`);
-  if (!before.input_enabled || !before.context || before.context.run_id !== native.ids.source_run_id) {
-    return { status: "failed", observed: { admission: "NOT_ADMITTED", closed_rejection: "CURRENT_CONTEXT_CLOSED", same_run_delivery: false } };
-  }
-  await page.goto(native.path(`worker-items/${native.id("source_worker_item_id")}`));
   const text = native.realCase === "main"
     ? "Check bool port rejection, blank name, enabled=false and port boundaries explicitly. Preserve the immutable contract and verifier. Keep stdout to one JSON object and stderr empty."
     : "Add coverage for empty and duplicate entries, Unicode names and round-trip stability. Preserve the seed verifier and inputs; use standard library only.";
-  await page.getByRole("textbox", { name: "给当前 Worker 的指令" }).fill(text);
-  await page.getByRole("button", { name: "复核当前 context", exact: true }).click();
-  const send = page.getByRole("button", { name: "发送到当前 Session", exact: true });
-  if (!await send.isEnabled()) return { status: "failed", observed: { admission: "NOT_ADMITTED", closed_rejection: "WEB_SEND_DISABLED", same_run_delivery: false } };
-  await send.click();
+  let before: NativeContext, send: ReturnType<typeof page.getByRole>;
+  try {
+    before = await native.get<NativeContext>(native.prefix() + `worker-items/${native.id("source_worker_item_id")}/native-context`);
+    if (!before.input_enabled || !before.context || before.context.run_id !== native.ids.source_run_id) {
+      return { status: "failed", observed: { admission: "NOT_ADMITTED", closed_rejection: "CURRENT_CONTEXT_CLOSED", same_run_delivery: false } };
+    }
+    await page.goto(native.path(`worker-items/${native.id("source_worker_item_id")}`));
+    const input = page.getByRole("textbox", { name: "介入这个 Worker", exact: true });
+    await expect(input).toBeEnabled({ timeout: 10_000 });
+    await input.fill(text);
+    await page.getByRole("button", { name: "复核当前 context", exact: true }).click();
+    send = page.getByRole("button", { name: "发送到当前 Session", exact: true });
+    await expect(send).toBeEnabled({ timeout: 10_000 });
+  } catch {
+    return { status: "failed", observed: { admission: "NOT_ADMITTED", closed_rejection: "WEB_SEND_DISABLED", same_run_delivery: false } };
+  }
+  try { await send.click(); }
+  catch {
+    if (typeof native.ids.input_command_id !== "string") return { status: "incomplete", observed: { admission: "UNKNOWN", same_run_delivery: false } };
+  }
   if (typeof native.ids.input_command_id !== "string") return { status: "incomplete", observed: { admission: "UNKNOWN", same_run_delivery: false } };
   const command = await originalCommand(native, "input_command_id");
   if (command.status === "rejected") return { status: "failed", observed: { original_command_status: "rejected", same_run_delivery: false } };
@@ -419,6 +468,84 @@ async function sendInput(native: NativeFixture): Promise<{ status: "passed" | "f
   await expect(page.getByText(text, { exact: true }).first()).toBeVisible();
   return { status: "passed", observed: { actual_native_admission: true, same_run_delivery: true, input_trace_cursor: native.ids.input_trace_cursor!,
     visible_in_history: true, token_interrupt: "NOT_CLAIMED" } };
+}
+
+type RealCodeInputRecord = { worker_key: string; context: CP["schemas"]["ContextPackageResponse"]; selection: CP["schemas"]["InputSelectionResponse"] };
+type RealCodeInput = { workspace_id: string; root_task_id: string; request_id: string; execution_id: string; input_hash: string;
+  selection_id: string; selection_hash: string; repository_ref: string; base_commit: string;
+  sources: { result_id: string; result_hash: string; input_commit: string; input_tree: string; result_commit: string; result_tree: string }[] };
+
+export function realCodeInputClosure(native: NativeFixture, executions: Record<string, string>, records: RealCodeInputRecord[],
+  detail: ResultDetail, repositoryRef: string): Json[] {
+  expect(records.map(record => record.worker_key)).toEqual(["cli", "tests", "integration"]);
+  const parsed = native.python(`import json, sys
+from sidera_control_plane.domain.code_results import CodeInputManifestV1
+print(json.dumps([CodeInputManifestV1.from_mapping(value).to_mapping() for value in json.load(sys.stdin)]))`,
+  records.map(record => record.context.code_input_manifest)) as RealCodeInput[];
+  expect(parsed).toEqual(records.map(record => record.context.code_input_manifest));
+  const codes = Object.fromEntries(records.map((record, index) => [record.worker_key, parsed[index]!]));
+  const mapping = native.ids.worker_item_mapping as Record<string, string>;
+  const selected: Record<string, CP["schemas"]["ResultInputSelectedSourceResponse"][]> = {};
+  expect(detail.workspace_id).toBe(native.manifest.workspace_id); expect(detail.root_task_id).toBe(native.id("root_task_id"));
+  expect(detail.candidate.is_current).toBe(true); expect(detail.candidate.integration_execution_id).toBe(executions.integration);
+  expect(detail.candidate.plan_snapshot_id).toBe(native.id("plan_snapshot_id")); expect(detail.candidate.base_commit).toBe(native.manifest.repository_head);
+  for (const { worker_key: key, context, selection } of records) {
+    const code = codes[key]!, execution = executions[key]!;
+    expect(context.manifest_schema_version).toBe(3); expect(context.purpose).toBe("execution");
+    expect(context.workspace_id).toBe(native.manifest.workspace_id); expect(context.worker_item_id).toBe(mapping[key]);
+    expect(context.consumer_type).toBe("worker"); expect(context.consumer_id).toBe(execution);
+    expect(code.workspace_id).toBe(native.manifest.workspace_id); expect(code.root_task_id).toBe(native.id("root_task_id"));
+    expect(code.execution_id).toBe(execution); expect(code.repository_ref).toBe(repositoryRef); expect(code.base_commit).toBe(native.manifest.repository_head);
+    expect(selection.schema_version).toBe(1); expect(selection.workspace_id).toBe(native.manifest.workspace_id);
+    expect(selection.root_task_id).toBe(native.id("root_task_id")); expect(selection.target_worker_item_id).toBe(mapping[key]);
+    expect(selection.target_execution_request_id).toBe(code.request_id);
+    expect(selection.selection_id).toBe(code.selection_id); expect(selection.selection_hash).toBe(code.selection_hash);
+    expect(selection.plan_snapshot_id).toBe(native.id("plan_snapshot_id")); expect(selection.plan_generation).toBe(native.ids.plan_generation);
+    expect(selection.plan_content_hash).toBe(detail.candidate.plan_content_hash);
+    expect(selection.consumers.some(consumer => consumer.consumer_type === "worker" && consumer.consumer_id === execution &&
+      consumer.worker_item_id === mapping[key] && consumer.execution_request_id === code.request_id && consumer.package_id === context.package_id)).toBe(true);
+    // Groups and hard dependencies can pin the same source with different priorities.
+    const direct = new Map<string, CP["schemas"]["ResultInputSelectedSourceResponse"]>();
+    for (const source of [...selection.groups.flatMap(group => group.sources), ...selection.hard_inputs.map(item => item.source)]) {
+      const previous = direct.get(source.effective_execution_id);
+      if (previous) expect({ ...source, priority: previous.priority }).toEqual(previous);
+      else direct.set(source.effective_execution_id, source);
+    }
+    const sources = [...direct.values()];
+    expect(sources.map(source => source.worker_item_key).sort()).toEqual(key === "integration" ? ["cli", "tests"] : ["contract"]);
+    for (const source of sources) {
+      expect(source.worker_item_id).toBe(mapping[source.worker_item_key]); expect(source.effective_execution_id).toBe(executions[source.worker_item_key]);
+      if (codes[source.worker_item_key]) expect(source.effective_request_id).toBe(codes[source.worker_item_key]!.request_id);
+      expect(source.artifacts.some(artifact => artifact.artifact_type === "diff")).toBe(true);
+    }
+    selected[key] = sources;
+  }
+  const identity = (source: CP["schemas"]["ResultInputSelectedSourceResponse"]) => ({ worker_item_id: source.worker_item_id,
+    request_id: source.effective_request_id, lineage_id: source.effective_lineage_id, execution_id: source.effective_execution_id });
+  expect(identity(selected.cli![0]!)).toEqual(identity(selected.tests![0]!));
+  expect(codes.cli!.sources).toHaveLength(1); expect(codes.tests!.sources).toEqual(codes.cli!.sources);
+  const ancestor = codes.cli!.sources[0]!;
+  expect(detail.source_results).toHaveLength(2);
+  expect(new Set(detail.source_results.map(result => result.snapshot_id)).size).toBe(2);
+  const branches = selected.integration!.map(source => {
+    const results = detail.source_results.filter(result => result.execution_id === source.effective_execution_id);
+    expect(results).toHaveLength(1);
+    const result = results[0]!;
+    expect(result.worker_item_id).toBe(source.worker_item_id); expect(result.request_id).toBe(source.effective_request_id);
+    for (const artifact of source.artifacts.filter(artifact => artifact.artifact_type === "diff")) expect(result.artifact_ids).toContain(artifact.artifact_id);
+    const pin = codes.integration!.sources.find(item => item.result_id === result.snapshot_id);
+    expect(pin).toBeDefined();
+    expect(pin!.result_hash).toBe(result.content_hash); expect(pin!.result_commit).toBe(result.result_commit); expect(pin!.result_tree).toBe(result.result_tree);
+    return pin!;
+  });
+  expect(detail.candidate.source_result_ids.slice().sort()).toEqual(branches.map(source => source.result_id).sort());
+  // The producer visits selected branches in selection order, dependency first.
+  expect(codes.integration!.sources).toEqual([ancestor, ...branches]);
+  return records.map(({ worker_key: key }) => {
+    const code = codes[key]!, execution = executions[key]!;
+    return { worker_key: key, execution_id: execution, input_hash: code.input_hash, selection_id: code.selection_id, selection_hash: code.selection_hash,
+      direct_source_execution_ids: selected[key]!.map(source => source.effective_execution_id), sources: code.sources as unknown as Json };
+  });
 }
 
 async function dependencyExecution(native: NativeFixture): Promise<Ids> {
@@ -457,18 +584,25 @@ async function dependencyExecution(native: NativeFixture): Promise<Ids> {
     expect(Date.parse(end)).toBeLessThanOrEqual(Date.parse(start));
   }
   const overlap = realRunOverlap(observations.cli!.trace, observations.tests!.trace);
-  const inputs: Json[] = [];
+  const records: RealCodeInputRecord[] = [];
   for (const key of ["cli", "tests", "integration"]) {
     const execution = observations[key]!.pin.execution_id;
-    const context = await native.get<{ code_input_manifest: { workspace_id: string; execution_id: string; input_hash: string;
-      selection_id: string; selection_hash: string; sources: { result_id: string; result_commit: string; result_tree: string }[] } }>(native.prefix() + `executions/${execution}/context-package?manifest_schema_version=3`);
-    const code = context.code_input_manifest;
-    expect(code.workspace_id).toBe(native.manifest.workspace_id); expect(code.execution_id).toBe(execution);
-    expect(code.sources).toHaveLength(key === "integration" ? 2 : 1);
-    expect(code.input_hash).toMatch(/^[0-9a-f]{64}$/); expect(code.selection_hash).toMatch(/^[0-9a-f]{64}$/);
-    inputs.push({ worker_key: key, execution_id: execution, input_hash: code.input_hash, selection_id: code.selection_id, selection_hash: code.selection_hash,
-      sources: code.sources as unknown as Json });
+    const context = await native.get<CP["schemas"]["ContextPackageResponse"]>(native.prefix() + `executions/${execution}/context-package?manifest_schema_version=3`);
+    if (!object(context.code_input_manifest) || typeof context.code_input_manifest.selection_id !== "string") throw new Error("native_real_code_inputs_required");
+    const selection = await native.get<CP["schemas"]["InputSelectionResponse"]>(native.prefix() + `collaboration/input-selections/${context.code_input_manifest.selection_id}`);
+    records.push({ worker_key: key, context, selection });
   }
+  const resultPath = native.prefix() + `tasks/${native.id("root_task_id")}/results`;
+  let candidate: ResultOverview["current_candidate"] = null;
+  await expect.poll(async () => {
+    candidate = (await native.get<ResultOverview>(resultPath)).current_candidate;
+    return candidate !== null;
+  }, { timeout: 900_000 }).toBe(true);
+  if (!candidate) throw new Error("native_real_candidate_required");
+  const detail = await native.get<ResultDetail>(resultPath + `/${(candidate as NonNullable<ResultOverview["current_candidate"]>).candidate_id}`);
+  expect(detail.candidate.candidate_id).toBe((candidate as NonNullable<ResultOverview["current_candidate"]>).candidate_id);
+  const inputs = realCodeInputClosure(native, Object.fromEntries(Object.entries(observations).map(([key, value]) => [key, value.pin.execution_id])),
+    records, detail, realRepositoryReference(native));
   const safe: Ids = {};
   for (const [key, value] of Object.entries(observations)) safe[key] = { ...value.pin, session_id: value.session_id, status: value.status,
     started_at: value.started_at, finished_at: value.finished_at, trace_cursor: value.trace.next_sequence, observed_model: value.context.run?.observed_model ?? "NOT_OBSERVED" };
@@ -648,13 +782,7 @@ async function focusedJourney(native: NativeFixture, selected: "input" | "handof
     throw new Error("native_real_existing_case_query_only");
   }
   native.profile();
-  const goal = `Create a new independent real Task for directed ${selected} validation, using normal SIDERA task tools and explicit human confirmation.
-Use schema 6 with exactly one WorkerItem key ${selected}-work. Implement ${selected}_catalog.py and test_${selected}_catalog.py using standard library only.
-The catalog must normalize and index at least 2000 generated named records, preserve stable round trips, reject invalid entries and duplicates,
-and include substantive unittest coverage for all records, Unicode names, empty collections and malformed entries. Execute that unittest suite.
-Do not change README.md, verify_demo.py or inputs. This is an independent catalog workload, not a replay of the JSON CLI task.
-Keep max attempts 1, no automatic apply, no fabricated facts, artificial prompt holds, fixed sleeps or reopened Runs.
-Use the existing repository, profile defaults and planner setup. Wait for explicit confirmation before executing.`;
+  const goal = `Create a new independent real Task for directed ${selected} validation, using normal SIDERA task tools and explicit human confirmation.\n${realFocusedGoal(selected)}`;
   native.stage = "conversation"; native.recordFocusedReal("pending", { selected_directed_workload: true });
   await conversation(native);
   native.stage = "goal_submitted"; await submitGoal(native, goal);

@@ -2028,6 +2028,88 @@ console.log(JSON.stringify({refused, mainRecords: fs.readdirSync(manifest.checkp
         assert result["mainRecords"] == 0
 
 
+@pytest.mark.parametrize("previous_case", ["input", "handoff"])
+def test_real_focused_records_keep_old_case_pins_independent(real_web_entry, previous_case):
+    result = real_web_probe(
+        real_web_entry,
+        """
+const original = fixture.loadOwnedManifest(manifestPath), oldCase = process.env.SIDERA_NATIVE_REAL_CASE;
+const oldId = process.env.SIDERA_NATIVE_REAL_CASE_ID, nextId = '22345678-1234-4234-8234-123456789abc';
+const first = new fixture.NativeFixture({}, original);
+first.stage = 'worker_input'; first.ids.goal_command_id = '32345678-1234-4234-8234-123456789abc';
+const oldPath = first.recordFocusedReal('failed', {admission: 'NOT_ADMITTED', closed_rejection: 'ACTIVE_WINDOW_MISSED'});
+const oldBytes = fs.readFileSync(oldPath), newer = structuredClone(original);
+const uiPath = Object.keys(newer.source_pins).find(name => newer.source_pins[name].scope === 'ui');
+newer.source_pins[uiPath].sha256 = 'f'.repeat(64);
+process.env.SIDERA_NATIVE_REAL_CASE = 'input'; process.env.SIDERA_NATIVE_REAL_CASE_ID = nextId;
+let error = null, records = [], originalRecords = [], selectedDriftRefused = false, reverseDriftRefused = false;
+try {
+  const next = new fixture.NativeFixture({}, newer);
+  next.stage = 'worker_input'; next.ids.goal_command_id = '42345678-1234-4234-8234-123456789abc';
+  next.recordFocusedReal('pending', {intent: true}); next.recordFocusedReal('incomplete', {admission: 'UNKNOWN'});
+  records = fixture.realFocusedRecords(newer, 'input', nextId);
+  originalRecords = fixture.realFocusedRecords(original, oldCase, oldId);
+  try {fixture.realFocusedRecords(newer, oldCase, oldId);} catch {selectedDriftRefused = true;}
+  try {fixture.realFocusedRecords(original, 'input', nextId);} catch {reverseDriftRefused = true;}
+} catch (caught) {error = caught.message;}
+const names = fs.readdirSync(path.dirname(manifestPath)).filter(name => name.startsWith('focused-real-'));
+console.log(JSON.stringify({error, oldBytesUnchanged: oldBytes.equals(fs.readFileSync(oldPath)),
+  oldPinsUnchanged: JSON.stringify(JSON.parse(oldBytes).source_pins) === JSON.stringify(original.source_pins),
+  selectedDriftRefused, reverseDriftRefused, count: names.length, modes: names.map(name => fs.statSync(path.join(path.dirname(manifestPath), name)).mode & 511),
+  records: records.map(record => ({case: record.case, id: record.case_uuid, status: record.status, original_ids: record.original_ids})),
+  originalRecords: originalRecords.map(record => ({case: record.case, id: record.case_uuid, status: record.status, original_ids: record.original_ids})),
+  ordered: records.every((record, index) => index === 0 || records[index - 1].sequence < record.sequence)}));
+""",
+        case=previous_case,
+        case_id="12345678-1234-4234-8234-123456789abc",
+    )
+    assert result["error"] is None
+    assert result["oldBytesUnchanged"] is True
+    assert result["oldPinsUnchanged"] is True
+    assert result["selectedDriftRefused"] is True
+    assert result["reverseDriftRefused"] is True
+    assert result["count"] == 3
+    assert result["modes"] == [384, 384, 384]
+    assert result["ordered"] is True
+    assert result["records"] == [
+        {"case": "input", "id": "22345678-1234-4234-8234-123456789abc", "status": status,
+         "original_ids": {"goal_command_id": "42345678-1234-4234-8234-123456789abc"}}
+        for status in ("pending", "incomplete")
+    ]
+    assert result["originalRecords"] == [{
+        "case": previous_case, "id": "12345678-1234-4234-8234-123456789abc", "status": "failed",
+        "original_ids": {"goal_command_id": "32345678-1234-4234-8234-123456789abc"},
+    }]
+
+
+@pytest.mark.parametrize("bad", ["workspace", "allocation", "secret", "private_mode"])
+def test_real_focused_records_validate_other_case_envelopes(real_web_entry, bad):
+    result = real_web_probe(
+        real_web_entry,
+        "const bad = " + json.dumps(bad) + """;
+const manifest = fixture.loadOwnedManifest(manifestPath), native = new fixture.NativeFixture({}, manifest);
+const ownPath = native.recordFocusedReal('pending', {intent: true}), ownBytes = fs.readFileSync(ownPath);
+const other = JSON.parse(ownBytes); other.case = 'handoff'; other.case_uuid = '22345678-1234-4234-8234-123456789abc';
+other.source_pins[Object.keys(other.source_pins)[0]].sha256 = 'f'.repeat(64);
+if (bad === 'workspace') other.workspace_id = '32345678-1234-4234-8234-123456789abc';
+if (bad === 'allocation') other.allocation_id = 'foreign-allocation';
+if (bad === 'secret') other.observed.provider_api_key = 'PRIVATE-SENTINEL';
+const otherPath = path.join(path.dirname(manifestPath), 'focused-real-controlled-invalid-other-case.json');
+fs.writeFileSync(otherPath, JSON.stringify(other), {flag: 'wx', mode: bad === 'private_mode' ? 420 : 384});
+if (bad === 'private_mode') {
+  fs.chmodSync(otherPath, 0o644);
+  actual.expect(fs.statSync(otherPath).mode & 0o777).toBe(0o644);
+}
+let refused = false;
+try {fixture.realFocusedRecords(manifest, 'input', process.env.SIDERA_NATIVE_REAL_CASE_ID);} catch {refused = true;}
+console.log(JSON.stringify({refused, ownUnchanged: ownBytes.equals(fs.readFileSync(ownPath))}));
+""",
+        case="input",
+        case_id="12345678-1234-4234-8234-123456789abc",
+    )
+    assert result == {"refused": True, "ownUnchanged": True}
+
+
 def test_focused_original_admission_is_queried_and_never_resent(real_web_entry):
     result = real_web_probe(
         real_web_entry,
@@ -2079,6 +2161,35 @@ console.log(JSON.stringify({queries}));
     }
 
 
+REAL_WEB_PROPOSAL = r"""
+function proposalFor(selected) {
+  const main = selected === 'main';
+  const keys = main ? ['contract', 'cli', 'tests', 'integration'] : [`${selected}-work`, `${selected}-integration`];
+  const consumers = main ? [['cli', ['contract']], ['tests', ['contract']], ['integration', ['cli', 'tests']]]
+    : [[`${selected}-integration`, [`${selected}-work`]]];
+  return {proposal_schema_version: 6, display: {
+    subtasks: [{key: 'original-subtask', title: 'Original substantive workload'}],
+    worker_items: keys.map(key => ({key, title: key + ' implementation', subtask_key: 'original-subtask'})),
+    worker_item_dependencies: (main
+      ? [['contract', 'cli'], ['contract', 'tests'], ['cli', 'integration'], ['tests', 'integration']]
+      : [[`${selected}-work`, `${selected}-integration`]]).map(
+        ([upstream_worker_item_key, downstream_worker_item_key]) => ({upstream_worker_item_key, downstream_worker_item_key, kind: 'hard'})),
+    integration_spec: {integration_worker_item_key: main ? 'integration' : `${selected}-integration`,
+      input_group_keys: [main ? 'integration-code' : `${selected}-integration-inputs`]},
+  }, collaboration: {
+    mode: 'enabled', provider: 'sidera-collaboration', default_strategy: 'all_required',
+    runtime_config_version: 1, runtime_interface: 'sidera.collaboration.v1', subtask_overrides: [],
+    input_groups: consumers.map(([consumer_worker_item_key, sources]) => ({
+      consumer_worker_item_key, group_key: main ? `${consumer_worker_item_key}-code` : `${selected}-integration-inputs`,
+      title: 'Required immutable code results', candidates: sources.map((worker_item_key, index) => ({worker_item_key, priority: index + 1})),
+      mode: 'all', minimum_count: null, selection_strategy: 'plan_order',
+      requirements: {execution_status: 'succeeded', evidence_status: 'candidate', required_artifact_refs: ['artifact_type:diff'], required_evidence_refs: []},
+    })),
+  }};
+}
+"""
+
+
 @pytest.mark.parametrize(
     "bad", [None, "schema", "worker_key", "dependency", "code_inputs"]
 )
@@ -2087,14 +2198,10 @@ def test_real_proposal_requires_actual_four_keys_and_selected_inputs(
 ):
     result = real_web_probe(
         real_web_entry,
-        """
+        REAL_WEB_PROPOSAL
+        + """
 const spec = load('tests/e2e/native-harness-real.spec.ts');
-const proposal = {proposal_schema_version: 6, display: {
- subtasks: [{key: 'actual-subtask', title: 'Actual subtask'}],
- worker_items: ['contract', 'cli', 'tests', 'integration'].map(key => ({key, title: key + ' actual', subtask_key: 'actual-subtask'})),
- worker_item_dependencies: [['contract', 'cli'], ['contract', 'tests'], ['cli', 'integration'], ['tests', 'integration']].map(([upstream_worker_item_key, downstream_worker_item_key]) => ({upstream_worker_item_key, downstream_worker_item_key, kind: 'hard'})),
- integration_spec: {integration_worker_item_key: 'integration'}},
- collaboration: {input_groups: [['cli', ['contract']], ['tests', ['contract']], ['integration', ['cli', 'tests']]].map(([consumer_worker_item_key, keys]) => ({consumer_worker_item_key, candidates: keys.map(worker_item_key => ({worker_item_key})), mode: 'all', requirements: {execution_status: 'succeeded'}}))}};
+const proposal = proposalFor('main');
 const bad = """
         + json.dumps(bad)
         + """;
@@ -2112,14 +2219,73 @@ console.log(JSON.stringify({refused, titles}));
         assert result == {
             "refused": False,
             "titles": [
-                "contract actual",
-                "cli actual",
-                "tests actual",
-                "integration actual",
+                "contract implementation",
+                "cli implementation",
+                "tests implementation",
+                "integration implementation",
             ],
         }
     else:
         assert result["refused"] is True
+
+
+@pytest.mark.parametrize("selected", ["input", "handoff"])
+@pytest.mark.parametrize(
+    "bad",
+    [None, "one_worker", "integration_key", "missing_dependency", "extra_dependency",
+     "soft_dependency", "empty_group", "self_input", "foreign_candidate",
+     "unrelated_worker", "extra_group", "disabled", "missing_diff", "group_binding"],
+)
+def test_real_focused_proposal_requires_exact_two_worker_graph(real_web_entry, selected, bad):
+    result = real_web_probe(
+        real_web_entry,
+        REAL_WEB_PROPOSAL
+        + "const [selected, bad] = "
+        + json.dumps([selected, bad])
+        + """;
+const spec = load('tests/e2e/native-harness-real.spec.ts'), proposal = proposalFor(selected);
+const group = proposal.collaboration.input_groups[0];
+if (bad === 'one_worker') {
+  proposal.display.worker_items.pop(); proposal.display.worker_item_dependencies = [];
+  proposal.display.integration_spec.integration_worker_item_key = `${selected}-work`;
+  proposal.collaboration.input_groups = [];
+}
+if (bad === 'integration_key') proposal.display.integration_spec.integration_worker_item_key = `${selected}-work`;
+if (bad === 'missing_dependency') proposal.display.worker_item_dependencies = [];
+if (bad === 'extra_dependency') proposal.display.worker_item_dependencies.push({...proposal.display.worker_item_dependencies[0]});
+if (bad === 'soft_dependency') proposal.display.worker_item_dependencies[0].kind = 'soft';
+if (bad === 'empty_group') group.candidates = [];
+if (bad === 'self_input') group.candidates[0].worker_item_key = `${selected}-integration`;
+if (bad === 'foreign_candidate') group.candidates[0].worker_item_key = 'foreign-work';
+if (bad === 'unrelated_worker') proposal.display.worker_items.push({key: 'unrelated', title: 'Unrelated', subtask_key: 'original-subtask'});
+if (bad === 'extra_group') proposal.collaboration.input_groups.push({...group, group_key: 'unrelated'});
+if (bad === 'disabled') proposal.collaboration.mode = 'disabled';
+if (bad === 'missing_diff') group.requirements.required_artifact_refs = [];
+if (bad === 'group_binding') proposal.display.integration_spec.input_group_keys = ['unrelated'];
+let error = null, workers = null;
+try { workers = spec.realProposalShape(proposal, selected).workers.map(worker => worker.key); }
+catch (caught) { error = caught.message; }
+const goal = spec.realFocusedGoal?.(selected) ?? null;
+console.log(JSON.stringify({error, workers, goal}));
+""",
+        explicit=False,
+    )
+    if bad is None:
+        assert result["error"] is None
+        assert result["workers"] == [f"{selected}-work", f"{selected}-integration"]
+        for clause in (
+            f"exactly two WorkerItem keys {selected}-work and {selected}-integration",
+            f"hard dependency {selected}-work -> {selected}-integration",
+            "mode enabled", "provider sidera-collaboration", "default_strategy all_required",
+            "runtime_interface sidera.collaboration.v1", "runtime_config_version 1",
+            f"group_key {selected}-integration-inputs", f"consumer {selected}-integration",
+            f"only candidate {selected}-work", "mode all", "execution_status succeeded",
+            "evidence_status candidate", "artifact_type:diff", "selection_strategy plan_order",
+            f'integration_worker_item_key {selected}-integration and input_group_keys ["{selected}-integration-inputs"]',
+        ):
+            assert clause in result["goal"]
+    else:
+        assert result["error"] is not None
 
 
 @pytest.mark.parametrize(
@@ -2149,7 +2315,8 @@ def test_real_proposal_ready_opens_feedback_and_preserves_original_identity(
     ]
     result = real_web_probe(
         real_web_entry,
-        "const [selected, invalidRevisions, originalIds, proposalIds] = "
+        REAL_WEB_PROPOSAL
+        + "const [selected, invalidRevisions, originalIds, proposalIds] = "
         + json.dumps([selected, invalid_revisions, original_ids, proposal_ids])
         + """;
 probeExpect = value => actual.expect(value);
@@ -2164,34 +2331,13 @@ const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const requestId = originalIds.planning_request_id, taskId = originalIds.root_task_id;
 const requestPath = `/api/v1/workspaces/${manifest.workspace_id}/planning-requests/${requestId}`;
 const pagePath = `/workspaces/${manifest.workspace_id}/planning/${requestId}`;
-const keys = selected === 'main' ? ['contract', 'cli', 'tests', 'integration'] : [`${selected}-work`];
 const proposals = proposalIds.slice(0, invalidRevisions === 3 ? 3 : invalidRevisions + 1).map((id, index) => {
   const proposal = {
+    ...proposalFor(selected),
     id, planning_request_id: requestId, planning_run_id: '72345678-1234-4234-8234-123456789abc',
     revision: index + 1, content_hash: String(index + 1).repeat(64), proposal_schema_version: 6,
     brief_revision: 1, profile_version: 1, kind: 'create', created_at: '2026-10-09T00:00:00Z',
-    derived_diff: {}, display: {
-      subtasks: [{key: 'original-subtask', title: 'Original substantive workload'}],
-      worker_items: keys.map(key => ({key, title: key + ' implementation', subtask_key: 'original-subtask'})),
-      worker_item_dependencies: selected === 'main'
-        ? [['contract', 'cli'], ['contract', 'tests'], ['cli', 'integration'], ['tests', 'integration']].map(
-          ([upstream_worker_item_key, downstream_worker_item_key]) => ({upstream_worker_item_key, downstream_worker_item_key, kind: 'hard'}))
-        : [],
-      integration_spec: {integration_worker_item_key: selected === 'main' ? 'integration' : keys[0]},
-    },
-    collaboration: {
-      mode: 'input_groups', provider: null, default_strategy: null,
-      runtime_config_version: null, runtime_interface: null, subtask_overrides: [],
-      input_groups: selected === 'main'
-        ? [['cli', ['contract']], ['tests', ['contract']], ['integration', ['cli', 'tests']]].map(
-          ([consumer_worker_item_key, sources]) => ({
-            consumer_worker_item_key, group_key: `${consumer_worker_item_key}-code`, title: 'Required immutable code results',
-            candidates: sources.map((worker_item_key, priority) => ({worker_item_key, priority})),
-            mode: 'all', minimum_count: null, selection_strategy: 'priority',
-            requirements: {execution_status: 'succeeded', evidence_status: 'not_required', required_artifact_refs: [], required_evidence_refs: []},
-          }))
-        : [],
-    },
+    derived_diff: {},
   };
   if (index < invalidRevisions) {
     if (selected === 'main') proposal.display.worker_item_dependencies.pop();
@@ -2307,10 +2453,17 @@ console.log(JSON.stringify({outcome, error, actions, feedbacks, records, queries
         "code-result input group for each consumer: cli=[contract], tests=[contract], "
         "integration=[cli,tests]. Keep explicit confirmation and configured owned-check."
         if selected == "main"
-        else "Keep this original Task and substantive workload. Repair schema 6 to "
-        f"exactly one WorkerItem key {selected}-work; keep explicit confirmation "
-        "and the existing repository contract."
+        else None
     )
+    if selected != "main":
+        assert len(result["feedbacks"]) == feedback_count
+        for item in result["feedbacks"]:
+            assert item["text"].startswith("Keep this original Task and substantive workload. ")
+            assert f"exactly two WorkerItem keys {selected}-work and {selected}-integration" in item["text"]
+            assert f"hard dependency {selected}-work -> {selected}-integration" in item["text"]
+            assert f"group_key {selected}-integration-inputs" in item["text"]
+            assert f'input_group_keys ["{selected}-integration-inputs"]' in item["text"]
+        feedback = result["feedbacks"][0]["text"] if feedback_count else None
     assert result["feedbacks"] == [
         {
             "text": feedback,
@@ -2342,6 +2495,421 @@ console.log(JSON.stringify({outcome, error, actions, feedbacks, records, queries
             "planning_request": 11 + accepted_revision,
             "untouched": 7,
         }
+
+
+@pytest.mark.parametrize(
+    ("selected", "bad"),
+    [("main", None), ("input", None), ("handoff", None)]
+    + [("input", bad) for bad in (
+        "materialized", "materialization_error", "materialization_transport", "execution", "execution_error",
+        "request_id", "root_task", "workspace", "status", "revision", "hash", "version",
+        "proposal_id", "proposal_hash", "proposal_request", "proposal_revision",
+    )],
+)
+def test_real_preconfirm_requires_current_proposal_and_no_materialization_or_execution(
+    real_web_entry, selected, bad
+):
+    result = real_web_probe(
+        real_web_entry,
+        REAL_WEB_PROPOSAL
+        + "const [selected, bad] = "
+        + json.dumps([selected, bad])
+        + """;
+probeExpect = value => actual.expect(value);
+probeExpect.poll = callback => ({toBe: async expected => actual.expect(await callback()).toBe(expected)});
+cache.delete(path.resolve(web, 'tests/e2e/native-harness-fixtures.ts'));
+const spec = load('tests/e2e/native-harness-real.spec.ts');
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+const requestId = '12345678-1234-4234-8234-123456789abc', root = '22345678-1234-4234-8234-123456789abc';
+const proposalId = '32345678-1234-4234-8234-123456789abc', commandId = '42345678-1234-4234-8234-123456789abc';
+const prefix = `/api/v1/workspaces/${manifest.workspace_id}/`, requestPath = `${prefix}planning-requests/${requestId}`;
+const primary = {workspace_id: manifest.workspace_id, profile_id: '52345678-1234-4234-8234-123456789abc', revision: 2};
+const target = {...primary, profile_id: '62345678-1234-4234-8234-123456789abc'};
+const proposal = {...proposalFor(selected), id: proposalId, revision: 1, content_hash: 'a'.repeat(64), planning_request_id: requestId};
+const before = {id: requestId, source_type: 'root_task', source_ref: root, workspace_id: manifest.workspace_id,
+  status: 'proposal_ready', version: 12, current_proposal_revision: 1, current_proposal_content_hash: proposal.content_hash};
+if (bad === 'request_id') before.id = 'foreign';
+if (bad === 'root_task') before.source_ref = 'foreign';
+if (bad === 'workspace') before.workspace_id = 'foreign';
+if (bad === 'status') before.status = 'planning';
+if (bad === 'revision') before.current_proposal_revision = 2;
+if (bad === 'hash') before.current_proposal_content_hash = 'b'.repeat(64);
+if (bad === 'version') before.version++;
+if (bad === 'proposal_id') proposal.id = 'foreign';
+if (bad === 'proposal_hash') proposal.content_hash = 'b'.repeat(64);
+if (bad === 'proposal_request') proposal.planning_request_id = 'foreign';
+if (bad === 'proposal_revision') proposal.revision = 2;
+const mapping = Object.fromEntries(proposal.display.worker_items.map((worker, index) => [worker.key, `worker-${index}`]));
+const materialization = {id: 'materialization', proposal_revision_id: proposalId, root_task_id: root,
+  plan_snapshot_id: 'snapshot', plan_generation: 1, worker_item_mapping: mapping, subtask_task_mapping: {'original-subtask': 'subtask'}};
+const queries = [], transport = [], actions = [], records = [];
+const native = {
+  manifest, ids: {planning_request_id: requestId, root_task_id: root, proposal_id: proposalId,
+    proposal_revision: 1, proposal_content_hash: 'a'.repeat(64), target_profile_ref: target}, versions: {planning_request: 12},
+  id: key => native.ids[key], prefix: () => prefix, path: suffix => `/workspaces/${manifest.workspace_id}/${suffix}`,
+  profile: () => primary, record: (status, observations) => records.push({status, observations}),
+  get: async url => {
+    queries.push(url);
+    if (url.includes('/overview?')) throw Error('409/no_current_plan');
+    if (url === `${requestPath}/proposals/1`) return proposal;
+    if (url === requestPath) return before;
+    if (url === `/api/v1/executions?workspace_id=${manifest.workspace_id}&task_id=${root}`) {
+      if (bad === 'execution_error') throw Error('503/executions_unavailable');
+      return bad === 'execution' ? [{id: 'already-executing'}] : [];
+    }
+    if (url === `${prefix}commands/${commandId}`) return {command_id: commandId, status: 'applied'};
+    if (url === `${requestPath}/materialization`) return materialization;
+    for (const worker of proposal.display.worker_items) if (url === `${prefix}assignments/worker_item/${mapping[worker.key]}`) {
+      const ref = selected === 'main' && worker.key === 'tests' ? target : primary;
+      return {profile_ref: ref, assignee: {kind: 'profile', id: ref.profile_id}};
+    }
+    if (url === `${prefix}assignments/subtask/subtask`) return {profile_ref: null, assignee: {kind: 'human', id: manifest.principal_id}};
+    throw Error('unexpected_preconfirm_query');
+  },
+  page: {
+    request: {get: async (url, options) => {
+      transport.push({url, options});
+      actual.expect(url).toBe(manifest.base_url + requestPath + '/materialization');
+      actual.expect(options).toEqual({headers: {Origin: manifest.base_url}, timeout: 10000});
+      if (bad === 'materialization_transport') throw Error('materialization_transport_failed');
+      return {status: () => bad === 'materialized' ? 200 : bad === 'materialization_error' ? 503 : 404};
+    }},
+    goto: async url => {actions.push({action: 'goto', url});},
+    getByRole: (role, options) => {
+      actual.expect(options.exact).toBe(true);
+      if (role === 'combobox') return {selectOption: async value => {actions.push({action: 'assign', name: options.name, value});}};
+      if (role === 'button' && options.name === '确认并创建任务') return {click: async () => {
+        actions.push({action: 'confirm'}); actual.expect(native.ids.confirmation_command_id).toBeUndefined();
+        native.ids.confirmation_command_id = commandId;
+      }};
+      throw Error('unexpected_preconfirm_control');
+    },
+  },
+};
+let outcome = null, error = null;
+try {outcome = await spec.confirmPlan(native, selected);} catch (caught) {error = caught.message;}
+console.log(JSON.stringify({outcome, error, actions, queries, transport, records, ids: native.ids}));
+""",
+        explicit=False,
+    )
+    assert not any("/overview?" in query for query in result["queries"])
+    if bad is not None:
+        assert result["error"] is not None
+        assert result["actions"] == []
+        assert "confirmation_command_id" not in result["ids"]
+        return
+    assert result["error"] is None
+    assert len(result["transport"]) == 1
+    assert result["actions"][0]["action"] == "goto"
+    assert result["actions"][-1] == {"action": "confirm"}
+    assert sum(action["action"] == "confirm" for action in result["actions"]) == 1
+    workspace = real_web_entry.manifest["workspace_id"]
+    primary = ["profile", "52345678-1234-4234-8234-123456789abc", workspace, 2]
+    target = ["profile", "62345678-1234-4234-8234-123456789abc", workspace, 2]
+    keys = ["contract", "cli", "tests", "integration"] if selected == "main" else [f"{selected}-work", f"{selected}-integration"]
+    assert result["actions"][1:-1] == [
+        {"action": "assign", "name": "Original substantive workload owner", "value": "human"},
+        *({"action": "assign", "name": key + " implementation owner",
+           "value": json.dumps(target if key == "tests" else primary, separators=(",", ":"))}
+          for key in keys),
+    ]
+    assert result["records"] == [{"status": "pending", "observations": {"canonical_workers_before_confirmation": 0}}]
+    assert result["ids"]["source_worker_key"] == ("cli" if selected == "main" else f"{selected}-work")
+    assert result["ids"]["confirmation_command_id"] == "42345678-1234-4234-8234-123456789abc"
+
+
+@pytest.mark.parametrize(
+    "mode", ["delivered", "closed", "foreign_run", "textbox_disabled", "send_disabled",
+             "review_failed", "click_unknown", "captured_reply_lost", "no_capture",
+             "rejected", "foreign_delivery", "foreign_after_run"],
+)
+def test_real_input_composer_uses_current_label_and_review_before_send(real_web_entry, mode):
+    result = real_web_probe(
+        real_web_entry,
+        "const mode = " + json.dumps(mode) + """;
+probeExpect = value => value?.waitEnabled ? {toBeEnabled: options => value.waitEnabled(options)}
+  : value?.visible ? {toBeVisible: async () => {value.visible();}} : actual.expect(value);
+probeExpect.poll = callback => ({toBe: async expected => actual.expect(await callback()).toBe(expected)});
+cache.delete(path.resolve(web, 'tests/e2e/native-harness-fixtures.ts'));
+const spec = load('tests/e2e/native-harness-real.spec.ts');
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+const worker = '12345678-1234-4234-8234-123456789abc', execution = '22345678-1234-4234-8234-123456789abc';
+const run = '32345678-1234-4234-8234-123456789abc', session = '42345678-1234-4234-8234-123456789abc';
+const command = '52345678-1234-4234-8234-123456789abc', input = '62345678-1234-4234-8234-123456789abc';
+const operation = '72345678-1234-4234-8234-123456789abc';
+const profile = {workspace_id: manifest.workspace_id, profile_id: '82345678-1234-4234-8234-123456789abc', revision: 2};
+const prefix = `/api/v1/workspaces/${manifest.workspace_id}/`, events = [], queries = [], labels = [];
+const context = {workspace_id: manifest.workspace_id, worker_item_id: worker, input_enabled: mode !== 'closed',
+  execution: {workspace_id: manifest.workspace_id, worker_item_id: worker, execution_id: execution, run_id: run, profile_ref: profile},
+  run: {profile_ref: profile}, context: {run_id: mode === 'foreign_run' ? 'foreign' : run, context_version: 1}};
+const trace = {workspace_id: manifest.workspace_id, worker_item_id: worker, execution_id: execution, run_id: run,
+  profile_ref: profile, next_sequence: 2, has_more: false, events: [
+    {kind: 'input.accepted', operation_id: operation, run_id: run, response_id: 'response', sequence: 1},
+    {kind: 'response.started', operation_id: operation, run_id: run, response_id: 'response', sequence: 2},
+  ]};
+let reviewed = false, ready = false, text = null, clicks = 0;
+const textbox = {
+  waitEnabled: async options => {actual.expect(options).toEqual({timeout: 10000}); events.push('textbox-ready'); if (mode === 'textbox_disabled') throw Error('textbox_disabled');},
+  fill: async value => {actual.expect(events).toContain('textbox-ready'); text = value; events.push('fill');},
+};
+const send = {
+  isEnabled: async () => ready,
+  waitEnabled: async options => {
+    actual.expect(options).toEqual({timeout: 10000}); actual.expect(reviewed).toBe(true);
+    events.push('await-send-ready'); await new Promise(resolve => setImmediate(resolve));
+    if (!ready) throw Error('send_disabled'); events.push('send-ready');
+  },
+  click: async () => {
+    clicks++; events.push('send'); actual.expect(ready).toBe(true);
+    if (mode === 'click_unknown') throw Error('click_transport_unknown');
+    if (mode !== 'no_capture') {native.ids.input_command_id = command; events.push('capture-original');}
+    if (mode === 'captured_reply_lost') throw Error('click_reply_lost_after_capture');
+  },
+};
+const native = {
+  manifest, realCase: 'input', ids: {source_worker_item_id: worker, source_execution_id: execution, source_run_id: run, source_session_id: session},
+  prefix: () => prefix, path: suffix => `/workspaces/${manifest.workspace_id}/${suffix}`, id: key => native.ids[key],
+  get: async url => {
+    queries.push(url);
+    if (url === `${prefix}worker-items/${worker}/native-context`) {
+      if (clicks && mode === 'foreign_after_run') return {...context, execution: {...context.execution, run_id: 'foreign'}};
+      return context;
+    }
+    if (url === `${prefix}commands/${command}`) {events.push('query-original'); return {command_id: command, status: mode === 'rejected' ? 'rejected' : 'applied', result: {aggregate_id: input}};}
+    if (url === `/api/v1/gateway/inputs?workspace_id=${manifest.workspace_id}&execution_id=${execution}&session_id=${session}`)
+      return {items: [{id: input, status: 'delivered', operation_id: operation, execution_id: mode === 'foreign_delivery' ? 'foreign' : execution, session_id: session}]};
+    if (url === `${prefix}worker-items/${worker}/executions/${execution}/native-trace?after_sequence=0&limit=100`) return trace;
+    if (url === `${prefix}worker-items/${worker}/activity?limit=100`) return {items: [{source_type: 'execution_input', source_id: input, delivery_status: 'delivered'}]};
+    throw Error('unexpected_input_composer_query');
+  },
+  page: {
+    goto: async () => {events.push('navigate');}, reload: async () => {events.push('reload');},
+    getByRole: (role, options) => {
+      labels.push({role, ...options});
+      if (role === 'textbox' && options.name === '介入这个 Worker') return textbox;
+      if (role === 'button' && options.name === '复核当前 context') return {click: async () => {
+        actual.expect(text).toContain('Unicode'); events.push('review'); reviewed = true;
+        if (mode === 'review_failed') throw Error('review_failed');
+        setImmediate(() => {ready = mode !== 'send_disabled';});
+      }};
+      if (role === 'button' && options.name === '发送到当前 Session') return send;
+      if (role === 'heading' && options.name === '工作记录') return {visible: () => {events.push('history-visible');}};
+      throw Error('unexpected_native_composer_label:' + options.name);
+    },
+    getByText: (value, options) => {
+      actual.expect(value).toBe(text); actual.expect(options.exact).toBe(true);
+      return {first: () => ({visible: () => {events.push('input-visible');}})};
+    },
+  },
+};
+let outcome = null, error = null;
+try {outcome = await spec.sendInput(native);} catch (caught) {error = caught.message;}
+console.log(JSON.stringify({outcome, error, events, queries, labels, clicks, ids: native.ids, text}));
+""",
+        explicit=False,
+    )
+    if mode in ("foreign_delivery", "foreign_after_run"):
+        assert result["error"] is not None
+        assert result["clicks"] == 1
+        return
+    assert result["error"] is None
+    if mode in ("closed", "foreign_run", "textbox_disabled", "send_disabled", "review_failed"):
+        assert result["clicks"] == 0
+        assert "input_command_id" not in result["ids"]
+        assert result["outcome"] == {
+            "status": "failed", "observed": {"admission": "NOT_ADMITTED",
+                "closed_rejection": "CURRENT_CONTEXT_CLOSED" if mode in ("closed", "foreign_run") else "WEB_SEND_DISABLED",
+                "same_run_delivery": False},
+        }
+        return
+    assert result["clicks"] == 1
+    assert result["events"][:7] == ["navigate", "textbox-ready", "fill", "review", "await-send-ready", "send-ready", "send"]
+    assert any(label == {"role": "textbox", "name": "介入这个 Worker", "exact": True} for label in result["labels"])
+    if mode in ("click_unknown", "no_capture"):
+        assert result["outcome"] == {"status": "incomplete", "observed": {"admission": "UNKNOWN", "same_run_delivery": False}}
+        assert "query-original" not in result["events"]
+        return
+    assert result["ids"]["input_command_id"] == "52345678-1234-4234-8234-123456789abc"
+    assert result["events"].index("capture-original") < result["events"].index("query-original")
+    if mode == "rejected":
+        assert result["outcome"]["status"] == "failed"
+        assert result["outcome"]["observed"]["original_command_status"] == "rejected"
+    else:
+        assert result["outcome"] == {"status": "passed", "observed": {
+            "actual_native_admission": True, "same_run_delivery": True, "input_trace_cursor": 2,
+            "visible_in_history": True, "token_interrupt": "NOT_CLAIMED"}}
+        assert result["events"][-3:] == ["reload", "history-visible", "input-visible"]
+
+
+@pytest.fixture
+def code_input_closure_case(real_web_entry):
+    from sidera_control_plane.domain.code_results import CodeInputManifestV1
+    from sidera_control_plane.domain.collaboration_runtime import canonical_json_bytes
+
+    identifier = lambda number: f"{number:08x}-0000-4000-8000-000000000000"
+    keys = ("contract", "cli", "tests", "integration")
+    workspace = real_web_entry.manifest["workspace_id"]
+    root, plan = identifier(1), identifier(2)
+    workers = {key: identifier(10 + index) for index, key in enumerate(keys)}
+    executions = {key: identifier(20 + index) for index, key in enumerate(keys)}
+    requests = {key: identifier(30 + index) for index, key in enumerate(keys)}
+    pins = [
+        {"result_id": identifier(50 + index), "result_hash": str(index + 1) * 64,
+         "input_commit": "a" * 40, "input_tree": "b" * 40,
+         "result_commit": str(index + 1) * 40, "result_tree": str(index + 4) * 40}
+        for index in range(4)
+    ]
+    records = []
+    for index, key in enumerate(("cli", "tests", "integration")):
+        direct = ("cli", "tests") if key == "integration" else ("contract",)
+        selection_id, package_id = identifier(40 + index), identifier(60 + index)
+        sources = [
+            {"worker_item_key": source, "worker_item_id": workers[source], "worker_item_title": source,
+             "subtask_key": "original-subtask", "subtask_path": ["original-subtask"],
+             "effective_request_id": requests[source], "effective_lineage_id": identifier(70 + keys.index(source)),
+             "effective_execution_id": executions[source], "attempt": 1, "priority": priority + 1,
+             "inheritance_refs": [], "source_basis_hash": "c" * 64,
+             "artifacts": [{"artifact_id": identifier(80 + keys.index(source)), "artifact_type": "diff",
+                            "content_hash": "d" * 64, "size_bytes": 1, "media_type": "text/plain"}], "evidence": []}
+            for priority, source in enumerate(direct)
+        ]
+        selection = {
+            "schema_version": 1, "selection_id": selection_id, "workspace_id": workspace, "root_task_id": root,
+            "run_id": identifier(3), "plan_snapshot_id": plan, "plan_generation": 1, "plan_content_hash": "e" * 64,
+            "target_worker_item_id": workers[key], "target_execution_request_id": requests[key], "target_request_version": 1,
+            "projection_snapshot_id": identifier(4), "projection_hash": "f" * 64, "decision_id": identifier(5), "intent_id": identifier(6),
+            "groups": [{"group_key": key + "-code", "rule_hash": "a" * 64, "sources": sources}],
+            "hard_inputs": [{"dependency_key": source["worker_item_key"] + "->" + key, "rule_hash": "a" * 64,
+                             "source": dict(source, priority=7)} for source in sources],
+            "selection_hash": str(index + 5) * 64, "created_at": "2026-10-09T00:00:00Z",
+            "consumers": [{"consumer_type": "worker", "consumer_id": executions[key], "execution_request_id": requests[key],
+                           "worker_item_id": workers[key], "package_id": package_id, "context_version": 1,
+                           "package_hash": "b" * 64, "package_status": "ready", "assembly_request_id": None,
+                           "assembly_status": None, "assembly_attempt": None, "assembly_version": None,
+                           "materialization_attempt": None, "materialization_outcome": None, "materialization_failure_code": None,
+                           "acknowledgement_status": "acknowledged", "acknowledged_at": "2026-10-09T00:00:01Z"}],
+            "consumers_truncated": False,
+        }
+        code = {"schema_version": 1, "workspace_id": workspace, "root_task_id": root, "request_id": requests[key],
+                "execution_id": executions[key], "selection_id": selection_id, "selection_hash": selection["selection_hash"],
+                "repository_ref": "repo://controlled-main", "base_commit": "a" * 40,
+                "sources": [dict(pin) for pin in (pins[:3] if key == "integration" else pins[:1])]}
+        code["input_hash"] = hashlib.sha256(canonical_json_bytes(code)).hexdigest()
+        CodeInputManifestV1.from_mapping(code)
+        records.append({"worker_key": key, "selection": selection, "context": {
+            "workspace_id": workspace, "worker_item_id": workers[key], "consumer_type": "worker", "consumer_id": executions[key],
+            "manifest_schema_version": 3, "purpose": "execution", "package_id": package_id, "code_input_manifest": code,
+        }})
+    detail = {"workspace_id": workspace, "root_task_id": root, "candidate": {
+        "candidate_id": identifier(7), "candidate_hash": "a" * 64, "plan_snapshot_id": plan, "plan_content_hash": "e" * 64,
+        "integration_execution_id": executions["integration"], "base_commit": "a" * 40, "result_commit": "7" * 40,
+        "result_tree": "8" * 40, "source_result_ids": [pins[1]["result_id"], pins[2]["result_id"]], "code_result_id": identifier(53),
+        "previous_candidate_id": None, "created_at": "2026-10-09T00:00:02Z", "is_current": True, "artifacts": [], "storage_status": "available"},
+        "source_results": [{"snapshot_id": pins[index]["result_id"], "worker_item_id": workers[key], "request_id": requests[key],
+                            "execution_id": executions[key], "result_commit": pins[index]["result_commit"], "result_tree": pins[index]["result_tree"],
+                            "content_hash": pins[index]["result_hash"], "artifact_ids": [identifier(80 + index)],
+                            "created_at": "2026-10-09T00:00:01Z", "storage_status": "available"}
+                           for index, key in ((1, "cli"), (2, "tests"))],
+        "verifications": [], "rework": [], "acceptance": None, "apply_operations": [], "artifacts": [],
+        "last_change_cursor": 1, "as_of": "2026-10-09T00:00:02Z"}
+    return {"workspace": workspace, "root": root, "plan": plan, "workers": workers, "executions": executions,
+            "records": records, "detail": detail, "unrelated": pins[3]}
+
+
+@pytest.mark.parametrize(
+    "bad", [None, "absent_ancestor", "duplicate_ancestor", "duplicate_branch", "workspace", "root",
+            "consumer", "selection_consumer", "request", "repository", "base", "unrelated",
+            "stale_execution", "stale_source_request", "foreign_worker", "direct_selection", "missing_direct",
+            "stale_result", "result_hash", "result_commit", "result_tree", "ancestor_mismatch", "branch_extra",
+            "order", "selection_id", "selection_hash", "context_workspace", "result_workspace",
+            "candidate_execution", "candidate_sources", "candidate_plan", "duplicate_result", "input_digest", "branch_digest"],
+)
+def test_real_code_input_closure_binds_direct_results_and_shared_ancestor(real_web_entry, code_input_closure_case, bad):
+    from sidera_control_plane.domain.collaboration_runtime import canonical_json_bytes
+
+    body = code_input_closure_case
+    cli, tests, integration = body["records"]
+    code = integration["context"]["code_input_manifest"]
+    sources, selection, detail = code["sources"], integration["selection"], body["detail"]
+    foreign = "f0000000-0000-4000-8000-000000000000"
+    if bad == "absent_ancestor": sources.pop(0)
+    if bad == "duplicate_ancestor": sources.insert(0, dict(sources[0]))
+    if bad == "duplicate_branch": sources.append(dict(sources[1]))
+    if bad == "workspace": code["workspace_id"] = foreign
+    if bad == "root": code["root_task_id"] = foreign
+    if bad == "consumer": integration["context"]["consumer_id"] = foreign
+    if bad == "selection_consumer": selection["target_worker_item_id"] = foreign
+    if bad == "request": code["request_id"] = foreign
+    if bad == "repository": code["repository_ref"] = "repo://unrelated"
+    if bad == "base": code["base_commit"] = "f" * 40
+    if bad == "unrelated": sources.append(dict(body["unrelated"]))
+    if bad in ("stale_execution", "stale_source_request", "foreign_worker"):
+        field = {"stale_execution": "effective_execution_id", "stale_source_request": "effective_request_id", "foreign_worker": "worker_item_id"}[bad]
+        selection["groups"][0]["sources"][0][field] = foreign
+        selection["hard_inputs"][0]["source"][field] = foreign
+    if bad == "direct_selection":
+        replacement = dict(cli["selection"]["groups"][0]["sources"][0])
+        selection["groups"][0]["sources"][1] = replacement
+        selection["hard_inputs"][1]["source"] = dict(replacement, priority=7)
+    if bad == "missing_direct": selection["groups"][0]["sources"].pop(); selection["hard_inputs"].pop()
+    if bad == "stale_result": sources[1]["result_id"] = foreign
+    if bad == "result_hash": sources[1]["result_hash"] = "f" * 64
+    if bad == "result_commit": sources[1]["result_commit"] = "f" * 40
+    if bad == "result_tree": sources[1]["result_tree"] = "f" * 40
+    if bad == "ancestor_mismatch": tests["context"]["code_input_manifest"]["sources"][0]["input_tree"] = "f" * 40
+    if bad == "branch_extra": cli["context"]["code_input_manifest"]["sources"].append(dict(body["unrelated"]))
+    if bad == "order": sources[0], sources[1] = sources[1], sources[0]
+    if bad == "selection_id": code["selection_id"] = foreign
+    if bad == "selection_hash": code["selection_hash"] = "f" * 64
+    if bad == "context_workspace": integration["context"]["workspace_id"] = foreign
+    if bad == "result_workspace": detail["workspace_id"] = foreign
+    if bad == "candidate_execution": detail["candidate"]["integration_execution_id"] = foreign
+    if bad == "candidate_sources": detail["candidate"]["source_result_ids"][0] = foreign
+    if bad == "candidate_plan": detail["candidate"]["plan_snapshot_id"] = foreign
+    if bad == "duplicate_result": detail["source_results"].append(dict(detail["source_results"][0]))
+    for record in body["records"]:
+        manifest = record["context"]["code_input_manifest"]
+        content = {key: value for key, value in manifest.items() if key != "input_hash"}
+        manifest["input_hash"] = hashlib.sha256(canonical_json_bytes(content)).hexdigest()
+    if bad == "input_digest": code["input_hash"] = "f" * 64
+    if bad == "branch_digest": cli["context"]["code_input_manifest"]["input_hash"] = "f" * 64
+    result = real_web_probe(
+        real_web_entry,
+        "const [body, testPython] = " + json.dumps([body, sys.executable]) + """;
+const spec = load('tests/e2e/native-harness-real.spec.ts');
+let parserCalls = 0, parserSucceeded = false;
+const native = {manifest: {workspace_id: body.workspace, repository_head: 'a'.repeat(40)},
+  ids: {worker_item_mapping: body.workers, root_task_id: body.root, plan_snapshot_id: body.plan, plan_generation: 1},
+  id: key => native.ids[key],
+  python: (code, input) => {
+    parserCalls++;
+    const reply = require('node:child_process').spawnSync(testPython, ['-B', '-c', code], {
+      cwd: path.resolve(web, '../server'), input: JSON.stringify(input), encoding: 'utf8', timeout: 10000,
+      env: {PATH: '/usr/bin:/bin', HOME: process.env.HOME, PYTHONDONTWRITEBYTECODE: '1'},
+    });
+    if (reply.status !== 0 || reply.error) throw Error(reply.stderr.trim() || 'actual_code_input_parser_failed');
+    parserSucceeded = true; return JSON.parse(reply.stdout);
+  },
+};
+let outcome = null, error = null;
+try {outcome = spec.realCodeInputClosure(native, body.executions, body.records, body.detail, 'repo://controlled-main');}
+catch (caught) {error = caught.message;}
+console.log(JSON.stringify({outcome, error, parserCalls, parserSucceeded}));
+""",
+        explicit=False,
+    )
+    if bad is None:
+        assert result["error"] is None
+        assert [len(item["sources"]) for item in result["outcome"]] == [1, 1, 3]
+        assert [source["result_id"] for source in result["outcome"][2]["sources"]] == [
+            "00000032-0000-4000-8000-000000000000", "00000033-0000-4000-8000-000000000000", "00000034-0000-4000-8000-000000000000"]
+    else:
+        assert result["error"] is not None
+    assert result["parserCalls"] == 1
+    parser_refused = bad in ("duplicate_ancestor", "duplicate_branch", "input_digest", "branch_digest")
+    assert result["parserSucceeded"] is not parser_refused
+    if parser_refused:
+        assert ("duplicates" if bad.startswith("duplicate") else "hash") in result["error"]
 
 
 @pytest.mark.parametrize("case", ["overlap", "sequential", "missing_run_events"])
