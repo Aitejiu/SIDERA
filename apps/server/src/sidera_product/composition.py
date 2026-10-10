@@ -535,7 +535,7 @@ class ProductRequestAuthorizer:
                     "CreateTaskInput",
                     "RetryTaskInput",
                     "CancelTaskInput",
-                    "RequestExecutionStop",
+                    "StopExecution",
                     "ReconcileWorkerTransition",
                     "RecoverWorkerTransition",
                     "SendExecutionInput",

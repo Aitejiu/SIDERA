@@ -555,3 +555,225 @@ def test_background_authorizer_never_admits_failed_planning_feedback(settings_va
             "control_plane.command:ReviseFailedPlanningRequest",
             target,
         )
+
+
+def _stop_request_target(settings):
+    target = _repair_request_target(settings)
+    return replace(
+        target,
+        command=replace(
+            target.command,
+            command_type="StopExecution",
+            target_type="execution",
+            payload={},
+        ),
+    )
+
+
+def test_human_authorizer_admits_exact_stop_execution_command(settings_values):
+    composition = product_module()
+    from sidera_control_plane.application.assignments import TrustedAssignmentIdentity
+
+    from sidera_product.config import ProductSettings
+
+    settings = ProductSettings.model_validate(settings_values)
+    identity = TrustedAssignmentIdentity(
+        settings.local_principal_id, uuid4(), actor_type="user"
+    )
+    host = composition.ProductRequestAuthorizer(settings)
+    host.local_sessions = SimpleNamespace(
+        identity_for_grant=lambda supplied: (
+            identity if supplied == identity.grant_id else None
+        )
+    )
+    host.require(
+        identity.grant_id,
+        "control_plane.command:StopExecution",
+        _stop_request_target(settings),
+    )
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "target_workspace",
+        "target_principal",
+        "command_workspace",
+        "command_principal",
+        "agent_actor",
+        "system_actor",
+        "action",
+        "agent_identity",
+        "system_identity",
+        "identity_principal",
+    ],
+)
+def test_human_authorizer_refuses_foreign_stop_scope(settings_values, damage):
+    composition = product_module()
+    from sidera_control_plane.application.assignments import TrustedAssignmentIdentity
+
+    from sidera_product.config import ProductSettings
+
+    settings = ProductSettings.model_validate(settings_values)
+    identity = TrustedAssignmentIdentity(
+        settings.local_principal_id, uuid4(), actor_type="user"
+    )
+    host = composition.ProductRequestAuthorizer(settings)
+    target = _stop_request_target(settings)
+    action = "control_plane.command:StopExecution"
+    if damage in {"target_workspace", "target_principal"}:
+        target = replace(
+            target,
+            **(
+                {"workspace_id": uuid4()}
+                if damage == "target_workspace"
+                else {"principal_id": "foreign"}
+            ),
+        )
+    elif damage in {
+        "command_workspace",
+        "command_principal",
+        "agent_actor",
+        "system_actor",
+    }:
+        target = replace(
+            target,
+            command=replace(
+                target.command,
+                **{
+                    "command_workspace": {"workspace_id": uuid4()},
+                    "command_principal": {"actor_id": "foreign"},
+                    "agent_actor": {"actor_type": "agent"},
+                    "system_actor": {"actor_type": "system"},
+                }[damage],
+            ),
+        )
+    elif damage == "action":
+        action = "control_plane.command:SendExecutionInput"
+    else:
+        identity = replace(
+            identity,
+            **{
+                "agent_identity": {"actor_type": "agent"},
+                "system_identity": {"actor_type": "system"},
+                "identity_principal": {"principal_id": "foreign"},
+            }[damage],
+        )
+    host.local_sessions = SimpleNamespace(
+        identity_for_grant=lambda supplied: (
+            identity if supplied == identity.grant_id else None
+        )
+    )
+    with pytest.raises(AgentError, match="permission_denied"):
+        host.require(identity.grant_id, action, target)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    ["missing", "expired", "revoked", "foreign_workspace", "foreign_principal"],
+)
+def test_human_authorizer_refuses_noncurrent_stop_grant(settings_values, damage):
+    from tests.unit.test_local_session import service
+
+    _, sessions, store, clock = service(settings_values)
+    issued = sessions.exchange(sessions.create_bootstrap().token)
+    host = product_module().ProductRequestAuthorizer(sessions.settings)
+    host.local_sessions = sessions
+    target = _stop_request_target(sessions.settings)
+    action = "control_plane.command:StopExecution"
+    host.require(issued.session_id, action, target)
+
+    grant_id = issued.session_id
+    row = store.sessions[issued.session_id]
+    if damage == "missing":
+        grant_id = uuid4()
+    elif damage == "expired":
+        clock[0] = issued.expires_at
+    elif damage == "revoked":
+        sessions.revoke(issued.session_id)
+    else:
+        store.sessions[issued.session_id] = replace(
+            row,
+            **(
+                {"workspace_id": uuid4()}
+                if damage == "foreign_workspace"
+                else {"principal_id": "foreign"}
+            ),
+        )
+    with pytest.raises(AgentError, match="permission_denied"):
+        host.require(grant_id, action, target)
+
+
+@pytest.mark.parametrize("role", ["main", "worker", "planner"])
+def test_task_tool_authorizer_never_admits_stop_execution(
+    settings_values, tmp_path, role
+):
+    from tests.unit.test_task_tools import host_tool_fixture
+
+    lab, _token, verified = host_tool_fixture(settings_values, tmp_path, role=role)
+    target = _stop_request_target(lab.sessions.settings)
+    target = replace(target, command=replace(target.command, actor_type="agent"))
+    with pytest.raises(AgentError, match="permission_denied"):
+        lab.host.require(
+            verified.record.grant_id, "control_plane.command:StopExecution", target
+        )
+
+
+def test_background_authorizer_never_admits_stop_execution(settings_values):
+    composition = product_module()
+    from sidera_product.config import ProductSettings
+
+    host = composition.ProductRequestAuthorizer(
+        ProductSettings.model_validate(settings_values)
+    )
+    target = _stop_request_target(host.settings)
+    target = replace(target, command=replace(target.command, actor_type="system"))
+    with pytest.raises(AgentError, match="permission_denied"):
+        host.require(
+            host.background_identity.grant_id,
+            "control_plane.command:StopExecution",
+            target,
+        )
+
+
+@pytest.mark.parametrize(
+    "command_type", ["ContinueExecutionSession", "RequestExecutionStop"]
+)
+def test_human_authorizer_keeps_other_execution_commands_denied(
+    settings_values, command_type
+):
+    composition = product_module()
+    from sidera_control_plane.application.assignments import TrustedAssignmentIdentity
+
+    from sidera_product.config import ProductSettings
+
+    settings = ProductSettings.model_validate(settings_values)
+    identity = TrustedAssignmentIdentity(
+        settings.local_principal_id, uuid4(), actor_type="user"
+    )
+    host = composition.ProductRequestAuthorizer(settings)
+    host.local_sessions = SimpleNamespace(
+        identity_for_grant=lambda supplied: (
+            identity if supplied == identity.grant_id else None
+        )
+    )
+    target = _stop_request_target(settings)
+    target = replace(
+        target,
+        command=replace(
+            target.command,
+            command_type=command_type,
+            target_type=(
+                "execution_session"
+                if command_type == "ContinueExecutionSession"
+                else "execution"
+            ),
+            payload=(
+                {"not_before": "2026-10-11T00:00:00Z"}
+                if command_type == "ContinueExecutionSession"
+                else {}
+            ),
+        ),
+    )
+    with pytest.raises(AgentError, match="permission_denied"):
+        host.require(identity.grant_id, "control_plane.command:" + command_type, target)

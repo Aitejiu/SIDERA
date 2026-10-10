@@ -545,6 +545,67 @@ describe("NativeWorkerComposer", () => {
     expect(screen.queryByText("Execution 已停止")).not.toBeInTheDocument();
   });
 
+  it("stops a reviewed UNKNOWN Run once and recovers only its original command", async () => {
+    const unknownContext: NativeWorkerContextView = {
+      ...nativeContext,
+      input_enabled: false,
+      read_only_reason: "native_run_unknown",
+      run: { ...nativeContext.run!, state: "unknown", input_open: false },
+    };
+    const { posted, commandGets } = installHandlers("delivered", {
+      getNativeContext: () => unknownContext,
+      commandResponse: unmappedCommandResponse,
+      commandStatus: appliedCommandWithoutResult,
+    });
+    document.cookie = "sidera_csrf=csrf-native; Path=/";
+    const user = userEvent.setup();
+    renderComposer([], { nativeContext: unknownContext });
+
+    const input = screen.getByRole("textbox", { name: "介入这个 Worker" });
+    const send = screen.getByRole("button", { name: "发送到当前 Session" });
+    const stop = screen.getByRole("button", { name: "停止 Execution" });
+    await waitFor(() => expect(input).toBeEnabled());
+    await user.type(input, "must remain unsent while the Run is UNKNOWN");
+    await user.click(screen.getByRole("button", { name: "复核当前 context" }));
+    await waitFor(() => expect(stop).toBeEnabled());
+    expect(send).toBeDisabled();
+    await user.click(send);
+    expect(posted).toHaveLength(0);
+    await user.click(stop);
+
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toEqual({
+      actor: { type: "user", id: PRINCIPAL_ID },
+      command_id: expect.any(String),
+      workspace_id: WORKSPACE_ID,
+      command_type: "StopExecution",
+      target_type: "execution",
+      target_id: EXECUTION_ID,
+      expected_version: 7,
+      idempotency_key: expect.any(String),
+      correlation_id: expect.any(String),
+      payload: {},
+    });
+    const commandId = posted[0]?.command_id;
+    expect(commandId).toBeDefined();
+    const status = screen.getByLabelText("原生操作状态");
+    await waitFor(() => expect(status).toHaveTextContent("停止请求已记录"));
+    expect(status).not.toHaveTextContent("Execution 已停止");
+    expect(send).toBeDisabled();
+    expect(stop).toBeDisabled();
+    await user.click(stop);
+
+    await user.click(screen.getByRole("button", { name: "查询原始 Stop 命令" }));
+    await waitFor(() => expect(commandGets).toEqual([commandId]));
+    await user.click(screen.getByRole("button", { name: "查询原始 Stop 命令" }));
+    await waitFor(() => expect(commandGets).toEqual([commandId, commandId]));
+    expect(posted).toHaveLength(1);
+    expect(status).toHaveTextContent("停止请求已记录");
+    expect(status).not.toHaveTextContent("Execution 已停止");
+    expect(send).toBeDisabled();
+    expect(stop).toBeDisabled();
+  });
+
   it("keeps applied-unmapped input recovery reachable without another POST", async () => {
     const { posted, commandGets } = installHandlers("delivered", {
       commandResponse: unmappedCommandResponse,

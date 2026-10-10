@@ -114,6 +114,13 @@ const nativeContext: NativeWorkerContextView = {
   as_of: "2026-10-07T00:00:00Z",
 };
 
+const unknownNativeContext: NativeWorkerContextView = {
+  ...nativeContext,
+  input_enabled: false,
+  read_only_reason: "native_run_unknown",
+  run: { ...nativeContext.run!, state: "unknown", input_open: false },
+};
+
 const workspace = {
   workspace_id: WORKSPACE_ID,
   worker_item: {
@@ -284,6 +291,175 @@ it("keeps Stop eligible when the input Run is explicitly unsupported", () => {
   }));
 
   expect(result).toMatchObject({ ok: true, canInput: false, canStop: true });
+});
+
+it("allows cleanup of a matched UNKNOWN Run while keeping input closed", () => {
+  const result = reviewNativeInterventionFacts(makeFacts({ nativeContext: unknownNativeContext }));
+
+  expect(result).toMatchObject({ ok: true, canInput: false, canStop: true, stopReason: null });
+});
+
+it("keeps UNKNOWN input ineligible even if the public input flags are open", () => {
+  const result = reviewNativeInterventionFacts(makeFacts({
+    nativeContext: { ...nativeContext, run: { ...nativeContext.run!, state: "unknown" } },
+  }));
+
+  expect(result).toMatchObject({ ok: true, canInput: false, inputReason: "run_not_active" });
+});
+
+it("allows UNKNOWN cleanup with a matched leased Execution", () => {
+  const result = reviewNativeInterventionFacts(makeFacts({
+    nativeContext: unknownNativeContext,
+    execution: { ...execution, status: "leased" },
+    workspace: {
+      ...workspace,
+      current_runtime: { ...workspace.current_runtime!, execution_status: "leased" },
+    },
+  }));
+
+  expect(result).toMatchObject({ ok: true, canInput: false, canStop: true, stopReason: null });
+});
+
+it.each([
+  {
+    label: "missing Execution lease",
+    overrides: { execution: { ...execution, active_lease_id: null } },
+    expected: { ok: true, canStop: false, stopReason: "lease_unavailable" },
+  },
+  {
+    label: "blank Execution lease",
+    overrides: { execution: { ...execution, active_lease_id: " " } },
+    expected: { ok: true, canStop: false, stopReason: "lease_unavailable" },
+  },
+  {
+    label: "missing runtime lease",
+    overrides: { workspace: { ...workspace, current_runtime: { ...workspace.current_runtime!, lease_id: null } } },
+    expected: { ok: true, canStop: false, stopReason: "lease_unavailable" },
+  },
+  {
+    label: "mismatched runtime lease",
+    overrides: { workspace: { ...workspace, current_runtime: { ...workspace.current_runtime!, lease_id: "a0000000-0000-0000-0000-000000000099" } } },
+    expected: { ok: true, canStop: false, stopReason: "lease_unavailable" },
+  },
+  {
+    label: "closed Session",
+    overrides: {
+      session: { ...session, status: "closed" },
+      workspace: { ...workspace, current_runtime: { ...workspace.current_runtime!, session_status: "closed" } },
+    },
+    expected: { ok: true, canStop: false, stopReason: "session_closed" },
+  },
+  {
+    label: "inactive WorkerItem",
+    overrides: { workspace: { ...workspace, worker_item: { ...workspace.worker_item, status: "blocked" } } },
+    expected: { ok: true, canStop: false, stopReason: "worker_item_unavailable" },
+  },
+  {
+    label: "unacknowledged context",
+    overrides: { workspace: { ...workspace, worker_item: { ...workspace.worker_item, acknowledged_context_version: 3 } } },
+    expected: { ok: false, reason: "native_source_mismatch" },
+  },
+  {
+    label: "stale context",
+    overrides: { nativeContext: { ...unknownNativeContext, context: { ...context, context_version: 3 } } },
+    expected: { ok: false, reason: "native_source_mismatch" },
+  },
+  {
+    label: "stale Execution version",
+    overrides: { execution: { ...execution, version: 8 } },
+    expected: { ok: false, reason: "native_source_mismatch" },
+  },
+  {
+    label: "stale WorkerItem version",
+    overrides: { nativeContext: { ...unknownNativeContext, worker_item_version: 6 } },
+    expected: { ok: false, reason: "native_source_mismatch" },
+  },
+  {
+    label: "foreign Run pin",
+    overrides: { nativeContext: { ...unknownNativeContext, context: { ...context, run_id: "80000000-0000-0000-0000-000000000099" } } },
+    expected: { ok: false, reason: "native_source_mismatch" },
+  },
+  {
+    label: "foreign Run Profile pin",
+    overrides: { nativeContext: { ...unknownNativeContext, run: { ...unknownNativeContext.run!, profile_ref: { ...PROFILE_REF, revision: 2 } } } },
+    expected: { ok: false, reason: "native_source_mismatch" },
+  },
+  {
+    label: "foreign binding Profile pin",
+    overrides: { nativeContext: { ...unknownNativeContext, binding: { ...binding, profile_ref: { ...PROFILE_REF, revision: 2 } } } },
+    expected: { ok: false, reason: "native_source_mismatch" },
+  },
+  {
+    label: "foreign worker pin",
+    overrides: { nativeContext: { ...unknownNativeContext, context: { ...context, worker_id: "90000000-0000-0000-0000-000000000099" } } },
+    expected: { ok: false, reason: "native_source_mismatch" },
+  },
+  {
+    label: "foreign Execution workspace",
+    overrides: { execution: { ...execution, workspace_id: "20000000-0000-0000-0000-000000000099" } },
+    expected: { ok: false, reason: "native_source_mismatch" },
+  },
+  {
+    label: "foreign Execution WorkerItem",
+    overrides: { execution: { ...execution, worker_item_id: "40000000-0000-0000-0000-000000000099" } },
+    expected: { ok: false, reason: "native_source_mismatch" },
+  },
+  {
+    label: "foreign Session",
+    overrides: { session: { ...session, id: "70000000-0000-0000-0000-000000000099" } },
+    expected: { ok: false, reason: "native_source_mismatch" },
+  },
+  {
+    label: "nonconverged handoff",
+    overrides: { workspace: { ...workspace, active_handoff: { status: "prepared" } } as WorkerWorkspace },
+    expected: { ok: true, canStop: false, stopReason: "handoff_in_progress" },
+  },
+  {
+    label: "already requested Stop",
+    overrides: { execution: { ...execution, stop_requested: true } },
+    expected: { ok: true, canStop: false, stopReason: "stop_already_requested" },
+  },
+] satisfies Array<{
+  label: string;
+  overrides: Parameters<typeof makeFacts>[0];
+  expected: Record<string, unknown>;
+}>)("keeps UNKNOWN cleanup fenced for $label", ({ overrides, expected }) => {
+  const result = reviewNativeInterventionFacts(makeFacts({ nativeContext: unknownNativeContext, ...overrides }));
+
+  expect(result).toMatchObject(expected);
+  if (result.ok) expect(result.canInput).toBe(false);
+});
+
+it.each(["queued", "idle", "stopped", "succeeded", "failed", "canceled", "lost"])(
+  "keeps UNKNOWN cleanup disabled for a %s Execution",
+  (status) => {
+    const result = reviewNativeInterventionFacts(makeFacts({
+      nativeContext: unknownNativeContext,
+      execution: { ...execution, status },
+      workspace: { ...workspace, current_runtime: { ...workspace.current_runtime!, execution_status: status } },
+    }));
+
+    expect(result).toMatchObject({ ok: true, canInput: false, canStop: false, stopReason: "execution_not_stoppable" });
+  },
+);
+
+it.each(["starting", "closing", "completed", "stopped", "failed"] as const)(
+  "keeps a %s Run ineligible for input and Stop",
+  (state) => {
+    const result = reviewNativeInterventionFacts(makeFacts({
+      nativeContext: { ...nativeContext, run: { ...nativeContext.run!, state } },
+    }));
+
+    expect(result).toMatchObject({ ok: true, canInput: false, canStop: false, stopReason: "run_not_active" });
+  },
+);
+
+it.each(["running", "idle"] as const)("preserves input and Stop eligibility for a %s Run", (state) => {
+  const result = reviewNativeInterventionFacts(makeFacts({
+    nativeContext: { ...nativeContext, run: { ...nativeContext.run!, state } },
+  }));
+
+  expect(result).toMatchObject({ ok: true, canInput: true, canStop: true, inputReason: null, stopReason: null });
 });
 
 it("requires the active lease on the exact original Execution for Stop", () => {

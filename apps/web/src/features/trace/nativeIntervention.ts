@@ -251,7 +251,7 @@ export function reviewNativeInterventionFacts(
   const canStop = runtimeActive
     && workerActive
     && !handoffActive
-    && (run.state === "running" || run.state === "idle")
+    && (run.state === "running" || run.state === "idle" || run.state === "unknown")
     && (execution.status === "leased" || execution.status === "running")
     && !execution.stop_requested
     && stopLeaseMatches;
@@ -455,7 +455,8 @@ function stopReason(input: {
   if (input.execution.status !== "leased" && input.execution.status !== "running") {
     return "execution_not_stoppable";
   }
-  if (input.run.state !== "running" && input.run.state !== "idle") return "run_not_active";
+  if (input.run.state !== "running" && input.run.state !== "idle"
+    && input.run.state !== "unknown") return "run_not_active";
   if (!input.stopLeaseMatches) return "lease_unavailable";
   return "stop_unavailable";
 }
