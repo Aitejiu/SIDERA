@@ -609,6 +609,7 @@ def _session(row: ExecutionSessionModel) -> SessionFact:
         version=row.version,
         created_at=_as_utc(row.created_at),
         last_activity_at=_as_utc(row.last_activity_at),
+        last_sequence=row.last_sequence,
     )
 
 

@@ -1,4 +1,6 @@
+import json
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
 from uuid import uuid4
@@ -7,12 +9,19 @@ import pytest
 from pydantic import ValidationError
 from sidera_agents.errors import AgentError
 
-from sidera_control_plane.api.schemas import CommandRequest, SendExecutionInputPayload
+from sidera_control_plane.api.schemas import (
+    CommandRequest,
+    NativeExecutionContextAddressPayload,
+    NativeHandoffContextAddressPayload,
+    SendExecutionInputPayload,
+)
 from sidera_control_plane.application.agent_sources import (
     TaskContextSourceReader,
     context_source_items,
 )
+from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.context_materialization import ContextMaterializer
+from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.context_packages import ContextSelectionReason
 from sidera_control_plane.domain.errors import ValidationError as DomainValidationError
 from sidera_control_plane.domain.gateway import NativeInputIdentity
@@ -171,6 +180,125 @@ def test_api_accepts_explicit_native_input_context_without_changing_legacy_shape
         SendExecutionInputPayload.model_validate(legacy).model_dump()["context"]
         == legacy["context"]
     )
+
+
+def _input_request(payload):
+    return {
+        "command_id": uuid4(),
+        "workspace_id": uuid4(),
+        "command_type": "SendExecutionInput",
+        "target_type": "execution_session",
+        "target_id": payload["context"]["session_id"],
+        "expected_version": payload["context"]["session_version"],
+        "actor": {"type": "user", "id": "local-user"},
+        "idempotency_key": "original-command",
+        "correlation_id": uuid4(),
+        "payload": payload,
+    }
+
+
+@pytest.mark.parametrize("kind", ["native", "legacy", "native_handoff"])
+def test_command_context_proof_omission_preserves_existing_payload_hash(kind):
+    payload = input_payload()
+    if kind == "legacy":
+        for key in ("execution_mode", "binding_version", "run_id"):
+            payload["context"].pop(key)
+    incoming = (
+        native_handoff_request()
+        if kind == "native_handoff"
+        else _input_request(payload)
+    )
+    original = deepcopy(incoming)
+    old_payload = json.loads(json.dumps(incoming["payload"], default=str))
+    parsed = CommandRequest.model_validate(incoming)
+    assert parsed.payload == old_payload
+    assert "session_last_sequence" not in parsed.payload["context"]
+    assert incoming == original
+    old_envelope = CommandEnvelope(
+        id=parsed.command_id,
+        workspace_id=parsed.workspace_id,
+        command_type=parsed.command_type,
+        target_type=parsed.target_type,
+        actor_type=parsed.actor.type,
+        actor_id=parsed.actor.id,
+        target_id=parsed.target_id,
+        expected_version=parsed.expected_version,
+        idempotency_key=parsed.idempotency_key,
+        correlation_id=parsed.correlation_id,
+        payload=old_payload,
+    )
+    assert hash_request(replace(old_envelope, payload=parsed.payload)) == hash_request(
+        old_envelope
+    )
+
+
+@pytest.mark.parametrize("proof", [None, 0, 3])
+def test_native_input_schema_preserves_explicit_nullable_proof(proof):
+    payload = input_payload()
+    payload["context"].update(session_version=5, session_last_sequence=proof)
+    parsed = CommandRequest.model_validate(_input_request(payload))
+    assert "session_last_sequence" in parsed.payload["context"]
+    assert parsed.payload["context"]["session_last_sequence"] == proof
+    assert parsed.payload["text"] == "  exact input  "
+
+
+@pytest.mark.parametrize(
+    "context_type",
+    [NativeExecutionContextAddressPayload, NativeHandoffContextAddressPayload],
+)
+def test_native_command_context_proof_schema_is_optional_without_default(context_type):
+    schema = context_type.model_json_schema()
+    proof_schema = schema["properties"]["session_last_sequence"]
+    assert "session_last_sequence" not in schema.get("required", [])
+    assert proof_schema["anyOf"] == [
+        {"minimum": 0, "type": "integer"},
+        {"type": "null"},
+    ]
+    context = input_payload()["context"]
+    context["session_version"] = 5
+    assert context_type.model_validate(context).session_last_sequence is None
+    for proof in (None, 0, 3):
+        assert (
+            context_type.model_validate(
+                {**context, "session_last_sequence": proof}
+            ).session_last_sequence
+            == proof
+        )
+    for proof in (True, -1, 5, 6, 3.0, "3"):
+        with pytest.raises(ValidationError):
+            context_type.model_validate({**context, "session_last_sequence": proof})
+    assert "default" not in proof_schema
+
+
+@pytest.mark.parametrize("proof", [True, -1, 5, 6, 3.0, "3", {}, []])
+def test_native_input_schema_rejects_invalid_observation_proof(proof):
+    payload = input_payload()
+    payload["context"].update(session_version=5, session_last_sequence=proof)
+    with pytest.raises(ValidationError):
+        CommandRequest.model_validate(_input_request(payload))
+
+
+@pytest.mark.parametrize(
+    "extra", ["session_last_sequence", "_native", "grant_id", "private_trace"]
+)
+def test_legacy_input_schema_keeps_forbidding_native_proof_and_private_keys(extra):
+    payload = input_payload()
+    for key in ("execution_mode", "binding_version", "run_id"):
+        payload["context"].pop(key)
+    payload["context"][extra] = 0
+    with pytest.raises(ValidationError):
+        CommandRequest.model_validate(_input_request(payload))
+
+
+@pytest.mark.parametrize(
+    "extra", ["_native", "grant_id", "private_trace", "run_id_extra"]
+)
+def test_native_input_proof_keeps_forbidding_private_and_extra_keys(extra):
+    payload = input_payload()
+    payload["context"].update(session_version=5, session_last_sequence=3)
+    payload["context"][extra] = "forbidden"
+    with pytest.raises(ValidationError):
+        CommandRequest.model_validate(_input_request(payload))
 
 
 @pytest.mark.parametrize("field", ["binding_version", "run_id", "execution_mode"])

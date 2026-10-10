@@ -92,6 +92,7 @@ class SessionFact:
     version: int
     created_at: datetime
     last_activity_at: datetime
+    last_sequence: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

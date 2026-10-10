@@ -61,6 +61,7 @@ from sidera_control_plane.domain.inputs import ExecutionInput
 from sidera_control_plane.domain.lease import AssignmentLease
 from sidera_control_plane.domain.plan_normalization import PlanNormalizer
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
+from sidera_control_plane.domain.session_observation import session_observation_matches
 from sidera_control_plane.domain.task import TaskStatus
 from sidera_control_plane.domain.worker_item import WorkerItem, WorkerItemStatus
 
@@ -1206,7 +1207,12 @@ class ExecutionInputCommandHandler:
                 raise ExecutionContextChanged(changed, current=current)
             if envelope.expected_version is None:
                 raise ValidationError("mutation commands require expected_version")
-            if envelope.expected_version != session.version:
+            if "session_last_sequence" in address:
+                if envelope.expected_version != address["session_version"]:
+                    raise VersionConflict(
+                        envelope.expected_version, cast(int, address["session_version"])
+                    )
+            elif envelope.expected_version != session.version:
                 raise VersionConflict(envelope.expected_version, session.version)
         reader = ExecutionAuthorityReader(
             lambda: nullcontext(uow),
@@ -1291,6 +1297,14 @@ class ExecutionInputCommandHandler:
         context_session_id = cast(UUID, context["session_id"])
         context_worker_item_id = cast(UUID, context["worker_item_id"])
         _validate_input_target(envelope, context_session_id)
+        if (
+            "session_last_sequence" in context
+            and envelope.expected_version != context["session_version"]
+        ):
+            raise VersionConflict(
+                cast(int, envelope.expected_version),
+                cast(int, context["session_version"]),
+            )
 
         # Discover the Session without a lock, then keep the execution/root-task
         # lock order aligned with plan publication before revalidating the Session.
@@ -1822,7 +1836,7 @@ def _required_context(payload: dict[str, Any]) -> dict[str, UUID | int]:
     if not isinstance(raw_context, Mapping):
         raise ValidationError("context is required for SendExecutionInput")
     context = cast(Mapping[str, Any], raw_context)
-    return {
+    address: dict[str, UUID | int] = {
         "worker_item_id": _required_uuid(context, "worker_item_id"),
         "plan_generation": _required_positive_int(context, "plan_generation"),
         "context_version": _required_positive_int(context, "context_version"),
@@ -1831,6 +1845,15 @@ def _required_context(payload: dict[str, Any]) -> dict[str, UUID | int]:
         "session_version": _required_positive_int(context, "session_version"),
         "worker_id": _required_uuid(context, "worker_id"),
     }
+    if (
+        context.get("execution_mode") == "native_profile"
+        and context.get("session_last_sequence") is not None
+    ):
+        sequence = _required_int(context, "session_last_sequence")
+        if sequence < 0 or sequence >= cast(int, address["session_version"]):
+            raise ValidationError("Session sequence must be less than its version")
+        address["session_last_sequence"] = sequence
+    return address
 
 
 def _context_payload(context: Mapping[str, UUID | int]) -> dict[str, str]:
@@ -1906,7 +1929,17 @@ def _execution_context_mismatches(
         changed.add("execution_id")
     if context["session_id"] != session.id:
         changed.add("session_id")
-    if context["session_version"] != session.version:
+    session_matches = (
+        session_observation_matches(
+            expected_version=cast(int, context["session_version"]),
+            expected_last_sequence=cast(int, context["session_last_sequence"]),
+            current_version=session.version,
+            current_last_sequence=session.last_sequence,
+        )
+        if "session_last_sequence" in context
+        else context["session_version"] == session.version
+    )
+    if not session_matches:
         changed.add("session_version")
     return tuple(field for field in _CONTEXT_FIELDS if field in changed), current
 

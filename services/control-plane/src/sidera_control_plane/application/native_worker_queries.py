@@ -32,6 +32,7 @@ from sidera_control_plane.domain.native_worker_views import (
     NativeWorkerContextView,
     NativeWorkerTraceView,
 )
+from sidera_control_plane.domain.session_observation import session_observation_matches
 from sidera_control_plane.domain.worker_item_projections import (
     BindingFact,
     ExecutionFact,
@@ -233,13 +234,39 @@ class NativeWorkerQueryService:
                 execution_view, evidence, current_execution, current_evidence
             )
             stale = stale or not self._same_workspace_pins(facts, latest)
-            latest_address, latest_mismatch = self._native_address(
-                latest, evidence, execution_view, worker_item_id
+            latest_address = None
+            latest_mismatch = True
+            if (
+                latest.execution is not None
+                and self._execution_matches_facts(
+                    current_execution, latest.execution, worker_item_id, workspace_id
+                )
+                and current_execution is not None
+                and current_evidence is not None
+            ):
+                latest_address, latest_mismatch = self._native_address(
+                    latest, current_evidence, current_execution, worker_item_id
+                )
+            comparable_address = (
+                latest_address.model_copy(
+                    update={
+                        "session_version": address.session_version,
+                        "session_last_sequence": address.session_last_sequence,
+                    }
+                )
+                if not stale and latest_address is not None
+                else latest_address
             )
-            stale = stale or latest_mismatch or latest_address != address
+            stale = stale or latest_mismatch or comparable_address != address
             stale = stale or not self._current_binding_matches(
                 current_binding, execution_view
             )
+            if not stale and not changed_link:
+                assert latest_address is not None
+                assert current_execution is not None
+                facts = latest
+                address = latest_address
+                execution_view = current_execution
         except AgentError as error:
             if error.code == "permission_denied":
                 raise
@@ -717,6 +744,7 @@ class NativeWorkerQueryService:
                 execution_id=context.execution_id,
                 session_id=context.session_id,
                 session_version=context.session_version,
+                session_last_sequence=session.last_sequence,
                 worker_id=context.worker_id,
                 execution_mode="native_profile",
                 binding_version=execution.binding_version,
@@ -876,7 +904,12 @@ class NativeWorkerQueryService:
             and new_session is not None
             and old_session.id == new_session.id
             and old_session.execution_id == new_session.execution_id
-            and old_session.version == new_session.version
+            and session_observation_matches(
+                expected_version=old_session.version,
+                expected_last_sequence=old_session.last_sequence,
+                current_version=new_session.version,
+                current_last_sequence=new_session.last_sequence,
+            )
             and old_session.worker_id == new_session.worker_id
             and old_session.adapter_session_id == new_session.adapter_session_id
             and old_session.status == new_session.status

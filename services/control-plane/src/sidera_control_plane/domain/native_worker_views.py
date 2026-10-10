@@ -23,6 +23,16 @@ class NativeWorkerContextAddress(ReadView):
     execution_mode: Literal["native_profile"]
     binding_version: int = Field(ge=1, strict=True)
     run_id: UUID
+    session_last_sequence: int | None = Field(default=None, ge=0, strict=True)
+
+    @model_validator(mode="after")
+    def _validate_session_observation(self) -> "NativeWorkerContextAddress":
+        if (
+            self.session_last_sequence is not None
+            and self.session_last_sequence >= self.session_version
+        ):
+            raise ValueError("Session sequence must be less than its version")
+        return self
 
 
 class NativeWorkerContextView(ReadView):

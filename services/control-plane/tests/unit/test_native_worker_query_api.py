@@ -141,6 +141,7 @@ def _context_view() -> NativeWorkerContextView:
             execution_id=EXECUTION_ID,
             session_id=SESSION_ID,
             session_version=5,
+            session_last_sequence=3,
             worker_id=WORKER_ID,
             execution_mode="native_profile",
             binding_version=2,
@@ -240,6 +241,8 @@ def test_context_route_serializes_only_the_native_context_view():
         "as_of",
     }
     assert set(payload["context"]) == set(NativeWorkerContextAddress.model_fields)
+    assert payload["context"]["session_version"] == 5
+    assert payload["context"]["session_last_sequence"] == 3
     assert "grant_id" not in response.text
     assert "native_handle" not in response.text
 

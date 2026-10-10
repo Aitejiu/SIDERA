@@ -2868,6 +2868,21 @@ class NativeExecutionContextAddressPayload(ExecutionContextAddressPayload):
     execution_mode: Literal["native_profile"]
     binding_version: int = Field(ge=1)
     run_id: UUID
+    session_last_sequence: int | None = Field(
+        default=None,
+        ge=0,
+        strict=True,
+        json_schema_extra=lambda schema: schema.pop("default", None),
+    )
+
+    @model_validator(mode="after")
+    def _validate_session_observation(self) -> "NativeExecutionContextAddressPayload":
+        if (
+            self.session_last_sequence is not None
+            and self.session_last_sequence >= self.session_version
+        ):
+            raise ValueError("Session sequence must be less than its version")
+        return self
 
 
 class SendExecutionInputPayload(BaseModel):
@@ -3421,6 +3436,11 @@ class CommandRequest(BaseModel):
             return self
         omitted_bindings = "assignee_bindings" not in self.payload
         omitted_context_refs = "context_refs" not in self.payload
+        incoming_context = self.payload.get("context")
+        omitted_session_sequence = (
+            isinstance(incoming_context, Mapping)
+            and "session_last_sequence" not in incoming_context
+        )
         self.payload = dict(
             parsed.model_dump(
                 mode="json",
@@ -3434,6 +3454,11 @@ class CommandRequest(BaseModel):
             self.payload.pop("assignee_bindings")
         if self.command_type == "SubmitPlanRevision" and omitted_context_refs:
             self.payload.pop("context_refs")
+        if (
+            self.command_type in {"SendExecutionInput", "PrepareProfileHandoff"}
+            and omitted_session_sequence
+        ):
+            self.payload["context"].pop("session_last_sequence", None)
         return self
 
     def _require_create(self, target_type: AggregateType) -> None:

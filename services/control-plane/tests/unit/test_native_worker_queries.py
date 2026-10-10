@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from importlib import import_module, util
 from types import SimpleNamespace
@@ -534,6 +534,7 @@ def test_context_is_built_from_canonical_facts_and_saved_original_pin(
         "execution_id": EXECUTION_ID,
         "session_id": SESSION_ID,
         "session_version": 5,
+        "session_last_sequence": None,
         "worker_id": WORKER_ID,
         "execution_mode": "native_profile",
         "binding_version": 2,
@@ -546,6 +547,7 @@ def test_context_is_built_from_canonical_facts_and_saved_original_pin(
         "execution_id",
         "session_id",
         "session_version",
+        "session_last_sequence",
         "worker_id",
         "execution_mode",
         "binding_version",
@@ -561,6 +563,212 @@ def test_context_is_built_from_canonical_facts_and_saved_original_pin(
     ]
     assert case.native_call_open_transactions == [0]
     assert case.start_calls == []
+
+
+@dataclass(frozen=True, slots=True)
+class _ObservedSessionFact(SessionFact):
+    last_sequence: int | None = None
+
+
+def test_context_trace_progress_returns_coherent_latest_facts(native_query_case):
+    case = native_query_case()
+    original = replace(
+        case.snapshot,
+        sessions=(
+            _ObservedSessionFact(
+                **{**asdict(case.snapshot.sessions[0]), "last_sequence": 3}
+            ),
+        ),
+    )
+    case.snapshot = original
+    latest_at = NOW + timedelta(seconds=4)
+
+    def advance_trace(current):
+        current.snapshot = replace(
+            original,
+            sessions=(
+                replace(
+                    original.sessions[0],
+                    version=9,
+                    last_sequence=7,
+                    last_activity_at=latest_at,
+                ),
+            ),
+            as_of=latest_at,
+        )
+        current.execution_rows[EXECUTION_ID] = current.execution_rows[
+            EXECUTION_ID
+        ].model_copy(update={"updated_at": latest_at, "event_cursor": 19})
+
+    case.on_get_run = advance_trace
+    view = case.service().read_context(WORKSPACE_ID, WORKER_ITEM_ID)
+
+    assert view.input_enabled is True, view.read_only_reason
+    assert view.read_only_reason is None
+    assert view.context.session_version == 9
+    assert view.context.session_last_sequence == 7
+    assert view.as_of == latest_at
+    assert view.execution == case.execution_rows[EXECUTION_ID]
+    assert original.sessions[0].version == 5
+    assert original.sessions[0].last_sequence == 3
+    assert case.start_calls == []
+
+
+def test_sql_session_mapper_preserves_observed_sequence():
+    from sidera_control_plane.persistence.models import ExecutionSessionModel
+    from sidera_control_plane.persistence.worker_workspace_query_store import _session
+
+    row = ExecutionSessionModel(
+        id=SESSION_ID,
+        workspace_id=WORKSPACE_ID,
+        execution_id=EXECUTION_ID,
+        worker_id=WORKER_ID,
+        adapter_session_id=f"agent-run:{RUN_ID}",
+        status="active",
+        input_mode="queued",
+        version=9,
+        last_sequence=7,
+        created_at=NOW,
+        last_activity_at=NOW,
+    )
+
+    fact = _session(row)
+
+    assert fact.version == 9
+    assert fact.last_sequence == 7
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "version_only",
+        "sequence_only",
+        "regression",
+        "missing_sequence",
+        "session",
+        "worker",
+        "binding_version",
+        "binding_lease",
+        "binding_fence",
+        "execution",
+        "execution_lease",
+        "placement",
+        "generation",
+        "context",
+        "latest_execution_scope",
+    ],
+)
+def test_context_trace_proof_does_not_hide_changed_pins(native_query_case, change):
+    case = native_query_case()
+    original = replace(
+        case.snapshot,
+        sessions=(
+            _ObservedSessionFact(
+                **{**asdict(case.snapshot.sessions[0]), "last_sequence": 3}
+            ),
+        ),
+    )
+    if change == "missing_sequence":
+        original = replace(
+            original, sessions=(replace(original.sessions[0], last_sequence=None),)
+        )
+    case.snapshot = original
+
+    def change_pins(current):
+        latest = replace(
+            original,
+            sessions=(replace(original.sessions[0], version=9, last_sequence=7),),
+        )
+        if change in {"version_only", "sequence_only", "regression"}:
+            version, sequence = {
+                "version_only": (6, 3),
+                "sequence_only": (5, 4),
+                "regression": (4, 2),
+            }[change]
+            latest = replace(
+                latest,
+                sessions=(
+                    replace(
+                        latest.sessions[0], version=version, last_sequence=sequence
+                    ),
+                ),
+            )
+        elif change in {"session", "worker"}:
+            field = "id" if change == "session" else "worker_id"
+            latest = replace(
+                latest,
+                sessions=(replace(latest.sessions[0], **{field: GRANT_ID}),),
+            )
+        elif change.startswith("binding_"):
+            field = {
+                "binding_version": "version",
+                "binding_lease": "lease_id",
+                "binding_fence": "fencing_token",
+            }[change]
+            latest = replace(
+                latest,
+                bindings=(
+                    replace(
+                        latest.bindings[0],
+                        **{field: 10 if field != "lease_id" else GRANT_ID},
+                    ),
+                ),
+            )
+        elif change in {"execution", "execution_lease"}:
+            field = "id" if change == "execution" else "active_lease_id"
+            latest = replace(
+                latest,
+                executions=(replace(latest.executions[0], **{field: GRANT_ID}),),
+            )
+        elif change in {"placement", "generation"}:
+            field = "plan_snapshot_id" if change == "placement" else "plan_generation"
+            latest = replace(
+                latest,
+                placements=(
+                    replace(
+                        latest.placements[0],
+                        **{field: GRANT_ID if change == "placement" else 7},
+                    ),
+                ),
+            )
+        elif change == "context":
+            latest = replace(
+                latest, worker_item=replace(latest.worker_item, context_version=5)
+            )
+        elif change == "latest_execution_scope":
+            current.execution_rows[EXECUTION_ID] = current.execution_rows[
+                EXECUTION_ID
+            ].model_copy(update={"subtask_id": GRANT_ID})
+        current.snapshot = latest
+
+    case.on_get_run = change_pins
+    view = case.service().read_context(WORKSPACE_ID, WORKER_ITEM_ID)
+
+    assert view.input_enabled is False
+    assert view.read_only_reason == {
+        "context": "context_not_acknowledged",
+        "execution": "no_active_session",
+    }.get(change, "stale_execution_binding")
+    assert view.context.session_version == 5
+    assert original.sessions[0].version == 5
+    assert case.start_calls == []
+
+
+def test_context_trace_progress_keeps_changed_original_link_classification(
+    native_query_case,
+):
+    case = native_query_case()
+
+    def change_original(current):
+        current.original_rows[EXECUTION_ID] = replace(
+            current.original_rows[EXECUTION_ID], run_id=GRANT_ID
+        )
+
+    case.on_get_run = change_original
+    view = case.service().read_context(WORKSPACE_ID, WORKER_ITEM_ID)
+    assert view.input_enabled is False
+    assert view.context is None
+    assert view.read_only_reason == "native_run_mismatch"
 
 
 @pytest.mark.parametrize(
@@ -1112,6 +1320,7 @@ def test_native_dtos_are_frozen_strict_and_forbid_extra_fields():
         "execution_id",
         "session_id",
         "session_version",
+        "session_last_sequence",
         "worker_id",
         "execution_mode",
         "binding_version",
@@ -1130,6 +1339,16 @@ def test_native_dtos_are_frozen_strict_and_forbid_extra_fields():
         "run_id": RUN_ID,
     }
     address = views.NativeWorkerContextAddress(**valid)
+    assert address.session_last_sequence is None
+    assert (
+        views.NativeWorkerContextAddress(
+            **valid, session_last_sequence=3
+        ).session_last_sequence
+        == 3
+    )
+    for proof in (True, -1, 5, 6, 3.0, "3"):
+        with pytest.raises(ValidationError):
+            views.NativeWorkerContextAddress(**valid, session_last_sequence=proof)
     with pytest.raises(ValidationError):
         address.plan_generation = 7
     with pytest.raises(ValidationError):

@@ -4506,6 +4506,8 @@ export interface components {
              * Format: uuid
              */
             session_id: string;
+            /** Session Last Sequence */
+            session_last_sequence?: number | null;
             /** Session Version */
             session_version: number;
             /**
@@ -4557,6 +4559,8 @@ export interface components {
              * Format: uuid
              */
             session_id: string;
+            /** Session Last Sequence */
+            session_last_sequence?: number | null;
             /** Session Version */
             session_version: number;
             /**
@@ -4815,6 +4819,8 @@ export interface components {
              * Format: uuid
              */
             session_id: string;
+            /** Session Last Sequence */
+            session_last_sequence?: number | null;
             /** Session Version */
             session_version: number;
             /**
