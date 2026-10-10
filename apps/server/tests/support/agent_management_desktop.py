@@ -932,6 +932,7 @@ def start_owned_backend(
         port=settings.port,
         workers=1,
         reload=False,
+        timeout_graceful_shutdown=settings.close_grace_seconds,
         lifespan="on",
         log_level="warning",
     )

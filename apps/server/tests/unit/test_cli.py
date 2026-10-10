@@ -31,8 +31,21 @@ def test_open_uses_selected_local_url_without_constructing_an_owner(
     assert opened == ["http://127.0.0.1:18080"]
 
 
+@pytest.mark.parametrize(
+    ("settings_override", "expected_grace"),
+    [
+        ({"close_grace_seconds": 0.25}, 0.25),
+        ({"close_grace_seconds": 0}, 0.0),
+        ({}, 30.0),
+    ],
+    ids=["finite-grace", "zero-grace", "default-grace"],
+)
 def test_serve_has_one_inert_owner_and_no_reload_or_implicit_migration(
-    settings_values, no_database_connections, monkeypatch
+    settings_values,
+    no_database_connections,
+    monkeypatch,
+    settings_override,
+    expected_grace,
 ):
     cli = cli_module()
     from sidera_agents import bootstrap
@@ -52,11 +65,22 @@ def test_serve_has_one_inert_owner_and_no_reload_or_implicit_migration(
         bootstrap.AgentService, "migrate", lambda *_: pytest.fail("serve migrated")
     )
     assert (
-        cli.main(["serve"], settings=ProductSettings.model_validate(settings_values))
+        cli.main(
+            ["serve"],
+            settings=ProductSettings.model_validate(
+                {**settings_values, **settings_override}
+            ),
+        )
         == 0
     )
     assert calls == [
-        {"host": "127.0.0.1", "port": 18080, "workers": 1, "reload": False}
+        {
+            "host": "127.0.0.1",
+            "port": 18080,
+            "workers": 1,
+            "reload": False,
+            "timeout_graceful_shutdown": expected_grace,
+        }
     ]
 
 

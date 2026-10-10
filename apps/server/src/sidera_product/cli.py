@@ -374,6 +374,7 @@ def main(
                 port=selected.port,
                 workers=1,
                 reload=False,
+                timeout_graceful_shutdown=selected.close_grace_seconds,
             )
             return 0
         owner = runtime or build_product_runtime(selected)

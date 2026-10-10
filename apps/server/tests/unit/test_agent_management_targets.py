@@ -1344,7 +1344,9 @@ def test_failed_backend_start_retains_original_owner_for_close_retry(
     with pytest.raises(ProductTargetError, match="fresh_backend_start_refused"):
         desktop_module.start_owned_backend(
             object(),
-            SimpleNamespace(bind_host="127.0.0.1", port=55439),
+            SimpleNamespace(
+                bind_host="127.0.0.1", port=55439, close_grace_seconds=0.25
+            ),
             listener=listener,
             resource_owner=lab,
         )
