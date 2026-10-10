@@ -237,6 +237,21 @@ function makeDraft(): NativeInterventionDraft {
   };
 }
 
+function makeObservationDraft(originalProof: number | undefined): NativeInterventionDraft {
+  const draft = makeDraft();
+  const originalContext = originalProof === undefined ? context : { ...context, session_last_sequence: originalProof };
+  const originalReview = { ...review, context: originalContext };
+  return {
+    ...draft,
+    review: { ...review, context: { ...context, session_version: 10, session_last_sequence: 8 } },
+    input: {
+      ...draft.input,
+      review: originalReview,
+      original: { ...inputCommand(), payload: { ...inputCommand().payload, context: originalContext } },
+    },
+  };
+}
+
 function makeFacts(overrides: {
   workspace?: WorkerWorkspace;
   nativeContext?: NativeWorkerContextView;
@@ -278,6 +293,109 @@ it("reviews a pinned R1 native source without substituting a later profile head"
     canInput: true,
     canStop: true,
   });
+});
+
+it("reviews streaming Session observations against canonical facts with an older runtime projection", () => {
+  const address = { ...context, session_last_sequence: 3 };
+  const result = reviewNativeInterventionFacts(makeFacts({
+    nativeContext: { ...nativeContext, context: address, execution: { ...savedExecution, event_cursor: 99 } },
+    workspace: { ...workspace, current_runtime: { ...workspace.current_runtime!, session_version: 4 } },
+    session: { ...session, version: 7, last_sequence: 5 },
+  }));
+
+  expect(result).toEqual({
+    ok: true,
+    review: {
+      context: { ...context, session_version: 7, session_last_sequence: 5 },
+      execution_version: 7,
+      profile_ref: PROFILE_REF,
+      binding_version: 2,
+    },
+    canInput: true,
+    canStop: true,
+    inputReason: null,
+    stopReason: null,
+  });
+  expect(address).toEqual({ ...context, session_last_sequence: 3 });
+});
+
+it.each([
+  { label: "version baseline change", addressVersion: 5, addressSequence: 3, version: 6, sequence: 3 },
+  { label: "sequence-only change", addressVersion: 5, addressSequence: 3, version: 5, sequence: 4 },
+  { label: "backward canonical observation", addressVersion: 5, addressSequence: 3, version: 4, sequence: 2 },
+  { label: "missing address proof", addressVersion: 5, addressSequence: undefined, version: 7, sequence: 5 },
+  { label: "null address proof", addressVersion: 5, addressSequence: null, version: 7, sequence: 5 },
+  { label: "missing canonical proof", addressVersion: 5, addressSequence: 3, version: 7, sequence: undefined },
+  { label: "null canonical proof", addressVersion: 5, addressSequence: 3, version: 7, sequence: null },
+  { label: "invalid address sequence", addressVersion: 5, addressSequence: 5, version: 7, sequence: 5 },
+  { label: "invalid canonical sequence", addressVersion: 5, addressSequence: 3, version: 7, sequence: 7 },
+])("rejects $label even with matching non-version pins", ({ addressVersion, addressSequence, version, sequence }) => {
+  const result = reviewNativeInterventionFacts(makeFacts({
+    nativeContext: {
+      ...nativeContext,
+      context: { ...context, session_version: addressVersion, ...(addressSequence === undefined ? {} : { session_last_sequence: addressSequence }) },
+    },
+    session: { ...session, version, last_sequence: sequence } as ExecutionSession,
+  }));
+
+  expect(result).toEqual({ ok: false, reason: "native_source_mismatch" });
+});
+
+it.each([true, false, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, "3"])(
+  "rejects malformed supplied read proof %s before exact-version fallback",
+  (sequence) => {
+    expect(reviewNativeInterventionFacts(makeFacts({
+      nativeContext: { ...nativeContext, context: { ...context, session_last_sequence: sequence } } as NativeWorkerContextView,
+      session: { ...session, last_sequence: 3 },
+    }))).toEqual({ ok: false, reason: "native_source_mismatch" });
+    expect(reviewNativeInterventionFacts(makeFacts({
+      session: { ...session, last_sequence: sequence } as ExecutionSession,
+    }))).toEqual({ ok: false, reason: "native_source_mismatch" });
+  },
+);
+
+it.each([null, 0, -1, 4.5, 8, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+  "rejects invalid or future cached runtime Session version %s during streaming",
+  (runtimeVersion) => {
+    const result = reviewNativeInterventionFacts(makeFacts({
+      nativeContext: { ...nativeContext, context: { ...context, session_last_sequence: 3 } },
+      session: { ...session, version: 7, last_sequence: 5 },
+      workspace: { ...workspace, current_runtime: { ...workspace.current_runtime!, session_version: runtimeVersion } },
+    }));
+
+    expect(result).toEqual({ ok: false, reason: "native_source_mismatch" });
+  },
+);
+
+it("keeps old read versions exact even when only the canonical Session supplies proof", () => {
+  expect(reviewNativeInterventionFacts(makeFacts({
+    session: { ...session, last_sequence: 3 },
+    workspace: { ...workspace, current_runtime: { ...workspace.current_runtime!, session_version: 4 } },
+  }))).toEqual({ ok: false, reason: "native_source_mismatch" });
+  const result = reviewNativeInterventionFacts(makeFacts({
+    session: { ...session, last_sequence: 3 },
+  }));
+  expect(result).toMatchObject({
+    ok: true,
+    review: { context },
+  });
+  if (!result.ok) throw new Error("exact old observations must remain reviewable");
+  expect(result.review.context).toEqual(context);
+  expect(result.review.context).not.toHaveProperty("session_last_sequence");
+});
+
+it.each([undefined, null])("omits absent canonical proof %s from a newly built exact review", (sequence) => {
+  const address = { ...context, session_last_sequence: null };
+  const result = reviewNativeInterventionFacts(makeFacts({
+    nativeContext: { ...nativeContext, context: address },
+    session: { ...session, last_sequence: sequence } as unknown as ExecutionSession,
+  }));
+
+  expect(result).toMatchObject({ ok: true });
+  if (!result.ok) throw new Error("exact old observations must remain reviewable");
+  expect(result.review.context).toEqual(context);
+  expect(result.review.context).not.toHaveProperty("session_last_sequence");
+  expect(address).toHaveProperty("session_last_sequence", null);
 });
 
 it("keeps Stop eligible when the input Run is explicitly unsupported", () => {
@@ -589,6 +707,93 @@ it("round trips independent original input and draft reviews", () => {
 
   expect(saveNativeInterventionDraft(SCOPE, next)).toEqual({ ok: true });
   expect(loadNativeInterventionDraft(SCOPE)).toEqual({ ok: true, draft: next });
+});
+
+it("includes supplied observation proof in exact original fingerprints", () => {
+  const withProof = { ...context, session_last_sequence: 3 };
+  expect(nativeContextFingerprint(withProof)).not.toBe(nativeContextFingerprint(context));
+  expect(nativeContextFingerprint(withProof)).not.toBe(
+    nativeContextFingerprint({ ...context, session_last_sequence: 2 }),
+  );
+});
+
+it.each([
+  { label: "old pending original, new review", proof: undefined, status: "pending", headProof: true },
+  { label: "old UNKNOWN original, new review", proof: undefined, status: "unknown", headProof: true },
+  { label: "new pending original, old review", proof: 3, status: "pending", headProof: false },
+  { label: "new UNKNOWN original, old review", proof: 3, status: "unknown", headProof: false },
+] as const)("round trips $label without retrofitting or changing original keys", ({ proof, status, headProof }) => {
+  const saved = makeObservationDraft(proof);
+  saved.input.status = status;
+  if (!headProof) saved.review = { ...review, context: { ...context, session_version: 10 } };
+  const originalJson = JSON.stringify(saved.input.original);
+  const originalKeys = Object.keys(saved.input.original!.payload.context as object).sort();
+
+  expect(saveNativeInterventionDraft(SCOPE, saved)).toEqual({ ok: true });
+  const loaded = loadNativeInterventionDraft(SCOPE);
+  expect(loaded).toEqual({ ok: true, draft: saved });
+  expect(localStorage.getItem(nativeInterventionDraftKey(SCOPE))).toBe(JSON.stringify(saved));
+  if (!loaded.ok || loaded.draft === null) throw new Error("valid mixed draft must round trip");
+  expect(JSON.stringify(loaded.draft.input.original)).toBe(originalJson);
+  expect(Object.keys(loaded.draft.input.original!.payload.context as object).sort()).toEqual(originalKeys);
+  expect(originalKeys).toHaveLength(proof === undefined ? 10 : 11);
+});
+
+it.each([null, true, false, -1, 2.5, 5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, "3"])(
+  "rejects invalid stored proof %s on save and hydration",
+  (sequence) => {
+    const draft = makeObservationDraft(3);
+    draft.review = { ...review, context: { ...context, session_last_sequence: sequence } } as NativeInterventionReview;
+
+    expect(saveNativeInterventionDraft(SCOPE, draft)).toMatchObject({ ok: false });
+    expect(localStorage.getItem(nativeInterventionDraftKey(SCOPE))).toBeNull();
+    localStorage.setItem(nativeInterventionDraftKey(SCOPE), JSON.stringify(draft));
+    expect(loadNativeInterventionDraft(SCOPE)).toMatchObject({ ok: false });
+  },
+);
+
+it.each(["private_handle", "__proto__", "prototype", "constructor"])(
+  "rejects extra stored context key %s including prototype keys",
+  (key) => {
+    const draft = makeObservationDraft(3);
+    draft.review = {
+      ...review,
+      context: Object.fromEntries([...Object.entries(context), ["session_last_sequence", 3], [key, "unsafe"]]),
+    } as NativeInterventionReview;
+
+    expect(saveNativeInterventionDraft(SCOPE, draft)).toMatchObject({ ok: false });
+    localStorage.setItem(nativeInterventionDraftKey(SCOPE), JSON.stringify(draft));
+    expect(loadNativeInterventionDraft(SCOPE)).toMatchObject({ ok: false });
+  },
+);
+
+it.each([
+  { label: "added proof", originalContext: context, reviewContext: { ...context, session_last_sequence: 3 } },
+  { label: "removed proof", originalContext: { ...context, session_last_sequence: 3 }, reviewContext: context },
+  { label: "changed proof", originalContext: { ...context, session_last_sequence: 3 }, reviewContext: { ...context, session_last_sequence: 2 } },
+  { label: "forward observation", originalContext: { ...context, session_last_sequence: 3 }, reviewContext: { ...context, session_version: 7, session_last_sequence: 5 } },
+])("rejects $label in original mapping even when approval freshness could allow it", ({ originalContext, reviewContext }) => {
+  const draft = makeDraft();
+  draft.input.review = { ...review, context: reviewContext };
+  draft.input.original = {
+    ...inputCommand(),
+    expected_version: reviewContext.session_version,
+    payload: { ...inputCommand().payload, context: originalContext },
+  };
+
+  expect(saveNativeInterventionDraft(SCOPE, draft)).toMatchObject({ ok: false });
+  localStorage.setItem(nativeInterventionDraftKey(SCOPE), JSON.stringify(draft));
+  expect(loadNativeInterventionDraft(SCOPE)).toMatchObject({ ok: false });
+});
+
+it.each(["workspace_id", "worker_item_id"] as const)("rejects cross-scope stored reviews for %s", (key) => {
+  const draft = makeObservationDraft(3);
+  if (key === "workspace_id") draft.review = { ...review, profile_ref: { ...PROFILE_REF, workspace_id: WORKER_ITEM_ID } };
+  else draft.review = { ...review, context: { ...context, worker_item_id: WORKSPACE_ID } };
+
+  expect(saveNativeInterventionDraft(SCOPE, draft)).toMatchObject({ ok: false });
+  localStorage.setItem(nativeInterventionDraftKey(SCOPE), JSON.stringify(draft));
+  expect(loadNativeInterventionDraft(SCOPE)).toMatchObject({ ok: false });
 });
 
 it("rejects a private nested original payload before persisting it", () => {

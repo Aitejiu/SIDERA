@@ -13,6 +13,7 @@ import {
   type NativeWorkerContextView,
 } from "@/features/assignments/types";
 import { readLocalSession, type LocalSession } from "@/features/local-session/api";
+import { sessionObservationMatches } from "@/shared/sessionObservation";
 import {
   executionQueryKey,
   executionSessionQueryKey,
@@ -21,7 +22,6 @@ import {
 } from "./api";
 import {
   loadNativeInterventionDraft,
-  nativeContextFingerprint,
   nativeInterventionDraftKey,
   nativeOriginalStatusMatches,
   reviewNativeInputResult,
@@ -404,7 +404,7 @@ export function useNativeIntervention({
       if (!isCurrentScope(capturedKey)) return;
       const latest = currentDraft(capturedKey);
       if (fresh === null || !fresh.review.ok || latest === null
-        || !sameReview(latest.review, fresh.review.review) || !fresh.review.canInput
+        || !reviewStillCurrent(latest.review, fresh.review.review) || !fresh.review.canInput
         || !canStartInput(latest, inputObservationStatus(inputObservationsRef.current[capturedKey]), fresh.review)) {
         setError(capturedKey, REVIEW_MESSAGE);
         return;
@@ -468,7 +468,7 @@ export function useNativeIntervention({
       if (!isCurrentScope(capturedKey)) return;
       const latest = currentDraft(capturedKey);
       if (fresh === null || !fresh.review.ok || latest === null
-        || !sameReview(clickedReview, fresh.review.review) || !fresh.review.canStop
+        || !reviewStillCurrent(clickedReview, fresh.review.review) || !fresh.review.canStop
         || !canStartStop(latest.stop, fresh.review)) {
         setError(capturedKey, REVIEW_MESSAGE);
         return;
@@ -789,7 +789,7 @@ export function useNativeIntervention({
     && canSelectHistoricalInput(draft.input, inputObservations[scopeKey] ?? null)
     && !stopBlocksCurrentExecution(draft.stop, factsReview);
   const canSend = scope !== null && scopeKey !== null && draft !== null && factsReview?.ok === true
-    && sessionAuthorized && sameReview(currentDraftReview, factsReview.review)
+    && sessionAuthorized && reviewStillCurrent(currentDraftReview, factsReview.review)
     && factsReview.canInput && canStartInput(draft, inputObservationStatus(inputObservations[scopeKey]), factsReview)
     && !busyKeys[`${scopeKey}:input`];
   const canStop = scope !== null && scopeKey !== null && draft !== null && factsReview?.ok === true
@@ -869,17 +869,31 @@ function replaceAction(
   return kind === "input" ? { ...draft, input: action } : { ...draft, stop: action };
 }
 
-function sameReview(
-  left: NativeInterventionReview | null | undefined,
-  right: NativeInterventionReview | null | undefined,
+function reviewStillCurrent(
+  approved: NativeInterventionReview | null | undefined,
+  current: NativeInterventionReview | null | undefined,
 ): boolean {
-  return left !== null && left !== undefined && right !== null && right !== undefined
-    && nativeContextFingerprint(left.context) === nativeContextFingerprint(right.context)
-    && left.execution_version === right.execution_version
-    && left.binding_version === right.binding_version
-    && left.profile_ref.workspace_id === right.profile_ref.workspace_id
-    && left.profile_ref.profile_id === right.profile_ref.profile_id
-    && left.profile_ref.revision === right.profile_ref.revision;
+  return approved != null && current != null
+    && sessionObservationMatches(
+      approved.context.session_version,
+      approved.context.session_last_sequence,
+      current.context.session_version,
+      current.context.session_last_sequence,
+    )
+    && approved.context.worker_item_id === current.context.worker_item_id
+    && approved.context.plan_generation === current.context.plan_generation
+    && approved.context.context_version === current.context.context_version
+    && approved.context.execution_id === current.context.execution_id
+    && approved.context.session_id === current.context.session_id
+    && approved.context.worker_id === current.context.worker_id
+    && approved.context.execution_mode === current.context.execution_mode
+    && approved.context.binding_version === current.context.binding_version
+    && approved.context.run_id === current.context.run_id
+    && approved.execution_version === current.execution_version
+    && approved.binding_version === current.binding_version
+    && approved.profile_ref.workspace_id === current.profile_ref.workspace_id
+    && approved.profile_ref.profile_id === current.profile_ref.profile_id
+    && approved.profile_ref.revision === current.profile_ref.revision;
 }
 
 function canStartInput(

@@ -17,6 +17,7 @@ import type {
   NativeWorkerContextView,
 } from "@/features/assignments/types";
 import type { WorkerWorkspace } from "@/features/worker-items/types";
+import { workerWorkspaceQueryKey } from "@/features/worker-items/api";
 import type { Execution, ExecutionInput, ExecutionSession } from "./types";
 import {
   loadNativeInterventionDraft,
@@ -162,6 +163,114 @@ const session = {
   version: 5,
   status: "active",
 } as unknown as ExecutionSession;
+
+const streamingNativeContext: NativeWorkerContextView = {
+  ...nativeContext,
+  context: { ...context, session_last_sequence: 3 },
+  execution: { ...executionPin, event_cursor: 99 },
+};
+const streamingWorkspace: WorkerWorkspace = {
+  ...workspace,
+  current_runtime: { ...workspace.current_runtime!, session_version: 4 },
+};
+const streamingSession: ExecutionSession = { ...session, version: 7, last_sequence: 5 };
+
+function streamingFacts(version = 10, sequence = 8) {
+  return {
+    localSession: { ...localSession },
+    nativeContext: {
+      ...streamingNativeContext,
+      context: { ...context, session_version: version, session_last_sequence: sequence },
+      binding: { ...binding },
+      execution: { ...executionPin },
+      run: { ...nativeContext.run! },
+    },
+    session: { ...session, version, last_sequence: sequence },
+    execution: { ...execution },
+    workspace: {
+      ...streamingWorkspace,
+      worker_item: { ...workspace.worker_item },
+      current_placement: { ...workspace.current_placement },
+      current_runtime: { ...streamingWorkspace.current_runtime! },
+    },
+  };
+}
+
+const staleStreamingCases: Array<{ label: string; change: (facts: ReturnType<typeof streamingFacts>) => void }> = [
+  { label: "changed version baseline", change: (facts) => {
+    facts.session.last_sequence = 7;
+    facts.nativeContext.context.session_last_sequence = 7;
+  } },
+  { label: "regressed observation", change: (facts) => {
+    facts.session.version = 6;
+    facts.session.last_sequence = 4;
+    facts.nativeContext.context.session_version = 6;
+    facts.nativeContext.context.session_last_sequence = 4;
+  } },
+  { label: "changed Profile revision", change: (facts) => {
+    const profile = { ...PROFILE_REF, revision: 2 };
+    facts.nativeContext.execution.profile_ref = profile;
+    facts.nativeContext.run.profile_ref = profile;
+    facts.nativeContext.binding.profile_ref = profile;
+  } },
+  { label: "changed binding", change: (facts) => {
+    facts.nativeContext.context.binding_version = 3;
+    facts.nativeContext.execution.binding_version = 3;
+    facts.nativeContext.binding.version = 3;
+  } },
+  { label: "changed Run", change: (facts) => {
+    facts.nativeContext.context.run_id = REPLACEMENT_RUN_ID;
+    facts.nativeContext.execution.run_id = REPLACEMENT_RUN_ID;
+  } },
+  { label: "changed Session", change: (facts) => {
+    facts.nativeContext.context.session_id = REPLACEMENT_SESSION_ID;
+    facts.session.id = REPLACEMENT_SESSION_ID;
+    facts.workspace.current_runtime.session_id = REPLACEMENT_SESSION_ID;
+  } },
+  { label: "changed Worker", change: (facts) => {
+    facts.nativeContext.context.worker_id = REPLACEMENT_WORKER_ID;
+    facts.session.worker_id = REPLACEMENT_WORKER_ID;
+    facts.workspace.current_runtime.worker_id = REPLACEMENT_WORKER_ID;
+  } },
+  { label: "changed Execution", change: (facts) => {
+    facts.nativeContext.context.execution_id = REPLACEMENT_EXECUTION_ID;
+    facts.nativeContext.execution.execution_id = REPLACEMENT_EXECUTION_ID;
+    facts.session.execution_id = REPLACEMENT_EXECUTION_ID;
+    facts.execution.id = REPLACEMENT_EXECUTION_ID;
+    facts.workspace.current_runtime.execution_id = REPLACEMENT_EXECUTION_ID;
+  } },
+  { label: "changed GEN", change: (facts) => {
+    facts.nativeContext.context.plan_generation = 3;
+    facts.workspace.current_placement.plan_generation = 3;
+  } },
+  { label: "changed context", change: (facts) => {
+    facts.nativeContext.context.context_version = 5;
+    facts.workspace.worker_item.context_version = 5;
+    facts.workspace.worker_item.acknowledged_context_version = 5;
+  } },
+  { label: "changed Execution version", change: (facts) => {
+    facts.nativeContext.execution_version = 8;
+    facts.execution.version = 8;
+  } },
+  { label: "terminal Execution", change: (facts) => {
+    facts.execution.status = "succeeded";
+    facts.workspace.current_runtime.execution_status = "succeeded";
+  } },
+  { label: "terminal Run", change: (facts) => {
+    facts.nativeContext.run.state = "completed";
+    facts.nativeContext.run.input_open = false;
+  } },
+  { label: "closed Session", change: (facts) => {
+    facts.session.status = "closed";
+    facts.workspace.current_runtime.session_status = "closed";
+  } },
+  { label: "inactive WorkerItem", change: (facts) => { facts.workspace.worker_item.status = "blocked"; } },
+  { label: "unacknowledged context", change: (facts) => { facts.workspace.worker_item.acknowledged_context_version = 3; } },
+  { label: "active handoff", change: (facts) => { facts.workspace.active_handoff = { status: "prepared" } as NonNullable<WorkerWorkspace["active_handoff"]>; } },
+  { label: "requested Stop", change: (facts) => { facts.execution.stop_requested = true; } },
+  { label: "changed principal", change: (facts) => { facts.localSession.principal_id = REPLACEMENT_WORKER_ID; } },
+  { label: "expired authority", change: (facts) => { facts.localSession.expires_at = "2000-01-01T00:00:00Z"; } },
+];
 
 const replacementContext: NonNullable<NativeWorkerContextView["context"]> = {
   ...context,
@@ -378,6 +487,451 @@ afterEach(() => {
 });
 
 describe("useNativeIntervention", () => {
+  it("persists canonical review during streaming despite an older cached runtime", async () => {
+    const observations = installSendAndStopHandlers({
+      getNativeContext: () => streamingNativeContext,
+      getSession: () => streamingSession,
+    });
+    const { result } = renderHook(() => useNativeIntervention({
+      ...hookOptions(),
+      workspace: streamingWorkspace,
+      nativeContext: streamingNativeContext,
+    }), { wrapper: queryProvider() });
+
+    await waitFor(() => expect(result.current.sessionAuthorized).toBe(true));
+    act(() => result.current.onTextChange("review the streaming Session"));
+    await act(async () => { await result.current.reviewCurrentContext(); });
+
+    expect(result.current.error).toBeNull();
+    expect(result.current.storageError).toBeNull();
+    expect(result.current.nativeFactsAvailable).toBe(true);
+    expect(result.current.canSend).toBe(true);
+    expect(loadNativeInterventionDraft({
+      workspace_id: WORKSPACE_ID,
+      principal_id: PRINCIPAL_ID,
+      worker_item_id: WORKER_ITEM_ID,
+    })).toMatchObject({
+      ok: true,
+      draft: { review: { context: { ...context, session_version: 7, session_last_sequence: 5 } } },
+    });
+    expect(observations.posted).toHaveLength(0);
+    expect(streamingNativeContext.context).toEqual({ ...context, session_last_sequence: 3 });
+  });
+
+  it("sends once after approved observation progress and persists the exact fresh original before POST", async () => {
+    let currentNativeContext = streamingNativeContext;
+    let currentSession = streamingSession;
+    const observations = installSendAndStopHandlers({
+      getNativeContext: () => currentNativeContext,
+      getSession: () => currentSession,
+    });
+    document.cookie = "sidera_csrf=csrf-native; Path=/";
+    const { result } = renderHook(() => useNativeIntervention({
+      ...hookOptions(),
+      workspace: streamingWorkspace,
+      nativeContext: streamingNativeContext,
+    }), { wrapper: queryProvider() });
+
+    await waitFor(() => expect(result.current.sessionAuthorized).toBe(true));
+    act(() => result.current.onTextChange("  keep  streaming text\n"));
+    await act(async () => { await result.current.reviewCurrentContext(); });
+    const approved = loadNativeInterventionDraft({
+      workspace_id: WORKSPACE_ID,
+      principal_id: PRINCIPAL_ID,
+      worker_item_id: WORKER_ITEM_ID,
+    });
+    expect(approved).toMatchObject({
+      ok: true,
+      draft: { review: { context: { session_version: 7, session_last_sequence: 5 } } },
+    });
+
+    currentNativeContext = {
+      ...streamingNativeContext,
+      context: { ...context, session_version: 10, session_last_sequence: 8 },
+    };
+    currentSession = { ...session, version: 10, last_sequence: 8 };
+    vi.spyOn(crypto, "randomUUID").mockReturnValueOnce("f0000000-0000-0000-0000-000000000010");
+    await act(async () => { await Promise.all([result.current.send(), result.current.send()]); });
+
+    expect(result.current.error).toBeNull();
+    expect(observations.posted).toHaveLength(1);
+    const original = observations.posted[0];
+    expect(original).toEqual({
+      command_id: expect.any(String),
+      workspace_id: WORKSPACE_ID,
+      command_type: "SendExecutionInput",
+      actor: { type: "user", id: PRINCIPAL_ID },
+      target_type: "execution_session",
+      target_id: SESSION_ID,
+      expected_version: 10,
+      idempotency_key: expect.any(String),
+      correlation_id: expect.any(String),
+      payload: {
+        context: { ...context, session_version: 10, session_last_sequence: 8 },
+        client_idempotency_key: "f0000000-0000-0000-0000-000000000010",
+        text: "keep  streaming text",
+        attachment_refs: [],
+      },
+    });
+    expect(observations.draftsAtPost).toHaveLength(1);
+    expect(observations.draftsAtPost[0]).toMatchObject({
+      review: { context: { session_version: 7, session_last_sequence: 5 } },
+      text: "  keep  streaming text\n",
+      client_idempotency_key: "f0000000-0000-0000-0000-000000000010",
+      input: {
+        status: "pending",
+        original,
+        review: { context: { ...context, session_version: 10, session_last_sequence: 8 } },
+      },
+    });
+    expect(result.current.inputAction).toMatchObject({ status: "applied", original });
+    expect(Object.isFrozen(result.current.inputAction?.original)).toBe(true);
+    expect(Object.isFrozen(result.current.inputAction?.original?.payload.context)).toBe(true);
+    expect(observations.csrfHeaders).toEqual(["csrf-native"]);
+  });
+
+  it("keeps Stop on Execution expected_version while Session observations advance", async () => {
+    let currentNativeContext = streamingNativeContext;
+    let currentSession = streamingSession;
+    const observations = installSendAndStopHandlers({
+      getNativeContext: () => currentNativeContext,
+      getSession: () => currentSession,
+    });
+    document.cookie = "sidera_csrf=csrf-native; Path=/";
+    const { result } = renderHook(() => useNativeIntervention({
+      ...hookOptions(),
+      workspace: streamingWorkspace,
+      nativeContext: streamingNativeContext,
+    }), { wrapper: queryProvider() });
+
+    await waitFor(() => expect(result.current.sessionAuthorized).toBe(true));
+    await act(async () => { await result.current.reviewCurrentContext(); });
+    currentNativeContext = {
+      ...streamingNativeContext,
+      context: { ...context, session_version: 10, session_last_sequence: 8 },
+    };
+    currentSession = { ...session, version: 10, last_sequence: 8 };
+    await act(async () => { await result.current.requestStop(); });
+
+    expect(result.current.error).toBeNull();
+    expect(observations.posted).toHaveLength(1);
+    expect(observations.posted[0]).toMatchObject({
+      command_type: "StopExecution",
+      target_type: "execution",
+      target_id: EXECUTION_ID,
+      expected_version: 7,
+      payload: {},
+    });
+    expect(observations.draftsAtPost[0]).toMatchObject({
+      stop: {
+        status: "pending",
+        original: observations.posted[0],
+        review: { context: { session_version: 10, session_last_sequence: 8 }, execution_version: 7 },
+      },
+    });
+  });
+
+  it.each(staleStreamingCases)("rejects Send and Stop on $label despite forward proof", async ({ change }) => {
+    const initial = streamingFacts(7, 5);
+    let current = initial;
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    const observations = installSendAndStopHandlers({
+      getLocalSession: () => current.localSession,
+      getNativeContext: () => current.nativeContext,
+      getExecution: () => current.execution,
+      getSession: () => current.session,
+    });
+    document.cookie = "sidera_csrf=csrf-native; Path=/";
+    const { result } = renderHook(() => useNativeIntervention({
+      ...hookOptions(async () => { client.setQueryData(workerWorkspaceQueryKey(WORKSPACE_ID, WORKER_ITEM_ID), current.workspace); }),
+      workspace: initial.workspace,
+      nativeContext: initial.nativeContext,
+    }), { wrapper: queryProvider(client) });
+
+    await waitFor(() => expect(result.current.sessionAuthorized).toBe(true));
+    act(() => result.current.onTextChange("retain approved draft"));
+    await act(async () => { await result.current.reviewCurrentContext(); });
+    expect(result.current.canSend).toBe(true);
+    expect(result.current.canStop).toBe(true);
+    const scope = { workspace_id: WORKSPACE_ID, principal_id: PRINCIPAL_ID, worker_item_id: WORKER_ITEM_ID };
+    const saved = loadNativeInterventionDraft(scope);
+    const uuidSpy = vi.spyOn(crypto, "randomUUID");
+    current = streamingFacts();
+    change(current);
+
+    await act(async () => { await result.current.send(); });
+    await act(async () => { await result.current.requestStop(); });
+
+    expect(observations.posted).toHaveLength(0);
+    expect(uuidSpy).not.toHaveBeenCalled();
+    expect(result.current.error).not.toBeNull();
+    expect(loadNativeInterventionDraft(scope)).toEqual(saved);
+    expect(result.current.inputAction).toMatchObject({ status: "idle", original: null });
+    expect(result.current.stopAction).toMatchObject({ status: "idle", original: null });
+  });
+
+  it.each(["missing Execution lease", "mismatched runtime lease", "missing runtime lease"])(
+    "keeps Stop fenced for %s after observation progress",
+    async (label) => {
+      const initial = streamingFacts(7, 5);
+      let current = initial;
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+      const observations = installSendAndStopHandlers({
+        getNativeContext: () => current.nativeContext,
+        getExecution: () => current.execution,
+        getSession: () => current.session,
+      });
+      document.cookie = "sidera_csrf=csrf-native; Path=/";
+      const { result } = renderHook(() => useNativeIntervention({
+        ...hookOptions(async () => { client.setQueryData(workerWorkspaceQueryKey(WORKSPACE_ID, WORKER_ITEM_ID), current.workspace); }),
+        workspace: initial.workspace,
+        nativeContext: initial.nativeContext,
+      }), { wrapper: queryProvider(client) });
+      await waitFor(() => expect(result.current.canStop).toBe(true));
+      current = streamingFacts();
+      if (label === "missing Execution lease") current.execution.active_lease_id = null;
+      else current.workspace.current_runtime.lease_id = label === "missing runtime lease" ? null : REPLACEMENT_LEASE_ID;
+
+      await act(async () => { await result.current.requestStop(); });
+
+      expect(observations.posted).toHaveLength(0);
+      expect(result.current.stopAction).toMatchObject({ status: "idle", original: null });
+    },
+  );
+
+  it.each(["Send", "Stop"] as const)("does not %s with revoked authority during streaming", async (intent) => {
+    const current = streamingFacts(7, 5);
+    const observations = installSendAndStopHandlers({
+      getNativeContext: () => current.nativeContext,
+      getSession: () => current.session,
+    });
+    document.cookie = "sidera_csrf=csrf-native; Path=/";
+    const { result } = renderHook(() => useNativeIntervention({
+      ...hookOptions(),
+      workspace: current.workspace,
+      nativeContext: current.nativeContext,
+    }), { wrapper: queryProvider() });
+    await waitFor(() => expect(result.current.sessionAuthorized).toBe(true));
+    act(() => result.current.onTextChange("must remain local after revocation"));
+    await act(async () => { await result.current.reviewCurrentContext(); });
+    server.use(http.get("/product/v1/session", () => new HttpResponse(null, { status: 401 })));
+    const uuidSpy = vi.spyOn(crypto, "randomUUID");
+
+    await act(async () => { await (intent === "Send" ? result.current.send() : result.current.requestStop()); });
+
+    expect(observations.posted).toHaveLength(0);
+    expect(uuidSpy).not.toHaveBeenCalled();
+    expect(result.current.inputAction?.original).toBeNull();
+    expect(result.current.stopAction?.original).toBeNull();
+  });
+
+  it.each([undefined, null])("does not promote native read proof %s from canonical last_sequence", async (proof) => {
+    const oldContext: NativeWorkerContextView = {
+      ...nativeContext,
+      context: { ...context, session_version: 7, ...(proof === undefined ? {} : { session_last_sequence: proof }) },
+    };
+    let currentNativeContext = oldContext;
+    let currentSession = streamingSession;
+    const observations = installSendAndStopHandlers({
+      getNativeContext: () => currentNativeContext,
+      getSession: () => currentSession,
+    });
+    document.cookie = "sidera_csrf=csrf-native; Path=/";
+    const { result } = renderHook(() => useNativeIntervention({
+      ...hookOptions(),
+      nativeContext: oldContext,
+      workspace: { ...workspace, current_runtime: { ...workspace.current_runtime!, session_version: 7 } },
+    }), { wrapper: queryProvider() });
+    await waitFor(() => expect(result.current.sessionAuthorized).toBe(true));
+    act(() => result.current.onTextChange("keep proof-less review exact"));
+    await act(async () => { await result.current.reviewCurrentContext(); });
+    expect(result.current.canSend).toBe(true);
+    const scope = { workspace_id: WORKSPACE_ID, principal_id: PRINCIPAL_ID, worker_item_id: WORKER_ITEM_ID };
+    const saved = loadNativeInterventionDraft(scope);
+    if (!saved.ok || saved.draft === null) throw new Error("old exact read must produce a valid review");
+    expect(saved.draft.review?.context).toEqual({ ...context, session_version: 7 });
+    expect(saved.draft.review?.context).not.toHaveProperty("session_last_sequence");
+    currentNativeContext = {
+      ...streamingNativeContext,
+      context: { ...context, session_version: 10, session_last_sequence: 8 },
+    };
+    currentSession = { ...session, version: 10, last_sequence: 8 };
+    const uuidSpy = vi.spyOn(crypto, "randomUUID");
+
+    await act(async () => { await result.current.send(); });
+
+    expect(observations.posted).toHaveLength(0);
+    expect(uuidSpy).not.toHaveBeenCalled();
+    expect(loadNativeInterventionDraft(scope)).toEqual(saved);
+    expect(result.current.canSend).toBe(false);
+  });
+
+  it.each(["input disabled", "Run input closed"])("keeps Send gated for %s during observation progress", async (gate) => {
+    let current = streamingFacts(7, 5);
+    const initial = current;
+    const observations = installSendAndStopHandlers({
+      getNativeContext: () => current.nativeContext,
+      getSession: () => current.session,
+    });
+    document.cookie = "sidera_csrf=csrf-native; Path=/";
+    const { result } = renderHook(() => useNativeIntervention({
+      ...hookOptions(),
+      workspace: initial.workspace,
+      nativeContext: initial.nativeContext,
+    }), { wrapper: queryProvider() });
+    await waitFor(() => expect(result.current.sessionAuthorized).toBe(true));
+    act(() => result.current.onTextChange("respect native input gates"));
+    await act(async () => { await result.current.reviewCurrentContext(); });
+    expect(result.current.canSend).toBe(true);
+    current = streamingFacts();
+    if (gate === "input disabled") current.nativeContext.input_enabled = false;
+    else current.nativeContext.run.input_open = false;
+    const uuidSpy = vi.spyOn(crypto, "randomUUID");
+
+    await act(async () => { await result.current.send(); });
+
+    expect(observations.posted).toHaveLength(0);
+    expect(uuidSpy).not.toHaveBeenCalled();
+    expect(result.current.inputAction).toMatchObject({ status: "idle", original: null });
+  });
+
+  it.each([
+    { label: "old approval, proved current at equal version", approvalProof: undefined, currentProof: 5, version: 7, allowed: true },
+    { label: "proved approval, old current at equal version", approvalProof: 5, currentProof: undefined, version: 7, allowed: true },
+    { label: "old approval cannot advance", approvalProof: undefined, currentProof: 8, version: 10, allowed: false },
+    { label: "old current cannot advance", approvalProof: 5, currentProof: undefined, version: 10, allowed: false },
+  ])("uses exact-version fallback for $label", async ({ approvalProof, currentProof, version, allowed }) => {
+    const draft = appliedStopDraft();
+    draft.stop = draft.input;
+    draft.text = "old and new proof boundaries";
+    draft.review = {
+      ...originalStopReviewA,
+      context: { ...context, session_version: 7, ...(approvalProof === undefined ? {} : { session_last_sequence: approvalProof }) },
+    };
+    expect(saveNativeInterventionDraft(draft.scope, draft)).toEqual({ ok: true });
+    const currentContext: NativeWorkerContextView = {
+      ...nativeContext,
+      context: { ...context, session_version: version, ...(currentProof === undefined ? {} : { session_last_sequence: currentProof }) },
+    };
+    const observations = installSendAndStopHandlers({
+      getNativeContext: () => currentContext,
+      getSession: () => ({ ...session, version, last_sequence: currentProof } as ExecutionSession),
+    });
+    document.cookie = "sidera_csrf=csrf-native; Path=/";
+    const { result } = renderHook(() => useNativeIntervention({
+      ...hookOptions(),
+      nativeContext: currentContext,
+      workspace: { ...workspace, current_runtime: { ...workspace.current_runtime!, session_version: version } },
+    }), { wrapper: queryProvider() });
+    await waitFor(() => expect(result.current.nativeFactsAvailable).toBe(true));
+    expect(result.current.canSend).toBe(allowed);
+
+    await act(async () => { await result.current.send(); });
+
+    expect(observations.posted).toHaveLength(allowed ? 1 : 0);
+    const loaded = loadNativeInterventionDraft(draft.scope);
+    expect(loaded).toMatchObject({ ok: true, draft: { review: draft.review } });
+    if (allowed) {
+      const originalContext = observations.posted[0]!.payload.context;
+      expect(originalContext).toEqual(currentContext.context);
+      expect(result.current.inputAction?.status).toBe("applied");
+    }
+  });
+
+  it.each([
+    { label: "old pending input and new pending Stop", proof: undefined, status: "pending" },
+    { label: "old UNKNOWN input and new UNKNOWN Stop", proof: undefined, status: "unknown" },
+    { label: "new pending input and old pending Stop", proof: 3, status: "pending" },
+    { label: "new UNKNOWN input and old UNKNOWN Stop", proof: 3, status: "unknown" },
+  ] as const)("restores $label and recovers immutable originals by GET only", async ({ proof, status }) => {
+    const draft = appliedStopDraft(status);
+    const originalContext = proof === undefined ? context : { ...context, session_last_sequence: proof };
+    const originalReview = { ...originalStopReviewA, context: originalContext };
+    const original: CommandRequest = {
+      ...originalStopA,
+      command_id: "f0000000-0000-0000-0000-000000000004",
+      command_type: "SendExecutionInput",
+      target_type: "execution_session",
+      target_id: SESSION_ID,
+      expected_version: 5,
+      idempotency_key: "f0000000-0000-0000-0000-000000000005",
+      correlation_id: "f0000000-0000-0000-0000-000000000006",
+      payload: {
+        context: originalContext,
+        client_idempotency_key: "f0000000-0000-0000-0000-000000000007",
+        text: "unchanged original body",
+        attachment_refs: [],
+      },
+    };
+    draft.text = "editable draft remains separate";
+    draft.client_idempotency_key = String(original.payload.client_idempotency_key);
+    draft.review = { ...originalReview, context: { ...context, session_version: 10, session_last_sequence: 8 } };
+    draft.input = { ...draft.stop, original, review: originalReview };
+    draft.stop.review = { ...originalStopReviewA, context: proof === undefined ? { ...context, session_last_sequence: 3 } : context };
+    const originalJson = JSON.stringify(original);
+    const inputReviewJson = JSON.stringify(draft.input.review);
+    const stopReviewJson = JSON.stringify(draft.stop.review);
+    const raw = JSON.stringify(draft);
+    localStorage.setItem(nativeInterventionDraftKey(draft.scope), raw);
+    let mismatch = true;
+    const observations = installSendAndStopHandlers({
+      getNativeContext: () => streamingNativeContext,
+      getSession: () => streamingSession,
+      commandStatus: (commandId) => {
+        const savedOriginal = commandId === original.command_id ? original : originalStopA;
+        return {
+          command_id: commandId,
+          command_type: savedOriginal.command_type,
+          target_type: savedOriginal.target_type,
+          target_id: savedOriginal.target_id,
+          expected_version: (savedOriginal.expected_version ?? 0) + (mismatch ? 2 : 0),
+          status: "applied",
+          result: {
+            command_id: commandId,
+            aggregate_id: commandId === original.command_id ? INPUT_ID : EXECUTION_ID,
+            aggregate_version: commandId === original.command_id ? 1 : 8,
+            event_ids: [],
+          },
+        } satisfies CommandStatusResponse;
+      },
+    });
+    document.cookie = "sidera_csrf=csrf-native; Path=/";
+    const { result } = renderHook(() => useNativeIntervention({
+      ...hookOptions(),
+      workspace: streamingWorkspace,
+      nativeContext: streamingNativeContext,
+    }), { wrapper: queryProvider() });
+    await waitFor(() => expect(result.current.inputAction?.status).toBe(status));
+    expect(result.current.storageError).toBeNull();
+    expect(localStorage.getItem(nativeInterventionDraftKey(draft.scope))).toBe(raw);
+    expect(observations.posted).toHaveLength(0);
+    const uuidSpy = vi.spyOn(crypto, "randomUUID");
+    await act(async () => { await result.current.reviewCurrentContext(); });
+    await act(async () => { await result.current.send(); await result.current.requestStop(); });
+    expect(result.current.canSend).toBe(false);
+    expect(result.current.canStop).toBe(false);
+
+    await act(async () => { await result.current.lookupOriginalInput(); await result.current.lookupOriginalStop(); });
+    expect(result.current.inputAction?.status).toBe(status);
+    expect(result.current.stopAction?.status).toBe(status);
+    mismatch = false;
+    await act(async () => { await result.current.lookupOriginalInput(); await result.current.lookupOriginalStop(); });
+
+    expect(observations.posted).toHaveLength(0);
+    expect(uuidSpy).not.toHaveBeenCalled();
+    expect(observations.commandGets).toEqual([original.command_id, originalStopA.command_id, original.command_id, originalStopA.command_id]);
+    expect(result.current.inputAction).toMatchObject({ status: "applied", original });
+    expect(result.current.stopAction).toMatchObject({ status: "applied", original: originalStopA, aggregate_version: 8 });
+    const loaded = loadNativeInterventionDraft(draft.scope);
+    if (!loaded.ok || loaded.draft === null) throw new Error("query recovery must preserve a valid draft");
+    expect(JSON.stringify(loaded.draft.input.original)).toBe(originalJson);
+    expect(JSON.stringify(loaded.draft.input.review)).toBe(inputReviewJson);
+    expect(JSON.stringify(loaded.draft.stop.review)).toBe(stopReviewJson);
+    expect(loaded.draft.review?.context).toEqual({ ...context, session_version: 7, session_last_sequence: 5 });
+    expect(loaded.draft.text).toBe("editable draft remains separate");
+    expect(Object.keys(loaded.draft.input.original!.payload.context as object)).toHaveLength(proof === undefined ? 10 : 11);
+  });
+
   it("suppresses same-tick duplicate Send calls before either preflight yields", async () => {
     const observations = installSendAndStopHandlers();
     document.cookie = "sidera_csrf=csrf-native; Path=/";

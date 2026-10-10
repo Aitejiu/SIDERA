@@ -490,6 +490,56 @@ afterEach(() => {
 });
 
 describe("NativeWorkerComposer", () => {
+  it("enables reviewed Send in rendered UI during streaming and posts the latest observation once", async () => {
+    const streamingContext: NativeWorkerContextView = {
+      ...nativeContext,
+      context: { ...context, session_last_sequence: 3 },
+      execution: { ...executionPin, event_cursor: 99 },
+    };
+    let currentNativeContext = streamingContext;
+    let currentSession = { ...session, version: 7, last_sequence: 5 };
+    const { posted } = installHandlers("delivered", {
+      getNativeContext: () => currentNativeContext,
+      getSession: () => currentSession,
+    });
+    document.cookie = "sidera_csrf=csrf-native; Path=/";
+    const user = userEvent.setup();
+    renderComposer([], {
+      nativeContext: streamingContext,
+      workspace: { ...workspace, current_runtime: { ...workspace.current_runtime!, session_version: 4 } },
+    });
+
+    const input = screen.getByRole("textbox", { name: "介入这个 Worker" });
+    const send = screen.getByRole("button", { name: "发送到当前 Session" });
+    await waitFor(() => expect(input).toBeEnabled());
+    expect(send).toBeDisabled();
+    await user.type(input, "send while observations stream");
+    await user.click(screen.getByRole("button", { name: "复核当前 context" }));
+    await waitFor(() => expect(send).toBeEnabled());
+
+    currentNativeContext = {
+      ...streamingContext,
+      context: { ...context, session_version: 10, session_last_sequence: 8 },
+    };
+    currentSession = { ...session, version: 10, last_sequence: 8 };
+    await user.click(send);
+
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toMatchObject({
+      command_type: "SendExecutionInput",
+      target_type: "execution_session",
+      target_id: SESSION_ID,
+      expected_version: 10,
+      payload: {
+        context: { ...context, session_version: 10, session_last_sequence: 8 },
+        text: "send while observations stream",
+        client_idempotency_key: expect.any(String),
+      },
+    });
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("命令已处理"));
+    expect(send).toBeDisabled();
+  });
+
   it("keeps Send behind explicit review and shows command and delivery states separately", async () => {
     const { posted } = installHandlers("delivered");
     document.cookie = "sidera_csrf=csrf-native; Path=/";

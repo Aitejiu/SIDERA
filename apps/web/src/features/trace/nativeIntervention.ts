@@ -7,6 +7,7 @@ import type {
   ProfileRef,
 } from "@/features/assignments/types";
 import type { WorkerWorkspace } from "@/features/worker-items/types";
+import { sessionObservationMatches } from "@/shared/sessionObservation";
 import type { Execution, ExecutionSession } from "./types";
 
 export type NativeInterventionContext = NonNullable<NativeWorkerContextView["context"]>;
@@ -151,6 +152,7 @@ export function nativeContextFingerprint(
     context.execution_mode,
     context.binding_version,
     context.run_id,
+    ...(Object.prototype.hasOwnProperty.call(context, "session_last_sequence") ? [context.session_last_sequence] : []),
   ]);
 }
 
@@ -179,6 +181,7 @@ export function reviewNativeInterventionFacts(
   const runtime = workspace.current_runtime;
   const executionVersion = nativeContext.execution_version;
   const profileRef = saved.profile_ref;
+  const completeObservationProof = address.session_last_sequence != null && session.last_sequence != null;
 
   if (executionVersion === null || executionVersion === undefined
     || !positiveInteger(executionVersion)
@@ -205,7 +208,7 @@ export function reviewNativeInterventionFacts(
     || address.context_version !== workspace.worker_item.context_version
     || workspace.worker_item.acknowledged_context_version !== address.context_version
     || address.session_id !== session.id
-    || address.session_version !== session.version
+    || !sessionObservationMatches(address.session_version, address.session_last_sequence, session.version, session.last_sequence)
     || address.execution_id !== session.execution_id
     || address.worker_id !== session.worker_id
     || session.workspace_id !== scope.workspace_id
@@ -215,7 +218,8 @@ export function reviewNativeInterventionFacts(
     || runtime.execution_id !== address.execution_id
     || runtime.execution_status !== execution.status
     || runtime.session_id !== address.session_id
-    || runtime.session_version !== address.session_version
+    || !positiveInteger(runtime.session_version)
+    || (completeObservationProof ? runtime.session_version > session.version : runtime.session_version !== session.version)
     || runtime.session_status !== session.status
     || runtime.worker_id !== address.worker_id
     || runtime.task_id !== execution.task_id
@@ -223,8 +227,11 @@ export function reviewNativeInterventionFacts(
     return { ok: false, reason: "native_source_mismatch" };
   }
 
+  const currentContext = { ...address, session_version: session.version };
+  if (!completeObservationProof) delete currentContext.session_last_sequence;
+  else currentContext.session_last_sequence = session.last_sequence;
   const review: NativeInterventionReview = {
-    context: address,
+    context: currentContext,
     execution_version: executionVersion,
     profile_ref: profileRef,
     binding_version: address.binding_version,
@@ -582,13 +589,19 @@ function isReview(value: unknown, scope: NativeInterventionScope): value is Nati
 }
 
 function isNativeContext(value: unknown): value is NativeInterventionContext {
-  if (!isRecord(value) || !hasExactKeys(value, CONTEXT_KEYS)) return false;
+  if (!isRecord(value)) return false;
+  const hasProof = Object.prototype.hasOwnProperty.call(value, "session_last_sequence");
+  if (!hasExactKeys(value, hasProof ? [...CONTEXT_KEYS, "session_last_sequence"] : CONTEXT_KEYS)) return false;
   return isUuid(value.worker_item_id)
     && positiveInteger(value.plan_generation)
     && positiveInteger(value.context_version)
     && isUuid(value.execution_id)
     && isUuid(value.session_id)
     && positiveInteger(value.session_version)
+    && (!hasProof || (typeof value.session_last_sequence === "number"
+      && Number.isSafeInteger(value.session_last_sequence)
+      && value.session_last_sequence >= 0
+      && value.session_last_sequence < value.session_version))
     && isUuid(value.worker_id)
     && value.execution_mode === "native_profile"
     && positiveInteger(value.binding_version)
