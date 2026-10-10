@@ -209,6 +209,53 @@ def test_child_environment_is_exact_and_excludes_parent_secrets(tmp_path):
         prepared.close()
 
 
+def test_child_environment_projects_only_explicit_profile_network_values(tmp_path):
+    parent = {
+        "PATH": "/usr/bin:/bin",
+        "HTTP_PROXY": "http://127.0.0.1:9001",
+        "HTTPS_PROXY": "http://127.0.0.1:9002",
+        "NO_PROXY": "parent-only.invalid",
+        "ALL_PROXY": "socks5://127.0.0.1:9003",
+        "OPENAI_API_KEY": "N23_FAKE_PARENT_CREDENTIAL",
+    }
+    explicit = {
+        "HTTP_PROXY": "http://127.0.0.1:7897",
+        "HTTPS_PROXY": "http://127.0.0.1:7897",
+        "NO_PROXY": "localhost,127.0.0.1,::1,[::1]",
+    }
+    prepared = prepare_opencode_config({}, (), private_root=tmp_path)
+
+    try:
+        without_explicit = build_child_environment(parent, {}, prepared)
+        for key in (
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "ALL_PROXY",
+            "OPENAI_API_KEY",
+        ):
+            assert key not in without_explicit
+
+        environment = build_child_environment(parent, explicit, prepared)
+        assert environment["HTTP_PROXY"] == "http://127.0.0.1:7897"
+        assert environment["HTTPS_PROXY"] == "http://127.0.0.1:7897"
+        assert environment["NO_PROXY"] == "localhost,127.0.0.1,::1,[::1]"
+        assert "ALL_PROXY" not in environment
+        assert "OPENAI_API_KEY" not in environment
+        for child in (without_explicit, environment):
+            assert child["PATH"] == "/usr/bin:/bin"
+            assert child["HOME"] == str(prepared.directory)
+            assert child["XDG_CONFIG_HOME"] == str(prepared.xdg_config_home)
+            assert child["XDG_DATA_HOME"] == str(prepared.xdg_data_home)
+            assert child["XDG_STATE_HOME"] == str(prepared.xdg_state_home)
+            assert child["XDG_CACHE_HOME"] == str(prepared.xdg_cache_home)
+            assert child["OPENCODE_CONFIG_CONTENT"] == prepared.content
+            assert child["OPENCODE_CONFIG_DIR"] == str(prepared.config_dir)
+    finally:
+        prepared.close()
+    assert not prepared.directory.exists()
+
+
 @pytest.mark.parametrize("destination", ["OPENCODE_API_KEY", "BOUND_PROVIDER_KEY"])
 def test_provider_credential_uses_placeholder_and_child_only_secret(
     tmp_path, destination

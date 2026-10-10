@@ -135,6 +135,10 @@ def run_peer() -> None:
             "provider_credential_present": all(
                 bool(os.environ.get(name)) for name in provider_environments
             ),
+            "network_environment": {
+                name: os.environ.get(name)
+                for name in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY")
+            },
             "home": str(Path.home()),
             "skill_hashes": skill_hashes,
             "parent_sidera_present": "SIDERA_PARENT_SECRET" in os.environ,

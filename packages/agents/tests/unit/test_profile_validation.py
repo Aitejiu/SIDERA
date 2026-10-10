@@ -124,6 +124,31 @@ def test_inherited_model_and_thinking_remain_none_and_auth_is_unconfirmed(
     )
 
 
+def test_explicit_profile_environment_is_executable(runtime_lab, monkeypatch):
+    runtime = _register_runtime(runtime_lab, monkeypatch)
+    profile = _create_profile(
+        runtime_lab,
+        runtime.ref,
+        environment={
+            "HTTP_PROXY": "http://127.0.0.1:7897",
+            "HTTPS_PROXY": "http://127.0.0.1:7897",
+            "NO_PROXY": "localhost,127.0.0.1,::1,[::1]",
+            "PROFILE_MODE": "review",
+        },
+    )
+
+    validation = runtime_lab.runtimes.validate_profile(
+        profile.ref, grant_id=runtime_lab.grant_id
+    )
+
+    assert validation.valid is True
+    assert not any(issue.field.startswith("environment") for issue in validation.issues)
+    assert validation.effective_preview.profile_ref == profile.ref
+    assert validation.effective_preview.observed_model is None
+    assert validation.effective_preview.applied_fields == ()
+    assert runtime.auth_state is AuthenticationState.UNCONFIRMED
+
+
 def test_unsupported_native_options_remain_saveable_but_not_executable(
     runtime_lab, monkeypatch
 ):
@@ -323,11 +348,21 @@ def test_secret_reader_failure_prevents_native_open(admission_lab, failure):
     assert "N09_FAKE_PRIVATE_READER_REASON" not in snapshot.model_dump_json()
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "PATH",
+        "HOME",
+        "OPENCODE_CONFIG_CONTENT",
+        "OPENCODE_API_KEY",
+        "SIDERA_TEST_TOKEN",
+    ],
+)
 def test_reserved_environment_fields_are_reported_for_saved_legacy_profile(
-    runtime_lab, monkeypatch
+    runtime_lab, monkeypatch, key
 ):
     runtime = _register_runtime(runtime_lab, monkeypatch)
-    draft = _profile_draft(runtime.ref, environment={"PATH": "/tmp/tools"})
+    draft = _profile_draft(runtime.ref, environment={key: "/tmp/tools"})
     saved = runtime_lab.store.create_profile(
         runtime_lab.workspace_id,
         uuid4(),
@@ -340,8 +375,10 @@ def test_reserved_environment_fields_are_reported_for_saved_legacy_profile(
         saved.ref, grant_id=runtime_lab.grant_id
     )
 
+    assert validation.valid is False
     assert any(
-        issue.field == "environment.PATH" and issue.code == "reserved_environment_field"
+        issue.field == f"environment.{key}"
+        and issue.code == "reserved_environment_field"
         for issue in validation.issues
     )
 

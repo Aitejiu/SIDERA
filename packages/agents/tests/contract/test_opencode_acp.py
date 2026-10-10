@@ -1708,6 +1708,10 @@ def test_authorized_profile_credentials_reach_owned_peer_and_redacted_run_trace(
         parent_environment={
             "PATH": os.defpath,
             "OPENCODE_API_KEY": "N09_FAKE_GLOBAL_KEY",
+            "HTTP_PROXY": "http://127.0.0.1:9001",
+            "HTTPS_PROXY": "http://127.0.0.1:9002",
+            "NO_PROXY": "parent-only.invalid",
+            "ALL_PROXY": "socks5://127.0.0.1:9003",
         },
     )
     values = {}
@@ -1757,6 +1761,11 @@ def test_authorized_profile_credentials_reach_owned_peer_and_redacted_run_trace(
                         "name": f"explicit-native-profile-{index}",
                         "runtime_ref": runtime.ref,
                         "model_id": "opencode-go/deepseek-v4.1-flash",
+                        "environment": {
+                            "HTTP_PROXY": "http://127.0.0.1:7897",
+                            "HTTPS_PROXY": "http://127.0.0.1:7897",
+                            "NO_PROXY": "localhost,127.0.0.1,::1,[::1]",
+                        },
                         "secret_refs": (binding,),
                         "native_settings": {"provider_env": "OPENCODE_API_KEY"},
                     }
@@ -1795,6 +1804,16 @@ def test_authorized_profile_credentials_reach_owned_peer_and_redacted_run_trace(
             if row.get("kind") == "environment" and row.get("provider_placeholders")
         ]
         assert len(environments) == 2
+        assert all(
+            row["network_environment"]
+            == {
+                "HTTP_PROXY": "http://127.0.0.1:7897",
+                "HTTPS_PROXY": "http://127.0.0.1:7897",
+                "NO_PROXY": "localhost,127.0.0.1,::1,[::1]",
+                "ALL_PROXY": None,
+            }
+            for row in environments
+        )
         assert all(row["provider_credential_present"] for row in environments)
         assert environments[0]["home"] != environments[1]["home"]
         assert all(not Path(row["home"]).exists() for row in environments)

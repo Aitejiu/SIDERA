@@ -323,19 +323,6 @@ class OpenCodeDescriptor:
                         ),
                     )
                 )
-        if draft.environment and not any(
-            issue.field.startswith("environment.") for issue in issues
-        ):
-            issues.append(
-                ConfigIssue(
-                    field="environment",
-                    code="unsupported_capability",
-                    message="Environment projection has not been confirmed.",
-                    support=_support(
-                        SupportStatus.UNCONFIRMED, "environment_projection_unconfirmed"
-                    ),
-                )
-            )
         return ConfigValidation(
             valid=not issues,
             issues=tuple(issues),
