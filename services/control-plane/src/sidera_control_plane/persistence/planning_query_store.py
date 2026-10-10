@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -41,6 +42,7 @@ from sidera_control_plane.application.planning_queries import (
     PlanningRunView,
     PlanningUsageView,
 )
+from sidera_control_plane.domain.errors import ValidationError as DomainValidationError
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.models import (
     ContextPatchAcknowledgementModel,
@@ -59,6 +61,7 @@ from sidera_control_plane.persistence.models import (
     ProposalMaterializationModel,
     WorkerTransitionModel,
 )
+from sidera_control_plane.persistence.planning_repository import _snapshot_from_mapping
 from sidera_control_plane.persistence.projection_change_repository import (
     ProjectionChangeRepository,
 )
@@ -238,7 +241,9 @@ class SqlAlchemyPlanningQueryStore:
                 workspace_id
             )
             profile = (
-                _profile_view(profile_row[0], profile_row[1], profile_row[2])
+                _request_profile_view(
+                    request, profile_row[0], profile_row[1], profile_row[2]
+                )
                 if profile_row is not None
                 else None
             )
@@ -778,6 +783,39 @@ def _profile_view(
         planner_agent_ref=None
         if row.planner_agent_ref is None
         else ProfileRef.model_validate(row.planner_agent_ref),
+    )
+
+
+def _request_profile_view(
+    request: PlanningRequestModel,
+    row: PlanningProfileModel,
+    provider: str | None,
+    capabilities: Mapping[str, object] | None,
+) -> PlanningProfileView | None:
+    if request.profile_snapshot.get("execution_mode", "legacy") != "native_profile":
+        return _profile_view(row, provider, capabilities)
+    try:
+        snapshot = _snapshot_from_mapping(request.profile_snapshot)
+    except (DomainValidationError, ValueError, TypeError, KeyError):
+        return None
+    if (
+        snapshot.workspace_id != request.workspace_id
+        or snapshot.profile_id != request.planning_profile_id
+        or snapshot.profile_version != request.planning_profile_version
+        or row.workspace_id != request.workspace_id
+        or row.id != request.planning_profile_id
+        or row.version != request.planning_profile_version
+    ):
+        return None
+    return replace(
+        _profile_view(row, provider, capabilities),
+        execution_mode=snapshot.execution_mode,
+        planner_agent_ref=snapshot.planner_agent_ref,
+        planner_module_instance_id=snapshot.planner_module_instance_id,
+        planner_module_config_version=snapshot.planner_module_config_version,
+        planner_interface_version=snapshot.planner_interface_version,
+        capabilities=None,
+        planner_provider=None,
     )
 
 
