@@ -1,4 +1,5 @@
 import type { ProfileRef } from "@/features/agents/types";
+import { sessionObservationMatches } from "@/shared/sessionObservation";
 import type {
   AssigneeValue,
   CommandRequest,
@@ -50,6 +51,7 @@ export interface HandoffSourceReview {
   execution_id: string;
   session_id: string;
   session_version: number;
+  session_last_sequence?: number;
   worker_id: string;
   binding_version: number;
   run_id: string;
@@ -258,6 +260,7 @@ export function reviewHandoffSource(input: {
     || !positiveInteger(binding.version)
     || runtime === null
     || runtime.adapter_type !== "agent-run"
+    || !positiveInteger(runtime.session_version)
     || execution === null
     || address === null
     || run === null
@@ -280,7 +283,11 @@ export function reviewHandoffSource(input: {
     || address.worker_item_id !== workerItem.id
     || address.execution_id !== execution.execution_id
     || address.session_id !== runtime.session_id
-    || address.session_version !== runtime.session_version
+    || !sessionObservationMatches(address.session_version, address.session_last_sequence,
+      address.session_version, address.session_last_sequence)
+    || (address.session_last_sequence == null
+      ? address.session_version !== runtime.session_version
+      : runtime.session_version > address.session_version)
     || address.worker_id !== runtime.worker_id
     || address.binding_version !== binding.version
     || address.binding_version !== execution.binding_version
@@ -296,7 +303,6 @@ export function reviewHandoffSource(input: {
     || !nonblank(address.worker_id)
     || !nonblank(address.run_id)
     || runtime.session_status !== "active"
-    || !positiveInteger(runtime.session_version)
     || runtime.execution_id !== execution.execution_id
     || runtime.session_id === null
     || runtime.worker_id === null
@@ -330,6 +336,7 @@ export function reviewHandoffSource(input: {
       execution_id: execution.execution_id,
       session_id: address.session_id,
       session_version: address.session_version,
+      ...(address.session_last_sequence == null ? {} : { session_last_sequence: address.session_last_sequence }),
       worker_id: address.worker_id,
       binding_version: address.binding_version,
       run_id: address.run_id,
@@ -357,7 +364,7 @@ export function reviewPreparedHandoff(input: {
   });
   const expiresAt = isNativeHandoffProposal(proposal) ? Date.parse(proposal.expires_at) : Number.NaN;
   if (!source.ok
-    || !sameSourceReview(source.review, review)
+    || !sameHandoffSourceReview(review, source.review)
     || !isNativeHandoffProposal(proposal)
     || !Number.isFinite(now)
     || !Number.isFinite(expiresAt)
@@ -470,10 +477,15 @@ export function samePreparedHandoff(
 }
 
 export function sameHandoffSourceReview(
-  left: HandoffSourceReview,
-  right: HandoffSourceReview,
+  saved: HandoffSourceReview,
+  current: HandoffSourceReview,
 ): boolean {
-  return sameSourceReview(left, right);
+  const normalized = { ...current, session_version: saved.session_version };
+  if (saved.session_last_sequence === undefined) delete normalized.session_last_sequence;
+  else normalized.session_last_sequence = saved.session_last_sequence;
+  return sessionObservationMatches(saved.session_version, saved.session_last_sequence,
+    current.session_version, current.session_last_sequence)
+    && sameSourceReview(saved, normalized);
 }
 
 function sameHandoffContext(
@@ -713,6 +725,7 @@ function isStoredSourceReview(value: unknown, scope: HandoffScope): value is Han
     "worker_item_version", "execution_mode", "execution_id", "session_id", "session_version",
     "worker_id", "binding_version", "run_id", "plan_generation", "context_version",
     "source_profile_ref", "plan_snapshot_id",
+    ...(Object.prototype.hasOwnProperty.call(value, "session_last_sequence") ? ["session_last_sequence"] : []),
   ]) && value.workspace_id === scope.workspace_id
     && value.principal_id === scope.principal_id
     && value.worker_item_id === scope.worker_item_id
@@ -720,7 +733,11 @@ function isStoredSourceReview(value: unknown, scope: HandoffScope): value is Han
     && positiveInteger(value.worker_item_version)
     && value.execution_mode === "native_profile"
     && nonblank(value.execution_id) && nonblank(value.session_id)
-    && positiveInteger(value.session_version) && nonblank(value.worker_id)
+    && sessionObservationMatches(value.session_version, value.session_last_sequence,
+      value.session_version, value.session_last_sequence)
+    && (!Object.prototype.hasOwnProperty.call(value, "session_last_sequence")
+      || typeof value.session_last_sequence === "number")
+    && nonblank(value.worker_id)
     && positiveInteger(value.binding_version) && nonblank(value.run_id)
     && positiveInteger(value.plan_generation) && positiveInteger(value.context_version)
     && isStoredProfileRef(value.source_profile_ref, scope.workspace_id)
@@ -742,11 +759,13 @@ function matchesAddress(value: unknown, review: HandoffSourceReview): boolean {
   return isRecord(value) && hasExactKeys(value, [
     "worker_item_id", "execution_mode", "execution_id", "session_id", "session_version",
     "worker_id", "binding_version", "run_id", "plan_generation", "context_version",
+    ...(review.session_last_sequence === undefined ? [] : ["session_last_sequence"]),
   ]) && value.worker_item_id === review.worker_item_id
     && value.execution_mode === review.execution_mode
     && value.execution_id === review.execution_id
     && value.session_id === review.session_id
     && value.session_version === review.session_version
+    && value.session_last_sequence === review.session_last_sequence
     && value.worker_id === review.worker_id
     && value.binding_version === review.binding_version
     && value.run_id === review.run_id
@@ -844,6 +863,7 @@ function sameSourceReview(left: HandoffSourceReview, right: HandoffSourceReview)
     && left.execution_id === right.execution_id
     && left.session_id === right.session_id
     && left.session_version === right.session_version
+    && left.session_last_sequence === right.session_last_sequence
     && left.worker_id === right.worker_id
     && left.binding_version === right.binding_version
     && left.run_id === right.run_id

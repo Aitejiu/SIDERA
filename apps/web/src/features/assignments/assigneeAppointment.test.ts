@@ -214,6 +214,30 @@ const activeWorkerWorkspace: WorkerWorkspace = {
   execution_history: [workerExecutionSummary()],
 };
 
+function activeTraceFacts(version = 5, sequence = 3) {
+  return {
+    scope: WORKER_SCOPE,
+    binding: profileBinding("worker_item", WORKER),
+    workerWorkspace: { ...structuredClone(activeWorkerWorkspace), current_runtime: { ...workerRuntime("agent-run"), session_version: 4 } },
+    nativeContext: nativeContext({
+      execution: execution({ event_cursor: 81 }),
+      execution_version: 5,
+      context: {
+        worker_item_id: WORKER, execution_mode: "native_profile",
+        plan_generation: 2, context_version: 4, execution_id: EXECUTION_ID,
+        session_id: SESSION_ID, session_version: version, session_last_sequence: sequence,
+        worker_id: "80000000-0000-0000-0000-000000000002", binding_version: 2, run_id: RUN_ID,
+      },
+      run: {
+        actual_runtime_version: "1", applied_fields: [], config_hash: "a".repeat(64),
+        input_open: true, observed_model: null, profile_ref: profileRef, reason_code: null,
+        runtime_ref: { workspace_id: WS, runtime_id: "90000000-0000-0000-0000-000000000002" },
+        selected_model: null, state: "running",
+      },
+    }),
+  };
+}
+
 function draft(overrides: Partial<AppointmentDraft> = {}): AppointmentDraft {
   return {
     schema_version: 1,
@@ -291,6 +315,67 @@ describe("appointment review", () => {
 });
 
 describe("worker appointment review", () => {
+  it("keeps the active handoff entry review stable through trace and independent event cursor progress", () => {
+    const first = reviewAppointmentFacts(activeTraceFacts());
+    expect(first).toMatchObject({ ok: true, action: "handoff_required" });
+    if (!first.ok) throw new Error(first.reason);
+    expect(Object.keys(first.review).sort()).toEqual(["aggregateVersion", "bindingFingerprint", "executionFingerprint"]);
+    for (const [version, sequence, cursor, cached] of [[10, 8, 97, 4], [7, 5, 83, 6]]) {
+      const facts = activeTraceFacts(version, sequence);
+      facts.nativeContext.execution!.event_cursor = cursor!;
+      facts.workerWorkspace.current_runtime.session_version = cached!;
+      const current = reviewAppointmentFacts(facts);
+      expect(current).toMatchObject({ ok: true, action: "handoff_required" });
+      if (current.ok) expect(current.review).toEqual(first.review);
+    }
+  });
+
+  it.each(["baseline", "control", "run", "session", "profile", "binding", "context", "generation", "status", "execution"])(
+    "keeps %s drift visible to the active handoff entry", (change) => {
+      const first = reviewAppointmentFacts(activeTraceFacts());
+      if (!first.ok) throw new Error(first.reason);
+      const facts = activeTraceFacts(10, 8);
+      const address = facts.nativeContext.context!;
+      const saved = facts.nativeContext.execution!;
+      if (change === "baseline") address.session_last_sequence = 7;
+      if (change === "control") address.session_last_sequence = 3;
+      if (change === "run") address.run_id = saved.run_id = "changed-run";
+      if (change === "session") {
+        address.session_id = facts.workerWorkspace.current_runtime.session_id = "changed-session";
+        facts.workerWorkspace.execution_history[0]!.session_id = "changed-session";
+      }
+      if (change === "profile") {
+        const changed = { ...profileRef, revision: 2 };
+        facts.binding.profile_ref = changed;
+        facts.nativeContext.binding = facts.binding;
+        saved.profile_ref = facts.nativeContext.run!.profile_ref = changed;
+      }
+      if (change === "binding") {
+        facts.binding.version = address.binding_version = saved.binding_version = 3;
+        facts.nativeContext.binding = facts.binding;
+      }
+      if (change === "context") address.context_version = facts.workerWorkspace.worker_item.context_version = 5;
+      if (change === "generation") address.plan_generation = facts.workerWorkspace.current_placement.plan_generation = 3;
+      if (change === "status") facts.nativeContext.run!.state = "idle";
+      if (change === "execution") saved.execution_id = "another-execution";
+      const current = reviewAppointmentFacts(facts);
+      if (current.ok) expect(current.review).not.toEqual(first.review);
+      else expect(current.action).toBe("unavailable");
+    },
+  );
+
+  it.each([undefined, null, -1, 5, 3.5, true, "3"])(
+    "retains the exact entry gate without valid native proof (%s)", (proof) => {
+      const facts = activeTraceFacts();
+      facts.nativeContext.context = { ...facts.nativeContext.context!, session_last_sequence: proof } as NativeWorkerContextView["context"];
+      expect(reviewAppointmentFacts(facts)).toMatchObject({ ok: false, action: "unavailable" });
+      if (proof == null) {
+        facts.workerWorkspace.current_runtime.session_version = 5;
+        expect(reviewAppointmentFacts(facts)).toMatchObject({ ok: true, action: "handoff_required" });
+      }
+    },
+  );
+
   it.each([
     ["active", true],
     ["paused", true],

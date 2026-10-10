@@ -20,6 +20,7 @@ import {
   mapHandoffActionResult,
   reviewHandoffSource,
   reviewPreparedHandoff,
+  sameHandoffSourceReview,
   samePreparedHandoff,
   saveHandoffDraft,
   type HandoffDraft,
@@ -439,6 +440,112 @@ it("reviews the exact active native source pins independently of input permissio
     context_version: 4,
     plan_snapshot_id: snapshotId,
   });
+});
+
+it("reviews proven native trace progress with an older cached runtime projection", () => {
+  const result = reviewHandoffSource({
+    workspace: { ...sourceWorkspace, current_runtime: { ...sourceWorkspace.current_runtime!, session_version: 4 } },
+    nativeContext: {
+      ...sourceContext,
+      execution: { ...sourceExecution, event_cursor: 91 },
+      context: { ...sourceContext.context!, session_version: 5, session_last_sequence: 3 },
+    },
+    principalId,
+  });
+  expect(result).toMatchObject({ ok: true, review: { session_version: 5, session_last_sequence: 3 } });
+});
+
+it("orders live handoff approval saved to current without relaxing the stored anchor", () => {
+  const saved = { ...currentSourceReview(), session_version: 5, session_last_sequence: 3 };
+  const current = { ...saved, session_version: 11, session_last_sequence: 9 };
+  expect(sameHandoffSourceReview(saved, current)).toBe(true);
+  expect(sameHandoffSourceReview(current, saved)).toBe(false);
+  const draft = emptyHandoffDraft();
+  const original = {
+    ...prepareOriginal,
+    payload: {
+      ...prepareOriginal.payload,
+      context: { ...prepareOriginal.payload.context as object, session_version: 5, session_last_sequence: 3 },
+    },
+  };
+  const preparedDraft: HandoffDraft = {
+    ...draft,
+    source_review: saved,
+    prepared: { ...currentPreparedAnchor(), source_review: saved },
+    actions: { ...draft.actions, prepare: { original, status: "applied", rejectionCode: null } },
+  };
+  expect(saveHandoffDraft(handoffScope, preparedDraft)).toEqual({ ok: true });
+  expect(loadHandoffDraft(handoffScope)).toEqual({ ok: true, draft: preparedDraft });
+  for (const tampered of [
+    { ...preparedDraft, prepared: { ...preparedDraft.prepared!, source_review: current } },
+    { ...preparedDraft, prepared: { ...preparedDraft.prepared!, source_review: {
+      ...saved, session_version: 4, session_last_sequence: 2,
+    } } },
+    { ...preparedDraft, source_review: current },
+    { ...preparedDraft, source_review: current, actions: { ...preparedDraft.actions, prepare: {
+      ...preparedDraft.actions.prepare, original: { ...original, payload: { ...original.payload,
+        context: { ...original.payload.context, session_version: 11, session_last_sequence: 9 } } },
+    } } },
+    { ...preparedDraft, actions: { ...preparedDraft.actions, prepare: {
+      ...preparedDraft.actions.prepare, original: { ...original, payload: { ...original.payload,
+        context: { ...original.payload.context, session_version: 11, session_last_sequence: 9 } } },
+    } } },
+  ]) {
+    expect(saveHandoffDraft(handoffScope, tampered).ok).toBe(false);
+    localStorage.setItem(handoffDraftKey(handoffScope), JSON.stringify(tampered));
+    expect(loadHandoffDraft(handoffScope).ok).toBe(false);
+  }
+});
+
+it("reviews a prepared proposal after ordered trace growth while retaining the saved proof", () => {
+  const review = { ...currentSourceReview(), session_version: 5, session_last_sequence: 3 };
+  const result = reviewPreparedHandoff({
+    review, proposal, target: handoffTarget,
+    workspace: { ...sourceWorkspace, current_runtime: { ...sourceWorkspace.current_runtime!, session_version: 4 } },
+    nativeContext: { ...sourceContext, context: {
+      ...sourceContext.context!, session_version: 11, session_last_sequence: 9,
+    } },
+    now: Date.parse("2026-10-07T00:01:00Z"),
+  });
+  expect(result).toMatchObject({ ok: true, anchor: { source_review: review, proposal } });
+});
+
+it.each([
+  [6, 3], [5, 4], [4, 2], [0, 0], [5, -1], [5, 5], [5, 3.5],
+  [5, true], [5, "3"], [Number.MAX_SAFE_INTEGER + 1, 3],
+])("rejects unproven handoff approval movement (%s,%s)", (version, sequence) => {
+  const saved = { ...currentSourceReview(), session_version: 5, session_last_sequence: 3 };
+  const current = { ...saved, session_version: version, session_last_sequence: sequence };
+  expect(sameHandoffSourceReview(saved, current as typeof saved)).toBe(false);
+});
+
+it.each([undefined, null, -1, 5, 3.5, true, "3"])(
+  "does not use missing or invalid native proof to excuse an older runtime (%s)", (proof) => {
+    const context = { ...sourceContext.context!, session_version: 5, session_last_sequence: proof };
+    const result = reviewHandoffSource({
+      workspace: { ...sourceWorkspace, current_runtime: { ...sourceWorkspace.current_runtime!, session_version: 4 } },
+      nativeContext: { ...sourceContext, context: context as NativeWorkerContextView["context"] },
+      principalId,
+    });
+    expect(result.ok).toBe(false);
+  },
+);
+
+it("keeps old review and original shapes exact when native proof is absent or null", () => {
+  const review = currentSourceReview();
+  expect(review).not.toHaveProperty("session_last_sequence");
+  const result = reviewHandoffSource({ workspace: sourceWorkspace,
+    nativeContext: { ...sourceContext, context: { ...sourceContext.context!, session_last_sequence: null } },
+    principalId });
+  expect(result).toEqual({ ok: true, review });
+  const draft = emptyHandoffDraft();
+  const unknown: HandoffDraft = { ...draft, actions: { ...draft.actions,
+    prepare: { original: prepareOriginal, status: "unknown", rejectionCode: null } } };
+  const bytes = JSON.stringify(unknown);
+  localStorage.setItem(handoffDraftKey(handoffScope), bytes);
+  expect(loadHandoffDraft(handoffScope)).toEqual({ ok: true, draft: unknown });
+  expect(localStorage.getItem(handoffDraftKey(handoffScope))).toBe(bytes);
+  expect(sameHandoffSourceReview(review, { ...review, session_version: 4 })).toBe(false);
 });
 
 it("requires the active CP Session status without changing Execution or Run status rules", () => {

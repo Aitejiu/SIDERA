@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { createElement, type PropsWithChildren } from "react";
@@ -619,6 +619,43 @@ afterEach(() => {
 });
 
 describe("NativeWorkerHandoff", () => {
+  it.each([false, true])("opens the normal Alt handoff entry through native trace movement (regression=%s)", async (regress) => {
+    const handlers = installHandlers();
+    const alt = profileAt({ ...sourceProfileRef, profile_id: "50000000-0000-0000-0000-000000000009", revision: 3 }, "Alt");
+    const cachedWorkspace = { ...workspace, current_runtime: { ...workspace.current_runtime, session_version: 4 } };
+    let current: NativeWorkerContextView = { ...nativeContext,
+      context: { ...nativeContext.context!, session_version: 5, session_last_sequence: 3 } };
+    server.use(
+      http.get(`${BASE}/worker-items/${WORKER_ITEM_ID}/workspace`, () => HttpResponse.json(cachedWorkspace)),
+      http.get(`${BASE}/worker-items/${WORKER_ITEM_ID}/native-context`, () => HttpResponse.json(current)),
+      http.get(`/agents/v1/workspaces/${WORKSPACE_ID}/profiles`, () => HttpResponse.json({ items: [sourceProfileR2, alt] })),
+      http.get(`/agents/v1/workspaces/${WORKSPACE_ID}/profiles/${alt.profile.ref.profile_id}`, () => HttpResponse.json(alt)),
+    );
+    const user = userEvent.setup();
+    const page = renderPage();
+    const picker = await screen.findByRole("combobox", { name: "设置归属" });
+    await waitFor(() => expect(picker).toBeEnabled());
+    await user.selectOptions(picker, screen.getByRole("option", { name: "Alt · R3" }));
+    expect(picker).toHaveDisplayValue("Alt · R3");
+    current = { ...current, execution: { ...current.execution!, event_cursor: 97 },
+      context: { ...current.context!, session_version: 10, session_last_sequence: 8 } };
+    await act(async () => page.client.invalidateQueries({ queryKey: nativeWorkerContextQueryKey(WORKSPACE_ID, WORKER_ITEM_ID) }));
+    if (regress) {
+      current = { ...current, execution: { ...current.execution!, event_cursor: 92 },
+        context: { ...current.context!, session_version: 7, session_last_sequence: 5 } };
+      await act(async () => page.client.invalidateQueries({ queryKey: nativeWorkerContextQueryKey(WORKSPACE_ID, WORKER_ITEM_ID) }));
+    }
+    await user.click(await screen.findByRole("button", { name: "开始原生交接" }));
+    expect(await screen.findByRole("heading", { name: "原生 Profile 交接" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "交接目标" })).toHaveDisplayValue("Alt · R3");
+    expect(handlers.posts).toHaveLength(0);
+    await waitFor(() => expect(JSON.parse(localStorage.getItem(handoffDraftKey(handoffScope)) ?? "null")).toMatchObject({
+      source_review: { session_version: regress ? 7 : 10, session_last_sequence: regress ? 5 : 8 },
+      actions: { prepare: { original: null, status: "idle" } },
+    }));
+    expect(handlers.getCandidateGets()).toBe(0);
+  });
+
   it("prepares and confirms the native Profile-to-human path from an explicit WorkerItem choice", async () => {
     const handlers = installHandlers();
     document.cookie = "sidera_csrf=owned-csrf; Path=/";

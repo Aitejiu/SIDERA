@@ -570,7 +570,7 @@ export function useProfileHandoff({ workspace, initialTarget, onRefresh }: UsePr
         setMessage(capturedKey, "来源事实已变化，请重新读取并复核");
         return;
       }
-      if (!(await verifyTarget(capturedTarget, capturedScope, capturedDraft.source_review))) {
+      if (!(await verifyTarget(capturedTarget, capturedScope, latestReview.review))) {
         if (isCurrentScope(capturedKey)) setMessage(capturedKey, "所选目标 Profile 版本不可用");
         return;
       }
@@ -583,10 +583,10 @@ export function useProfileHandoff({ workspace, initialTarget, onRefresh }: UsePr
         commandType: "PrepareProfileHandoff",
         targetType: "worker_item",
         targetId: capturedScope.worker_item_id,
-        expectedVersion: capturedDraft.source_review.worker_item_version,
+        expectedVersion: latestReview.review.worker_item_version,
         payload: {
           proposal_schema_version: 2,
-          context: contextFromReview(capturedDraft.source_review),
+          context: contextFromReview(latestReview.review),
           target_assignee: { kind: capturedTarget.kind, id: capturedTarget.id },
           target_profile_ref: capturedTarget.kind === "profile"
             ? capturedTarget.profileRef
@@ -599,6 +599,7 @@ export function useProfileHandoff({ workspace, initialTarget, onRefresh }: UsePr
       });
       const pending: HandoffDraft = {
         ...capturedDraft,
+        source_review: latestReview.review,
         reason: normalizedReason,
         instruction: normalizedInstruction,
         actions: {
@@ -1181,6 +1182,7 @@ function contextFromReview(review: HandoffSourceReview) {
     execution_id: review.execution_id,
     session_id: review.session_id,
     session_version: review.session_version,
+    ...(review.session_last_sequence === undefined ? {} : { session_last_sequence: review.session_last_sequence }),
     worker_id: review.worker_id,
     binding_version: review.binding_version,
     run_id: review.run_id,

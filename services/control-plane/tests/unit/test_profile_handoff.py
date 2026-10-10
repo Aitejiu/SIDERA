@@ -630,6 +630,8 @@ def native_handoff_validator_case(monkeypatch):
     stored_bytes = stored_payload.canonical_bytes()
     case.payload = replace(
         stored_payload,
+        source_session_version=5,
+        source_session_last_sequence=3,
         input_plan={"pending_inputs": ["input:original"]},
         impact_summary={
             "worker_item_context_version": 1,
@@ -702,6 +704,10 @@ def native_handoff_validator_case(monkeypatch):
         assert uow is case.uow and workspace_id == payload.workspace_id
         assert address in (
             case.address,
+            {
+                **case.address,
+                "session_last_sequence": payload.source_session_last_sequence,
+            },
             {**case.address, "execution_mode": "native_profile"},
         )
         assert (assignee, profile, reason, instruction, expected_version) == (
@@ -808,6 +814,544 @@ def assert_native_heartbeat_inspection(case, *, authorizations):
     assert case.public.calls == [("get_run", payload.source_run_id)]
     assert len(case.target_calls) == 2
     assert len(case.authorize_calls) == authorizations
+
+
+@pytest.fixture
+def native_observation_case(monkeypatch):
+    from sidera_control_plane.application.agent_worker_adapter import (
+        NativeContextPreparationReceipt,
+    )
+    from sidera_control_plane.application.handoff_commands import HandoffCommandHandler
+    from sidera_control_plane.domain.context_packages import (
+        ContextConsumerType,
+        ContextPurpose,
+    )
+    from sidera_control_plane.domain.inputs import ExecutionInput
+    from sidera_control_plane.domain.plan_revisions import RootTaskPlanHead
+    from sidera_control_plane.domain.work_context import WorkContext, WorkContextStatus
+    from sidera_control_plane.domain.worker_item import WorkerItem
+    from sidera_control_plane.domain.worker_item_projections import (
+        WorkerItemPlacementFact,
+    )
+    from tests.unit.test_context_materialization import _manifest, _revision
+    from tests.unit.test_handoff_target import MemoryRepository
+    from tests.unit.test_native_handoff_drain import NOW as DRAIN_NOW
+    from tests.unit.test_native_handoff_drain import DrainRecords, make_drain_case
+
+    case = make_drain_case()
+    payload = case.uow.handoff_transitions.item.native_payload
+    case.uow.handoff_transitions.item = None
+    case.item = WorkerItem.create(
+        item_id=payload.worker_item_id,
+        workspace_id=payload.workspace_id,
+        root_task_id=payload.root_task_id,
+        title="Original native source",
+        responsibility="Retain accepted inputs across handoff",
+        now=DRAIN_NOW,
+    )
+    case.head = RootTaskPlanHead(
+        payload.workspace_id,
+        payload.root_task_id,
+        payload.observed_plan_snapshot_id,
+        1,
+        "a" * 64,
+        1,
+        DRAIN_NOW,
+    )
+    case.placement = WorkerItemPlacementFact(
+        case.head.active_snapshot_id,
+        1,
+        case.item.id,
+        case.item.stable_key,
+        "source",
+        payload.subtask_id,
+        "implementer",
+        ("code",),
+    )
+    case.revision = replace(_revision(), workspace_id=payload.workspace_id)
+    case.context = WorkContext(
+        case.revision.work_context_id,
+        payload.workspace_id,
+        case.revision.brief_planning_request_id,
+        payload.root_task_id,
+        WorkContextStatus.ACTIVE,
+        case.revision.revision_id,
+        case.revision.revision_number,
+        1,
+        DRAIN_NOW,
+        DRAIN_NOW,
+    )
+    case.package = replace(
+        _manifest(
+            case.revision,
+            created_at=DRAIN_NOW,
+            expires_at=DRAIN_NOW + timedelta(minutes=5),
+        ),
+        workspace_id=payload.workspace_id,
+        purpose=ContextPurpose.EXECUTION,
+        consumer_type=ContextConsumerType.WORKER,
+        consumer_id=payload.source_execution_id,
+        worker_item_id=case.item.id,
+        context_version=1,
+    )
+    prepared = NativeContextPreparationReceipt.model_validate(case.link.preparation)
+    case.link = replace(
+        case.link,
+        preparation=prepared.model_copy(
+            update={
+                "package_id": case.package.package_id,
+                "package_hash": case.package.package_hash,
+                "revision_id": case.revision.revision_id,
+                "revision_hash": case.revision.content_hash,
+            }
+        ).model_dump(mode="json"),
+    )
+    case.uow.worker_items = DrainRecords((case.item,))
+    case.uow.worker_items.get_current_placement = lambda *a: case.placement
+    case.uow.plans = SimpleNamespace(get_head=lambda *a, **k: case.head)
+    case.uow.results = SimpleNamespace(get_head=lambda *a, **k: None)
+    case.uow.plan_transitions = SimpleNamespace(list_for_root=lambda *a: ())
+    case.uow.context_packages = SimpleNamespace(get=lambda *a, **k: case.package)
+    case.uow.work_contexts = SimpleNamespace(
+        get_by_root_task=lambda *a, **k: case.context,
+        get_revision=lambda *a, **k: case.revision,
+    )
+    case.uow.handoff_proposals = MemoryRepository(())
+
+    def get_proposal(identifier, workspace_id, **kwargs):
+        proposal = case.uow.handoff_proposals.values.get(identifier)
+        return (
+            proposal
+            if proposal is not None and proposal.payload.workspace_id == workspace_id
+            else None
+        )
+
+    case.uow.handoff_proposals.get = get_proposal
+    case.uow.handoff_proposals.find_prepared_for_worker_item = lambda *a, **k: None
+    case.uow.handoff_proposals.save_status = case.uow.handoff_proposals.save
+    case.uow.tasks = SimpleNamespace(get=lambda *a, **k: object())
+    case.uow.handoff_transitions.added = []
+    case.uow.handoff_transitions.add = case.uow.handoff_transitions.added.append
+    case.accepted_input = ExecutionInput.accept(
+        id=uuid4(),
+        workspace_id=payload.workspace_id,
+        execution_id=payload.source_execution_id,
+        session_id=payload.source_session_id,
+        client_idempotency_key="already-accepted",
+        text="Keep this accepted input",
+        attachment_refs=(),
+        source_command_id=uuid4(),
+        now=DRAIN_NOW,
+    )
+    case.uow.execution_inputs = DrainRecords((case.accepted_input,))
+    get_lease = case.uow.leases.get_active_for_execution
+    case.uow.leases.get_active_for_execution = lambda execution_id, workspace_id, **k: (
+        get_lease(execution_id, **k)
+    )
+    session = case.uow.sessions.values[payload.source_session_id]
+    session.version = 2
+
+    def advance(sequence):
+        while session.last_sequence < sequence:
+            session.record_activity(sequence=session.last_sequence + 1, now=DRAIN_NOW)
+
+    case.advance = advance
+    advance(3)
+    case.address = {
+        "worker_item_id": case.item.id,
+        "execution_id": payload.source_execution_id,
+        "session_id": session.id,
+        "worker_id": session.worker_id,
+        "run_id": payload.source_run_id,
+        "binding_version": 1,
+        "session_version": 5,
+        "session_last_sequence": 3,
+        "context_version": 1,
+        "plan_generation": 1,
+    }
+    case.payload = replace(
+        payload,
+        source_session_version=5,
+        source_session_last_sequence=3,
+        input_plan={"pending_inputs": ["input:already-accepted"]},
+    )
+    case.snapshot = RunSnapshot.model_validate(
+        {**case.snapshot.model_dump(), "state": "running"}
+    )
+    case.validator = ProfileHandoffValidator(
+        assignments=SimpleNamespace(
+            authorize_target=lambda *a: None,
+            resolve_profile=lambda *a: (payload.target_profile_ref, ()),
+        ),
+        identity=TrustedAssignmentIdentity(
+            case.authority.principal_id, case.services.catalog_grant_id
+        ),
+        native_services=case.services,
+        clock=lambda: DRAIN_NOW,
+    )
+    case.handler = HandoffCommandHandler(
+        lambda: DRAIN_NOW,
+        candidate_service=None,
+        native_validator=case.validator,
+    )
+    case.locked_sequence = None
+    get_session = case.uow.sessions.get_any
+
+    def get_any(*a, **k):
+        if k.get("for_update") and case.locked_sequence is not None:
+            advance(case.locked_sequence)
+        return get_session(*a, **k)
+
+    monkeypatch.setattr(case.uow.sessions, "get_any", get_any)
+    case.read_sequence = None
+    get_run = case.public.get_run
+
+    def read_run(*a, **k):
+        if case.read_sequence is not None:
+            advance(case.read_sequence)
+        return get_run(*a, **k)
+
+    monkeypatch.setattr(case.public, "get_run", read_run)
+    return case
+
+
+def test_native_handoff_real_collect_returns_current_trace_pair(
+    native_observation_case,
+):
+    case = native_observation_case
+    arguments = {
+        "reason": case.payload.handoff_reason,
+        "instruction": case.payload.handoff_instruction,
+        "input_plan": case.payload.input_plan,
+        "expected_version": 1,
+    }
+    first = case.validator.collect(
+        case.uow,
+        case.payload.workspace_id,
+        case.address,
+        case.payload.target_assignee,
+        case.payload.target_profile_ref,
+        **arguments,
+    )
+    assert (first.source_session_version, first.source_session_last_sequence) == (5, 3)
+    case.advance(6)
+    latest = case.validator.collect(
+        case.uow,
+        case.payload.workspace_id,
+        case.address,
+        case.payload.target_assignee,
+        case.payload.target_profile_ref,
+        **arguments,
+    )
+    assert (latest.source_session_version, latest.source_session_last_sequence) == (
+        8,
+        6,
+    )
+
+
+def test_native_handoff_collect_prepare_and_confirm_tolerate_trace_progress(
+    native_observation_case,
+):
+    case = native_observation_case
+    envelope = native_heartbeat_prepare_envelope(case)
+    original = deepcopy(envelope)
+    accepted = deepcopy(case.accepted_input)
+    case.validator.preflight(case.uow, envelope)
+    case.read_sequence, case.locked_sequence = 6, 9
+    result = case.handler.handle(case.uow, envelope)
+    proposal = case.uow.handoff_proposals.get(
+        result.aggregate_id, envelope.workspace_id
+    )
+    payload = proposal.payload
+    assert (payload.source_session_version, payload.source_session_last_sequence) == (
+        11,
+        9,
+    )
+    assert payload.input_plan == {"pending_inputs": ("input:already-accepted",)}
+    assert case.uow.handoff_transitions.added == []
+    assert case.uow.executions.added == []
+    canonical, content_hash = payload.canonical_bytes(), payload.content_hash
+    case.advance(12)
+    case.read_sequence, case.locked_sequence = 15, 18
+    confirm = replace(
+        envelope,
+        id=uuid4(),
+        command_type="ConfirmProfileHandoff",
+        target_type="handoff_proposal",
+        target_id=proposal.id,
+        expected_version=proposal.version,
+        payload={
+            "proposal_id": str(proposal.id),
+            "expected_proposal_version": proposal.version,
+            "expected_proposal_hash": content_hash,
+            "expected_worker_item_version": 1,
+        },
+    )
+    case.handler.handle(case.uow, confirm)
+    assert (
+        payload.canonical_bytes() == canonical and payload.content_hash == content_hash
+    )
+    transition = case.uow.handoff_transitions.added[0]
+    assert transition.native_payload is payload
+    assert transition.source_input_cutoff_sequence == 9
+    assert (
+        transition.target_execution_id is None and transition.target_session_id is None
+    )
+    assert case.uow.executions.added == []
+    assert envelope == original
+    assert case.uow.sessions.saved == []
+    assert case.uow.execution_inputs.values[accepted.id] == accepted
+    assert case.uow.execution_inputs.saved == case.uow.execution_inputs.added == []
+
+
+@pytest.mark.parametrize(
+    "change", ["principal", "historical_profile", "run", "session", "worker"]
+)
+def test_native_handoff_original_provenance_stays_exact(
+    native_observation_case, change
+):
+    case = native_observation_case
+    if change == "principal":
+        case.authority = replace(case.authority, principal_id="another-user")
+    elif change == "historical_profile":
+        case.original_selected = replace(
+            case.original_selected,
+            profile_ref=case.original_selected.profile_ref.model_copy(
+                update={"revision": 2}
+            ),
+        )
+    elif change == "run":
+        case.link = replace(case.link, run_id=uuid4())
+    else:
+        session = case.uow.sessions.values[case.payload.source_session_id]
+        if change == "session":
+            session.execution_id = uuid4()
+        else:
+            session.worker_id = uuid4()
+    with pytest.raises(AssignmentDenied, match="original native handoff"):
+        case.validator.original(case.uow, case.payload.workspace_id, case.address)
+
+
+@pytest.mark.parametrize("proof", [None, "missing"])
+def test_native_handoff_collect_without_proof_keeps_exact_version(
+    native_observation_case, proof
+):
+    case = native_observation_case
+    envelope = native_heartbeat_prepare_envelope(case)
+    address = envelope.payload["context"]
+    if proof == "missing":
+        del address["session_last_sequence"]
+    else:
+        address["session_last_sequence"] = None
+    case.advance(6)
+    with pytest.raises(AssignmentDenied, match="source or plan changed"):
+        case.validator.prepare_payload(case.uow, envelope, max_proposal_ttl_seconds=300)
+
+
+@pytest.mark.parametrize("proof", [True, -1, 5, 6, 3.0, "3", {}, []])
+def test_native_handoff_address_rejects_invalid_proof(native_observation_case, proof):
+    case = native_observation_case
+    envelope = native_heartbeat_prepare_envelope(case)
+    envelope.payload["context"]["session_last_sequence"] = proof
+    with pytest.raises(ValidationError):
+        case.validator.address(envelope.payload)
+
+
+@pytest.mark.parametrize("boundary", ["before", "locked"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "version_only",
+        "sequence_only",
+        "regression",
+        "invalid_sequence",
+        "closed_session",
+        "execution",
+        "authority",
+        "lease",
+        "fence",
+        "profile",
+        "context",
+        "generation",
+        "plan_head",
+        "manifest",
+        "target",
+    ],
+)
+def test_native_handoff_trace_tolerance_keeps_real_control_pins_exact(
+    native_observation_case,
+    monkeypatch,
+    change,
+    boundary,
+):
+    from sidera_control_plane.domain.errors import DomainError
+
+    case = native_observation_case
+    envelope = native_heartbeat_prepare_envelope(case)
+    payload = case.validator.prepare_payload(
+        case.uow, envelope, max_proposal_ttl_seconds=300
+    )
+    canonical, content_hash = payload.canonical_bytes(), payload.content_hash
+
+    def change_pin():
+        session = case.uow.sessions.values[payload.source_session_id]
+        execution = case.uow.executions.values[payload.source_execution_id]
+        if change == "version_only":
+            session.version += 1
+        elif change == "sequence_only":
+            session.last_sequence += 1
+        elif change == "regression":
+            session.version, session.last_sequence = 4, 2
+        elif change == "invalid_sequence":
+            session.last_sequence = True
+        elif change == "closed_session":
+            session.close(lost=False, now=case.validator.clock())
+        elif change == "execution":
+            execution.version += 1
+        elif change == "authority":
+            case.authority = replace(case.authority, revoked=True)
+        elif change in {"lease", "fence"}:
+            lease = case.uow.leases.values[case.authority.lease_id]
+            if change == "lease":
+                lease.expires_at = case.validator.clock()
+            else:
+                lease.fencing_token += 1
+        elif change == "profile":
+            case.selected = replace(
+                case.selected,
+                profile_ref=case.selected.profile_ref.model_copy(
+                    update={"revision": 2}
+                ),
+            )
+        elif change == "context":
+            case.context.version += 1
+        elif change == "generation":
+            case.head.active_generation += 1
+        elif change == "plan_head":
+            case.head.version += 1
+        elif change == "manifest":
+            case.uow.workspaces.values[
+                payload.source_workspace_manifest_id
+            ].version += 1
+        else:
+            case.validator.assignments.resolve_profile = lambda *a: (
+                None,
+                ("unavailable",),
+            )
+
+    case.advance(6)
+    if boundary == "before":
+        change_pin()
+    else:
+        get_run = case.public.get_run
+
+        def changed_during_read(*a, **k):
+            result = get_run(*a, **k)
+            change_pin()
+            return result
+
+        monkeypatch.setattr(case.public, "get_run", changed_during_read)
+    with pytest.raises(DomainError):
+        case.validator.validate_payload(case.uow, payload)
+    assert (
+        payload.canonical_bytes() == canonical and payload.content_hash == content_hash
+    )
+    assert case.uow.executions.added == case.uow.sessions.saved == []
+
+
+def test_native_handoff_confirmation_rejects_expired_proposal_despite_trace(
+    native_observation_case,
+):
+    from sidera_control_plane.application.handoff_commands import HandoffCommandError
+
+    case = native_observation_case
+    envelope = native_heartbeat_prepare_envelope(case)
+    result = case.handler.handle(case.uow, envelope)
+    proposal = case.uow.handoff_proposals.get(
+        result.aggregate_id, envelope.workspace_id
+    )
+    proposal.expires_at = case.validator.clock()
+    case.advance(9)
+    confirm = replace(
+        envelope,
+        id=uuid4(),
+        command_type="ConfirmProfileHandoff",
+        target_type="handoff_proposal",
+        target_id=proposal.id,
+        expected_version=proposal.version,
+        payload={
+            "proposal_id": str(proposal.id),
+            "expected_proposal_version": proposal.version,
+            "expected_proposal_hash": proposal.payload.content_hash,
+            "expected_worker_item_version": 1,
+        },
+    )
+    with pytest.raises(HandoffCommandError, match="no longer prepared"):
+        case.handler.handle(case.uow, confirm)
+    assert case.uow.handoff_transitions.added == case.uow.executions.added == []
+
+
+@pytest.mark.parametrize(
+    ("current_sequence", "snapshot_sequence", "accepted"),
+    [(6, 8, False), (6, 9, True), (12, 11, False), (12, 12, True)],
+)
+def test_native_checkpoint_retains_original_cutoff_floor_and_current_history(
+    native_observation_case,
+    current_sequence,
+    snapshot_sequence,
+    accepted,
+):
+    from sidera_control_plane.application.worker_gateway import GatewayMessageError
+    from sidera_control_plane.domain.handoffs import HandoffTransition
+
+    case = native_observation_case
+    case.advance(9)
+    envelope = native_heartbeat_prepare_envelope(case)
+    result = case.handler.handle(case.uow, envelope)
+    proposal = case.uow.handoff_proposals.get(
+        result.aggregate_id, envelope.workspace_id
+    )
+    proposal.mark_confirmed(now=case.validator.clock())
+    transition = HandoffTransition.create(
+        id=uuid4(),
+        proposal=proposal,
+        confirmed_by_type="user",
+        confirmed_by_id=case.authority.principal_id,
+        confirmed_at=case.validator.clock(),
+    )
+    transition.start(now=case.validator.clock())
+    transition.lease_owner = "checkpoint-owner"
+    transition.lease_expires_at = case.validator.clock() + timedelta(minutes=1)
+    case.uow.handoff_transitions.item = transition
+    stored = case.uow.sessions.values[proposal.payload.source_session_id]
+    # Supply a bounded repository read on either side of the immutable floor.
+    case.uow.sessions.values[stored.id] = replace(
+        stored,
+        version=current_sequence + 2,
+        last_sequence=current_sequence,
+    )
+    case.snapshot = RunSnapshot.model_validate(
+        {
+            **case.snapshot.model_dump(),
+            "last_event_sequence": snapshot_sequence,
+        }
+    )
+    canonical, content_hash = (
+        proposal.payload.canonical_bytes(),
+        proposal.payload.content_hash,
+    )
+    accepted_input = deepcopy(case.accepted_input)
+    if accepted:
+        evidence = case.service.checkpoint(transition)
+        assert evidence.accepted_sequence == snapshot_sequence
+    else:
+        with pytest.raises(GatewayMessageError, match="snapshot is stale"):
+            case.service.checkpoint(transition)
+    assert case.uow.handoff_transitions.item.source_input_cutoff_sequence == 9
+    assert proposal.payload.canonical_bytes() == canonical
+    assert proposal.payload.content_hash == content_hash
+    assert case.uow.execution_inputs.values[accepted_input.id] == accepted_input
+    assert case.uow.execution_inputs.saved == case.uow.execution_inputs.added == []
 
 
 @pytest.mark.parametrize(

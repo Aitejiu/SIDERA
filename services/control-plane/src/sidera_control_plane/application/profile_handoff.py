@@ -60,6 +60,7 @@ from sidera_control_plane.domain.handoffs import (
     HandoffPhase,
     NativeHandoffProposalPayload,
 )
+from sidera_control_plane.domain.session_observation import session_observation_matches
 from sidera_control_plane.domain.workspace import (
     workspace_location_ref_hash,
     workspace_manifest_digest,
@@ -302,9 +303,20 @@ NATIVE_CONTEXT_KEYS = frozenset(
 def _same_native_handoff_source(
     current: NativeHandoffProposalPayload, expected: NativeHandoffProposalPayload
 ) -> bool:
-    # Native slot heartbeats change Worker version, not the pinned execution.
+    # Only Worker heartbeats and proven Session observations may drift.
     return (
-        replace(current, source_worker_version=expected.source_worker_version)
+        session_observation_matches(
+            expected_version=expected.source_session_version,
+            expected_last_sequence=expected.source_session_last_sequence,
+            current_version=current.source_session_version,
+            current_last_sequence=current.source_session_last_sequence,
+        )
+        and replace(
+            current,
+            source_worker_version=expected.source_worker_version,
+            source_session_version=expected.source_session_version,
+            source_session_last_sequence=expected.source_session_last_sequence,
+        )
         == expected
     )
 
@@ -371,6 +383,7 @@ class ProfileHandoffValidator:
             "run_id": payload.source_run_id,
             "binding_version": payload.source_binding_version,
             "session_version": payload.source_session_version,
+            "session_last_sequence": payload.source_session_last_sequence,
             "context_version": payload.impact_summary["worker_item_context_version"],
             "plan_generation": payload.observed_plan_generation,
         }
@@ -463,7 +476,10 @@ class ProfileHandoffValidator:
 
     def address(self, payload):
         address = payload.get("context")
-        if not isinstance(address, Mapping) or set(address) != NATIVE_CONTEXT_KEYS:
+        if not isinstance(address, Mapping) or set(address) not in (
+            NATIVE_CONTEXT_KEYS,
+            NATIVE_CONTEXT_KEYS | {"session_last_sequence"},
+        ):
             raise ValidationError("exact native handoff context required")
         if address["execution_mode"] != "native_profile":
             raise ValidationError("native handoff context required")
@@ -474,10 +490,19 @@ class ProfileHandoffValidator:
                     values[key] = UUID(str(value))
                 except (TypeError, ValueError):
                     raise ValidationError("invalid native context identity") from None
+            elif key == "session_last_sequence":
+                values[key] = value
             elif key != "execution_mode":
                 if type(value) is not int or value < 1:
                     raise ValidationError("native context version must be positive")
                 values[key] = value
+        if not session_observation_matches(
+            expected_version=values["session_version"],
+            expected_last_sequence=values.get("session_last_sequence"),
+            current_version=values["session_version"],
+            current_last_sequence=values.get("session_last_sequence"),
+        ):
+            raise ValidationError("invalid native Session observation proof")
         return values
 
     def original(self, uow, workspace_id, address, *, lock=False):
@@ -682,7 +707,12 @@ class ProfileHandoffValidator:
             item.status.value != "active"
             or execution.status.value != "running"
             or session.status.value != "active"
-            or session.version != address["session_version"]
+            or not session_observation_matches(
+                expected_version=address["session_version"],
+                expected_last_sequence=address.get("session_last_sequence"),
+                current_version=session.version,
+                current_last_sequence=session.last_sequence,
+            )
             or item.context_version != address["context_version"]
             or head is None
             or head.active_snapshot_id != placement.plan_snapshot_id

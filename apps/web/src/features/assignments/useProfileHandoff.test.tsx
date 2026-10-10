@@ -371,6 +371,14 @@ function mountHook(
   return { ...query, ...hook, onRefresh };
 }
 
+function traceContext(version: number, sequence: number): NativeWorkerContextView {
+  return {
+    ...structuredClone(nativeContext),
+    execution: { ...nativeContext.execution!, event_cursor: sequence + 70 },
+    context: { ...nativeContext.context!, session_version: version, session_last_sequence: sequence },
+  };
+}
+
 afterEach(() => {
   server.resetHandlers();
   localStorage.clear();
@@ -379,6 +387,188 @@ afterEach(() => {
 });
 
 describe("useProfileHandoff", () => {
+  it("prepares from the fresh trace proof and confirms without rewriting the frozen original", async () => {
+    installReads();
+    document.cookie = "sidera_csrf=owned-csrf; Path=/";
+    let current = traceContext(5, 3);
+    let canonicalProposal = proposal;
+    const cachedWorkspace = { ...workspace, current_runtime: { ...workspace.current_runtime!, session_version: 4 } };
+    const posted: CommandRequest[] = [];
+    server.use(
+      http.get(`${base}/worker-items/${workerItemId}/native-context`, () => HttpResponse.json(current)),
+      http.get(`${base}/handoff-proposals/${proposalId}`, () => HttpResponse.json(canonicalProposal)),
+      http.post("/api/v1/commands", async ({ request }) => {
+        const command = await request.json() as CommandRequest;
+        posted.push(command);
+        const stored = JSON.parse(localStorage.getItem(handoffDraftKey(scope)) ?? "null");
+        if (command.command_type === "PrepareProfileHandoff") {
+          expect(command.payload.context).toEqual({ ...contextAddress, session_version: 8, session_last_sequence: 6 });
+          expect(stored.source_review).toMatchObject({ session_version: 8, session_last_sequence: 6 });
+          expect(stored.actions.prepare).toEqual({ original: command, status: "pending", rejectionCode: null });
+          current = traceContext(11, 9);
+          return HttpResponse.json({ command_id: command.command_id, aggregate_id: proposal.id,
+            aggregate_version: 1, event_ids: [], data: { proposal } } satisfies CommandResponse);
+        }
+        canonicalProposal = confirmedProposal;
+        return HttpResponse.json({ command_id: command.command_id, aggregate_id: transition.id,
+          aggregate_version: 1, event_ids: [], data: { proposal: confirmedProposal, transition } } satisfies CommandResponse);
+      }),
+    );
+    const onRefresh = async () => {
+      if (current.context?.session_version === 5) current = traceContext(8, 6);
+    };
+    const first = mountHook(profileTarget, onRefresh, cachedWorkspace);
+    await waitFor(() => expect(first.result.current.sourceReview).toMatchObject({ session_version: 5, session_last_sequence: 3 }));
+    act(() => {
+      first.result.current.setReason(proposal.handoff_reason);
+      first.result.current.setInstruction(proposal.handoff_instruction);
+    });
+    await waitFor(() => expect(first.result.current.canPrepare).toBe(true));
+    expect(posted).toHaveLength(0);
+    await act(async () => first.result.current.prepare());
+    await waitFor(() => expect(first.result.current.canConfirm).toBe(true));
+    expect(posted).toHaveLength(1);
+    const originalBytes = JSON.stringify(first.result.current.actions.prepare.original);
+    const anchorBytes = JSON.stringify(first.result.current.prepared);
+    expect(first.result.current.isStale).toBe(false);
+    first.unmount();
+
+    current = traceContext(14, 12);
+    const reloaded = mountHook(profileTarget, onRefresh, cachedWorkspace);
+    await waitFor(() => expect(reloaded.result.current.canConfirm).toBe(true));
+    expect(JSON.stringify(reloaded.result.current.actions.prepare.original)).toBe(originalBytes);
+    expect(JSON.stringify(reloaded.result.current.prepared)).toBe(anchorBytes);
+    current = traceContext(17, 15);
+    await act(async () => reloaded.result.current.confirm());
+    await waitFor(() => expect(reloaded.result.current.transitionId).toBe(transition.id));
+    expect(posted.map((command) => command.command_type)).toEqual(["PrepareProfileHandoff", "ConfirmProfileHandoff"]);
+    expect(posted[1]?.payload).toEqual({ proposal_id: proposal.id,
+      expected_proposal_version: 1, expected_proposal_hash: proposal.proposal_hash,
+      expected_worker_item_version: 7 });
+    expect(JSON.stringify(reloaded.result.current.actions.prepare.original)).toBe(originalBytes);
+    expect(JSON.stringify(reloaded.result.current.prepared)).toBe(anchorBytes);
+  });
+
+  it.each(["prepare", "confirm"] as const)("keeps trace-proven UNKNOWN %s query-only across reload", async (lost) => {
+    installReads();
+    document.cookie = "sidera_csrf=owned-csrf; Path=/";
+    let current = traceContext(5, 3);
+    const posted: CommandRequest[] = [];
+    const cachedWorkspace = { ...workspace, current_runtime: { ...workspace.current_runtime!, session_version: 4 } };
+    server.use(
+      http.get(`${base}/worker-items/${workerItemId}/native-context`, () => HttpResponse.json(current)),
+      http.post("/api/v1/commands", async ({ request }) => {
+        const command = await request.json() as CommandRequest;
+        posted.push(command);
+        if (lost === "prepare" || command.command_type === "ConfirmProfileHandoff") return HttpResponse.error();
+        return HttpResponse.json({ command_id: command.command_id, aggregate_id: proposal.id,
+          aggregate_version: 1, event_ids: [], data: { proposal } } satisfies CommandResponse);
+      }),
+    );
+    const first = mountHook(profileTarget, undefined, cachedWorkspace);
+    await waitFor(() => expect(first.result.current.sourceReview).not.toBeNull());
+    act(() => {
+      first.result.current.setReason(proposal.handoff_reason);
+      first.result.current.setInstruction(proposal.handoff_instruction);
+    });
+    await waitFor(() => expect(first.result.current.canPrepare).toBe(true));
+    current = traceContext(8, 6);
+    await act(async () => first.result.current.prepare());
+    if (lost === "confirm") {
+      await waitFor(() => expect(first.result.current.canConfirm).toBe(true));
+      current = traceContext(11, 9);
+      await act(async () => first.result.current.confirm());
+    }
+    await waitFor(() => expect(first.result.current.actions[lost].status).toBe("unknown"));
+    const originalBytes = JSON.stringify(first.result.current.actions[lost].original);
+    const reviewBytes = JSON.stringify(first.result.current.sourceReview);
+    const original = posted.at(-1)!;
+    const count = posted.length;
+    first.unmount();
+    current = traceContext(23, 21);
+    const commandReads: string[] = [];
+    server.use(http.get(`${base}/commands/${original.command_id}`, () => {
+      commandReads.push(original.command_id);
+      return HttpResponse.json({ command_id: original.command_id, command_type: original.command_type,
+        target_type: original.target_type, target_id: original.target_id,
+        expected_version: original.expected_version, status: "pending", result: null });
+    }));
+    const reloaded = mountHook(humanTarget, undefined, cachedWorkspace);
+    await waitFor(() => expect(reloaded.result.current.canLookupOriginal).toBe(true));
+    await act(async () => {
+      await reloaded.result.current.prepare();
+      await reloaded.result.current.confirm();
+      await reloaded.result.current.lookupOriginal();
+    });
+    expect(posted).toHaveLength(count);
+    expect(commandReads).toEqual([original.command_id]);
+    expect(JSON.stringify(reloaded.result.current.actions[lost].original)).toBe(originalBytes);
+    expect(JSON.stringify(reloaded.result.current.sourceReview)).toBe(reviewBytes);
+  });
+
+  it.each((["prepare", "confirm"] as const).flatMap((action) =>
+    ["version_only", "sequence_only", "regression", "invalid_proof", "run", "session", "execution", "profile", "binding", "context", "generation", "inactive", "target"].map((change) => ({ action, change })),
+  ))("rejects $change drift before $action despite native trace proof", async ({ action, change }) => {
+    installReads();
+    document.cookie = "sidera_csrf=owned-csrf; Path=/";
+    let current = traceContext(5, 3);
+    let targetEnabled = true;
+    const posted: CommandRequest[] = [];
+    const cachedWorkspace = { ...workspace, current_runtime: { ...workspace.current_runtime!, session_version: 4 } };
+    server.use(
+      http.get(`${base}/worker-items/${workerItemId}/native-context`, () => HttpResponse.json(current)),
+      http.get(`${base}/assignments/worker_item/${workerItemId}`, () => HttpResponse.json(current.binding)),
+      http.get(`/agents/v1/workspaces/${workspaceId}/profiles/${PROFILE_REF.profile_id}`, () =>
+        HttpResponse.json({ ...PROFILE, status: { ...PROFILE.status, enabled: targetEnabled } })),
+      http.post("/api/v1/commands", async ({ request }) => {
+        const command = await request.json() as CommandRequest;
+        posted.push(command);
+        return HttpResponse.json({ command_id: command.command_id, aggregate_id: proposal.id,
+          aggregate_version: 1, event_ids: [], data: { proposal } } satisfies CommandResponse);
+      }),
+    );
+    const view = mountHook(profileTarget, undefined, cachedWorkspace);
+    await waitFor(() => expect(view.result.current.sourceReview).not.toBeNull());
+    act(() => {
+      view.result.current.setReason(proposal.handoff_reason);
+      view.result.current.setInstruction(proposal.handoff_instruction);
+    });
+    await waitFor(() => expect(view.result.current.canPrepare).toBe(true));
+    if (action === "confirm") {
+      await act(async () => view.result.current.prepare());
+      await waitFor(() => expect(view.result.current.canConfirm).toBe(true));
+    }
+    const originalBytes = JSON.stringify(view.result.current.actions.prepare.original);
+    const anchorBytes = JSON.stringify(view.result.current.prepared);
+    const count = posted.length;
+    current = traceContext(11, 9);
+    if (change === "version_only") current.context!.session_last_sequence = 3;
+    if (change === "sequence_only") current.context!.session_version = 5;
+    if (change === "regression") current = traceContext(4, 2);
+    if (change === "invalid_proof") current.context!.session_last_sequence = 11;
+    if (change === "run") current.context!.run_id = current.execution!.run_id = "changed-run";
+    if (change === "session") current.context!.session_id = "changed-session";
+    if (change === "execution") current.context!.execution_id = current.execution!.execution_id = "changed-execution";
+    if (change === "profile") {
+      const profile = { ...sourceProfileRef, revision: 2 };
+      current.binding = { ...sourceBinding, profile_ref: profile };
+      current.execution!.profile_ref = current.run!.profile_ref = profile;
+    }
+    if (change === "binding") {
+      current.binding = { ...sourceBinding, version: 3 };
+      current.execution!.binding_version = current.context!.binding_version = 3;
+    }
+    if (change === "context") current.context!.context_version = 5;
+    if (change === "generation") current.context!.plan_generation = 3;
+    if (change === "inactive") current.run!.state = "completed";
+    if (change === "target") targetEnabled = false;
+    await act(async () => view.result.current[action]());
+    expect(posted).toHaveLength(count);
+    expect(view.result.current.actions[action]).toEqual({ original: null, status: "idle", rejectionCode: null });
+    expect(JSON.stringify(view.result.current.actions.prepare.original)).toBe(originalBytes);
+    expect(JSON.stringify(view.result.current.prepared)).toBe(anchorBytes);
+  });
+
   it("allows target editing after source review before Prepare fields are complete", async () => {
     installReads();
     const view = mountHook(null);

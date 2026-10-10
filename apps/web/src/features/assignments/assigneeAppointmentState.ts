@@ -1,5 +1,6 @@
 import type { TaskView } from "@/features/tasks/types";
 import type { WorkerWorkspace } from "@/features/worker-items/types";
+import { sessionObservationMatches } from "@/shared/sessionObservation";
 import type {
   AgentBindingView,
   AgentExecutionView,
@@ -233,7 +234,7 @@ export function reviewAppointmentFacts(facts: AppointmentFacts): AppointmentRevi
     return {
       ok: true,
       action: "handoff_required",
-      review: workerReview(workerWorkspace, nativeContext, binding, workerWorkspace.worker_item.version),
+      review: workerReview(workerWorkspace, nativeContext, binding, workerWorkspace.worker_item.version, true),
     };
   }
 
@@ -245,11 +246,12 @@ function workerReview(
   context: NativeWorkerContextView,
   binding: AgentBindingView | null,
   aggregateVersion: number,
+  activeNativeHandoffEntry = false,
 ): AppointmentReview {
   return {
     aggregateVersion,
     bindingFingerprint: bindingFingerprint(binding),
-    executionFingerprint: executionFingerprint(workspace, context),
+    executionFingerprint: executionFingerprint(workspace, context, activeNativeHandoffEntry),
   };
 }
 
@@ -266,11 +268,17 @@ function bindingFingerprint(binding: AgentBindingView | null): string {
   ]);
 }
 
-function executionFingerprint(workspace: WorkerWorkspace, context: NativeWorkerContextView): string {
+function executionFingerprint(
+  workspace: WorkerWorkspace,
+  context: NativeWorkerContextView,
+  activeNativeHandoffEntry: boolean,
+): string {
   const runtime = workspace.current_runtime;
   const saved = context.execution;
   const address = context.context;
   const run = context.run;
+  // Entry navigation tracks the control baseline; commands review ordered proof.
+  const traceEntry = activeNativeHandoffEntry && address?.session_last_sequence != null;
   const summary = saved === null
     ? null
     : workspace.execution_history.find((item) => item.execution_id === saved.execution_id) ?? null;
@@ -285,7 +293,7 @@ function executionFingerprint(workspace: WorkerWorkspace, context: NativeWorkerC
       runtime.execution_status,
       runtime.session_id,
       runtime.session_status,
-      runtime.session_version,
+      traceEntry ? null : runtime.session_version,
       runtime.task_id,
       runtime.worker_id,
     ],
@@ -302,7 +310,7 @@ function executionFingerprint(workspace: WorkerWorkspace, context: NativeWorkerC
       saved.status,
       saved.link_status,
       saved.run_id,
-      saved.event_cursor,
+      traceEntry ? null : saved.event_cursor,
       saved.binding_version,
       profileRefTuple(saved.profile_ref),
       context.execution_version ?? null,
@@ -313,7 +321,7 @@ function executionFingerprint(workspace: WorkerWorkspace, context: NativeWorkerC
       address.context_version,
       address.execution_id,
       address.session_id,
-      address.session_version,
+      traceEntry ? address.session_version - address.session_last_sequence! : address.session_version,
       address.worker_id,
       address.binding_version,
       address.run_id,
@@ -392,7 +400,12 @@ function activeWorkerFactsMatch(
     || runtime.adapter_type !== "agent-run"
     || runtime.execution_id !== address.execution_id
     || runtime.session_id !== address.session_id
-    || runtime.session_version !== address.session_version
+    || !sessionObservationMatches(address.session_version, address.session_last_sequence,
+      address.session_version, address.session_last_sequence)
+    || !positiveInteger(runtime.session_version)
+    || (address.session_last_sequence == null
+      ? runtime.session_version !== address.session_version
+      : runtime.session_version > address.session_version)
     || runtime.worker_id !== address.worker_id
     || runtime.task_id !== workspace.current_placement.subtask_task_id
     || summary.version !== context.execution_version
