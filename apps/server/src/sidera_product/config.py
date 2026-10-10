@@ -66,6 +66,9 @@ class ProductSettings(BaseSettings):
         default=60.0, gt=0, le=300, allow_inf_nan=False
     )
     agent_poll_interval_seconds: float = Field(default=0.25, gt=0, le=60)
+    agent_input_drain_deadline_seconds: float = Field(
+        default=60.0, gt=0, allow_inf_nan=False
+    )
     result_inputs_enabled: StrictBool = True
     result_integration_enabled: StrictBool = True
     notification_enabled: StrictBool = True

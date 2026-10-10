@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import FrozenInstanceError, asdict
 from hashlib import sha256
 from threading import Event
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from sidera_agents.contracts import (
 )
 from sidera_agents.errors import AgentError
 from sidera_agents.input_delivery import InputDeliverySettings
+from sidera_agents.memory import MemoryAgentStore
 
 
 def _native_workspace_authority(lab, monkeypatch, workspace, *, enabled=True):
@@ -686,6 +688,115 @@ def test_many_metadata_only_context_items_count_toward_input_byte_limit(
         ).state
         is RunState.IDLE
     )
+
+
+def test_input_delivery_settings_root_export_preserves_frozen_type_and_limits():
+    from sidera_agents import InputDeliverySettings as PublicInputDeliverySettings
+
+    assert PublicInputDeliverySettings is InputDeliverySettings
+    settings = PublicInputDeliverySettings()
+    assert asdict(settings) == {
+        "max_pending": 16,
+        "max_input_bytes": 65536,
+        "drain_deadline_seconds": 60.0,
+    }
+    with pytest.raises(FrozenInstanceError):
+        settings.drain_deadline_seconds = 7200.0
+
+
+@pytest.mark.parametrize(
+    "seconds", [0.0, -1.0, float("inf"), -float("inf"), float("nan")]
+)
+def test_input_delivery_settings_rejects_nonpositive_or_nonfinite_deadlines(seconds):
+    with pytest.raises(ValueError, match="input drain deadline"):
+        InputDeliverySettings(drain_deadline_seconds=seconds)
+
+
+@pytest.mark.parametrize(
+    "configured_seconds,elapsed,expected_status,expected_prompts",
+    [
+        (None, 95.0, InputStatus.FAILED, ["first"]),
+        (7200.0, 95.0, InputStatus.DELIVERED, ["first", "queued input"]),
+        (5.0, 6.0, InputStatus.FAILED, ["first"]),
+        (7200.0, 7201.0, InputStatus.FAILED, ["first"]),
+    ],
+)
+def test_public_input_delivery_settings_control_bounded_queue_deadline(
+    admission_lab_factory,
+    monkeypatch,
+    configured_seconds,
+    elapsed,
+    expected_status,
+    expected_prompts,
+):
+    settings = (
+        None
+        if configured_seconds is None
+        else InputDeliverySettings(drain_deadline_seconds=configured_seconds)
+    )
+    original_settings = None if settings is None else asdict(settings)
+    lab = admission_lab_factory(MemoryAgentStore(), input_delivery_settings=settings)
+    start = _start(lab, policy=RunPolicy.BOUNDED, text="first")
+    assert start.status is StartStatus.ACCEPTED
+    now = [10.0]
+    monkeypatch.setattr(lab.execution, "_monotonic", lambda: now[0])
+    entered, release = _block_next_prompt(lab, monkeypatch)
+    request = _input(lab, start.run_id, "queued input")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pumping = pool.submit(lab.pump)
+        try:
+            assert entered.wait(timeout=2)
+            accepted = lab.execution.send_input(request)
+            assert accepted.status is InputStatus.ACCEPTED
+            assert accepted.run_id == start.run_id
+            assert accepted.operation_id == request.operation_id
+            original_operation = lab.store.get_input_operation(
+                lab.workspace_id, start.run_id, request.operation_id
+            )
+            assert original_operation is not None
+            now[0] += elapsed
+            release.set()
+            pumping.result(timeout=3)
+        finally:
+            release.set()
+
+    receipt = lab.execution.get_input(
+        lab.workspace_id, start.run_id, request.operation_id, grant_id=lab.grant_id
+    )
+    assert receipt.run_id == start.run_id
+    assert receipt.operation_id == request.operation_id
+    assert receipt.status is expected_status
+    assert receipt.reason_code == (
+        "input_drain_deadline" if expected_status is InputStatus.FAILED else None
+    )
+    operation = lab.store.get_input_operation(
+        lab.workspace_id, start.run_id, request.operation_id
+    )
+    assert operation is not None
+    assert operation.run_id == start.run_id
+    assert operation.operation_id == request.operation_id
+    assert operation.response_id == original_operation.response_id
+    assert len(lab.native.open_calls) == 1
+    assert lab.native.open_calls[0].run_id == start.run_id
+    assert [call[1].text for call in lab.native.prompt_calls] == expected_prompts
+    original_handle = lab.native.handles[start.run_id]
+    assert all(call[0] is original_handle for call in lab.native.prompt_calls)
+    assert lab.native.prompt_calls[0][2] != operation.response_id
+    if expected_status is InputStatus.DELIVERED:
+        assert lab.native.prompt_calls[1][2] == operation.response_id
+        assert receipt.evidence_sequence is not None
+    else:
+        assert operation.response_id not in [
+            call[2] for call in lab.native.prompt_calls
+        ]
+    snapshot = lab.execution.get_run(
+        lab.workspace_id, start.run_id, grant_id=lab.grant_id
+    )
+    assert snapshot.run_id == start.run_id
+    assert snapshot.state is RunState.COMPLETED
+    assert snapshot.input_open is False
+    if settings is not None:
+        assert asdict(settings) == original_settings
 
 
 def test_expired_drain_fails_accepted_input_without_sending_it(

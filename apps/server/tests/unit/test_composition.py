@@ -85,6 +85,63 @@ def test_product_shares_actual_agent_public_objects_and_is_inert(
         assert runtime.close(grace_seconds=0) is True
 
 
+@pytest.mark.parametrize("seconds,expected", [(None, 60.0), (7200.0, 7200.0)])
+def test_product_passes_public_input_delivery_settings_to_actual_inert_agents(
+    settings_values, monkeypatch, no_database_connections, seconds, expected
+):
+    import sidera_agents
+    from sidera_agents import bootstrap
+    from sidera_control_plane.composition import native_runtime
+
+    composition = product_module()
+    from sidera_product.config import ProductSettings
+
+    monkeypatch.delenv(
+        "SIDERA_PRODUCT_AGENT_INPUT_DRAIN_DEADLINE_SECONDS", raising=False
+    )
+    captures = []
+    real_factory = bootstrap.create_agent_service
+
+    def capture(*args, **kwargs):
+        captures.append((args, kwargs))
+        return real_factory(*args, **kwargs)
+
+    monkeypatch.setattr(bootstrap, "create_agent_service", capture)
+    native_calls = []
+
+    def forbidden(*args, **kwargs):
+        native_calls.append((args, kwargs))
+        raise AssertionError("Construction cannot start/probe/open native work")
+
+    monkeypatch.setattr(bootstrap.AgentService, "start_background", forbidden)
+    monkeypatch.setattr(
+        native_runtime.ControlPlaneRuntime, "start_background", forbidden
+    )
+    harnesses = bootstrap.create_harness_registry().all()
+    for harness in harnesses:
+        monkeypatch.setattr(harness, "probe", forbidden)
+        monkeypatch.setattr(harness, "open", forbidden)
+    values = dict(settings_values)
+    if seconds is not None:
+        values["agent_input_drain_deadline_seconds"] = seconds
+    runtime = composition.build_product_runtime(
+        ProductSettings.model_validate(values), harnesses=harnesses
+    )
+    try:
+        assert len(captures) == 1
+        args, kwargs = captures[0]
+        assert args == ()
+        settings = kwargs["input_delivery_settings"]
+        assert type(settings) is sidera_agents.InputDeliverySettings
+        assert settings.drain_deadline_seconds == expected
+        assert settings.max_pending == 16
+        assert settings.max_input_bytes == 65536
+        assert runtime.execution is runtime.agents.execution
+        assert native_calls == []
+    finally:
+        assert runtime.close(grace_seconds=0) is True
+
+
 def test_internal_service_identity_is_stable_and_not_http_auth(
     settings_values, no_database_connections, monkeypatch
 ):

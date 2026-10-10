@@ -132,6 +132,8 @@ class RunExecution:
         runtimes,
         owner_id: UUID,
         tool_connections: ToolConnectionReader | None = None,
+        *,
+        input_delivery_settings: InputDeliverySettings | None = None,
     ) -> None:
         self._store = store
         self._registry = registry
@@ -160,7 +162,11 @@ class RunExecution:
         self._interrupt_operations: dict[tuple[UUID, UUID], InterruptReceipt] = {}
         self._in_flight_lock = RLock()
         self._in_flight_responses: set[UUID] = set()
-        self._input_settings = InputDeliverySettings()
+        self._input_settings = (
+            InputDeliverySettings()
+            if input_delivery_settings is None
+            else input_delivery_settings
+        )
         self._monotonic = monotonic
 
     def start(self, request: RunStart) -> StartReceipt:

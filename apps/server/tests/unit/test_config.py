@@ -125,6 +125,52 @@ def test_product_rejects_unsafe_owner_or_location_configuration(settings_values,
         product_settings().model_validate({**settings_values, **extra})
 
 
+@pytest.mark.parametrize("seconds,expected", [(None, 60.0), (7200.0, 7200.0)])
+def test_product_input_drain_deadline_default_and_explicit_value(
+    settings_values, monkeypatch, seconds, expected
+):
+    monkeypatch.delenv(
+        "SIDERA_PRODUCT_AGENT_INPUT_DRAIN_DEADLINE_SECONDS", raising=False
+    )
+    values = dict(settings_values)
+    if seconds is not None:
+        values["agent_input_drain_deadline_seconds"] = seconds
+    settings = product_settings().model_validate(values)
+
+    assert settings.agent_input_drain_deadline_seconds == expected
+
+
+@pytest.mark.parametrize("explicit,expected", [(None, 7200.0), (5.0, 5.0)])
+def test_product_input_drain_deadline_environment_and_explicit_precedence(
+    settings_values, monkeypatch, explicit, expected
+):
+    monkeypatch.setenv("SIDERA_PRODUCT_AGENT_INPUT_DRAIN_DEADLINE_SECONDS", "7200")
+    values = dict(settings_values)
+    if explicit is not None:
+        values["agent_input_drain_deadline_seconds"] = explicit
+    settings = product_settings()(**values)
+
+    assert settings.agent_input_drain_deadline_seconds == expected
+
+
+@pytest.mark.parametrize(
+    "seconds",
+    [0.0, -1.0, float("inf"), -float("inf"), float("nan"), "DEADLINE_SECRET_SENTINEL"],
+)
+def test_product_input_drain_deadline_rejects_invalid_values_safely(
+    settings_values, seconds
+):
+    with pytest.raises(ValidationError) as error:
+        product_settings().model_validate(
+            {**settings_values, "agent_input_drain_deadline_seconds": seconds}
+        )
+
+    assert "DEADLINE_SECRET_SENTINEL" not in str(error.value)
+    assert error.value.errors(include_input=False)[0]["loc"] == (
+        "agent_input_drain_deadline_seconds",
+    )
+
+
 def test_cp_inherited_lease_validator_is_not_bypassed(settings_values):
     from sidera_control_plane.config import Settings as ControlPlaneSettings
 

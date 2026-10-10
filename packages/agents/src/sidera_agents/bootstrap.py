@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 from .catalog import AgentStore, ProfileCatalog
 from .errors import AgentError
+from .input_delivery import InputDeliverySettings
 from .observations import RunObservations
 from .ports import (
     ContextSourceReader,
@@ -34,6 +35,8 @@ class AgentService:
         secrets: SecretReader,
         clock: Callable[[], datetime],
         tool_connections: ToolConnectionReader | None,
+        *,
+        input_delivery_settings: InputDeliverySettings | None = None,
     ) -> None:
         self._store = store
         self._owner_id: UUID = uuid4()
@@ -56,6 +59,7 @@ class AgentService:
             self.runtimes,
             self._owner_id,
             tool_connections,
+            input_delivery_settings=input_delivery_settings,
         )
         self.observations = RunObservations(self.execution, store)
 
@@ -206,6 +210,8 @@ def create_agent_service(
     secrets: SecretReader,
     clock: Callable[[], datetime],
     tool_connections: ToolConnectionReader | None = None,
+    *,
+    input_delivery_settings: InputDeliverySettings | None = None,
 ) -> AgentService:
     return AgentService(
         store,
@@ -215,6 +221,7 @@ def create_agent_service(
         secrets,
         clock,
         tool_connections,
+        input_delivery_settings=input_delivery_settings,
     )
 
 

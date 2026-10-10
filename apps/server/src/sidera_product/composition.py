@@ -7,7 +7,7 @@ from uuid import UUID, uuid5
 
 from fastapi import Request
 from pydantic import SecretStr, TypeAdapter, ValidationError
-from sidera_agents import bootstrap
+from sidera_agents import InputDeliverySettings, bootstrap
 from sidera_agents.contracts import (
     CatalogStatusTarget,
     CredentialRef,
@@ -886,6 +886,9 @@ def build_product_runtime(
         secrets=secrets,
         clock=lambda: datetime.now(UTC),
         tool_connections=tool_reader,
+        input_delivery_settings=InputDeliverySettings(
+            drain_deadline_seconds=settings.agent_input_drain_deadline_seconds,
+        ),
     )
     host.registered_harness_ids = frozenset(agents.runtimes.registered_harness_ids())
     try:

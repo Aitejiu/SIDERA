@@ -55,6 +55,7 @@ from .contracts import (
     ToolConnection,
 )
 from .errors import AgentError
+from .input_delivery import InputDeliverySettings
 from .ports import (
     ContextSourceReader,
     DenyContextSourceReader,
@@ -90,6 +91,7 @@ __all__ = [
     "EventPage",
     "ExecutionAuthorizer",
     "ExecutionWorkspace",
+    "InputDeliverySettings",
     "InputReceipt",
     "InputStatus",
     "InterruptReceipt",

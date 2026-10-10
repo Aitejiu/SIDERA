@@ -814,6 +814,7 @@ def admission_lab_factory(tmp_path):
         runtime_max_active=1,
         runtime_max_sessions=2,
         profile_max_active=1,
+        input_delivery_settings=None,
     ):
         try:
             from sidera_agents.bootstrap import create_agent_service
@@ -883,6 +884,7 @@ def admission_lab_factory(tmp_path):
             DenyContextSourceReader(),
             DenySecretReader(),
             clock,
+            input_delivery_settings=input_delivery_settings,
         )
         services.append(service)
         service.poll_once()

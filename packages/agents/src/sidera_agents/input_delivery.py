@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from hashlib import sha256
 from uuid import UUID
@@ -21,8 +22,11 @@ class InputDeliverySettings:
     def __post_init__(self) -> None:
         if self.max_pending < 1 or self.max_input_bytes < 1:
             raise ValueError("input limits must be positive")
-        if self.drain_deadline_seconds <= 0:
-            raise ValueError("input drain deadline must be positive")
+        if (
+            not math.isfinite(self.drain_deadline_seconds)
+            or self.drain_deadline_seconds <= 0
+        ):
+            raise ValueError("input drain deadline must be finite and positive")
 
 
 @dataclass(frozen=True, slots=True)
