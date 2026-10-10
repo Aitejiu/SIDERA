@@ -249,7 +249,10 @@ export function matchesProjectionQuery(
     case "subtask_workspace":
       return queryType === "subtask-workspace" && matchesResource();
     case "worker_item_workspace":
-      return queryType === "worker-item-workspace" && matchesResource();
+      return ((queryType === "worker-item-workspace"
+        || queryType === "native-worker-context") && matchesResource())
+        || (queryType === "agent-assignment"
+          && queryKey[2] === "worker_item" && matchesResource(3));
     case "worker_item_activity":
       return queryType === "worker-item-activity" && matchesResource();
     case "collaboration_governance":

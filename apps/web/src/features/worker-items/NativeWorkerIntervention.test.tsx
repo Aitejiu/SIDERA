@@ -6,8 +6,10 @@ import type { DefaultBodyType } from "msw";
 import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { createInvalidationQueue } from "@/app/WorkspaceStreamProvider";
 import { PROFILE_REF } from "@/features/agents/testFixtures";
 import type { LocalSession } from "@/features/local-session/api";
+import type { ProjectionChange } from "@/shared/api/projectionStream";
 import { workerResultInputsFixture } from "@/test/resultInputFixtures";
 import { server } from "@/test/server";
 import type {
@@ -317,6 +319,20 @@ const worldB: NativePageWorld = {
   activities: [],
 };
 
+function workerWorkspaceChange(cursor: number): ProjectionChange {
+  return {
+    workspace_id: WORKSPACE_ID,
+    cursor,
+    schema_version: 1,
+    projection_type: "worker_item_workspace",
+    resource_id: WORKER_ITEM_ID,
+    change_type: "ExecutionStarted",
+    resource_version: 9,
+    occurred_at: "2026-10-07T00:00:01Z",
+    correlation_id: "b0000000-0000-0000-0000-000000000002",
+  };
+}
+
 function RouteControls() {
   const navigate = useNavigate();
   return (
@@ -622,6 +638,226 @@ describe("NativeWorkerIntervention Page", () => {
 
     expect(await screen.findByRole("heading", { name: "介入当前 native Execution" })).toBeVisible();
     await waitFor(() => expect(screen.getByRole("textbox", { name: "介入这个 Worker" })).toBeEnabled());
+  });
+
+  it("enables a mounted pre-admission composer when its WorkerItem workspace changes", async () => {
+    const handlers = installHandlers();
+    handlers.setWorld(WORKER_ITEM_ID, {
+      ...worldA,
+      context: {
+        ...nativeContext,
+        execution: null,
+        execution_version: null,
+        context: null,
+        run: null,
+        input_enabled: false,
+        read_only_reason: "execution_not_admitted",
+      },
+      workspace: {
+        ...workspace,
+        current_runtime: null,
+        intervention_context: null,
+        trace_descriptor: null,
+        can_intervene: false,
+        read_only_reason: "execution_not_admitted",
+      },
+    });
+    const user = userEvent.setup();
+    const page = renderPage();
+    const queue = createInvalidationQueue(page.client, WORKSPACE_ID);
+
+    try {
+      const textbox = await screen.findByRole("textbox", { name: "介入这个 Worker" });
+      await waitFor(() => expect(handlers.getCompletedContextReads(WORKER_ITEM_ID)).toBe(1));
+      expect(textbox).toBeDisabled();
+      await user.click(screen.getByText("查看精确 native context"));
+      expect(screen.getByText("当前 native context 尚未确认。")).toBeVisible();
+      const contextReadsBefore = handlers.getContextReads(WORKER_ITEM_ID);
+
+      handlers.setWorld(WORKER_ITEM_ID, worldA);
+      act(() => queue.enqueue(workerWorkspaceChange(1)));
+
+      await waitFor(() => expect(textbox).toBeEnabled());
+      expect(handlers.getContextReads(WORKER_ITEM_ID)).toBeGreaterThan(contextReadsBefore);
+      expect(await screen.findByText(RUN_ID)).toBeVisible();
+      expect(screen.getByRole("button", { name: "发送到当前 Session" })).toBeDisabled();
+      expect(handlers.posted).toHaveLength(0);
+      expect(handlers.nonCommandWrites).toEqual([]);
+    } finally {
+      queue.close();
+    }
+  });
+
+  it("preserves the reviewed draft and disables Send when the stream closes its native Run", async () => {
+    const handlers = installHandlers();
+    const user = userEvent.setup();
+    const page = renderPage();
+    const queue = createInvalidationQueue(page.client, WORKSPACE_ID);
+
+    try {
+      const textbox = await screen.findByRole("textbox", { name: "介入这个 Worker" });
+      await waitFor(() => expect(textbox).toBeEnabled());
+      const initialReads = handlers.getContextReads(WORKER_ITEM_ID);
+      act(() => queue.enqueue(workerWorkspaceChange(1)));
+      await waitFor(() => expect(handlers.getContextReads(WORKER_ITEM_ID)).toBeGreaterThan(initialReads));
+      await user.type(textbox, "Keep this reviewed draft after completion");
+      await user.click(screen.getByRole("button", { name: "复核当前 context" }));
+      const send = screen.getByRole("button", { name: "发送到当前 Session" });
+      await waitFor(() => expect(send).toBeEnabled());
+      const originalReview = storedDraft(WORKER_ITEM_ID).review;
+      expect(originalReview?.context.run_id).toBe(RUN_ID);
+      const contextReadsBefore = handlers.getContextReads(WORKER_ITEM_ID);
+      await user.click(screen.getByText("查看精确 native context"));
+
+      handlers.setWorld(WORKER_ITEM_ID, {
+        ...worldA,
+        context: {
+          ...nativeContext,
+          worker_item_version: 10,
+          execution: { ...executionPin, status: "succeeded", updated_at: "2026-10-07T00:00:02Z" },
+          execution_version: 8,
+          context: { ...context, session_version: 6 },
+          input_enabled: false,
+          read_only_reason: "session_closed",
+          run: { ...nativeContext.run!, state: "completed", input_open: false },
+          as_of: "2026-10-07T00:00:02Z",
+        },
+        workspace: {
+          ...workspace,
+          worker_item: { ...workspace.worker_item, version: 10, updated_at: "2026-10-07T00:00:02Z" },
+          current_runtime: {
+            ...workspace.current_runtime!,
+            execution_status: "succeeded",
+            session_status: "closed",
+            session_version: 6,
+            lease_id: null,
+          },
+          intervention_context: { ...workspace.intervention_context!, session_version: 6 },
+          can_intervene: false,
+          read_only_reason: "session_closed",
+          last_change_cursor: 6,
+          as_of: "2026-10-07T00:00:02Z",
+        },
+        execution: {
+          ...execution,
+          active_lease_id: null,
+          status: "succeeded",
+          version: 8,
+          finished_at: "2026-10-07T00:00:02Z",
+          updated_at: "2026-10-07T00:00:02Z",
+        },
+        session: { ...session, status: "closed", version: 6, updated_at: "2026-10-07T00:00:02Z" },
+      });
+      act(() => queue.enqueue({
+        ...workerWorkspaceChange(2),
+        change_type: "ExecutionSucceeded",
+        resource_version: 10,
+      }));
+
+      expect(await screen.findByText(`${SESSION_ID} · V6`)).toBeVisible();
+      await waitFor(() => expect(send).toBeDisabled());
+      expect(handlers.getContextReads(WORKER_ITEM_ID)).toBeGreaterThan(contextReadsBefore);
+      expect(textbox).toHaveValue("Keep this reviewed draft after completion");
+      expect(storedDraft(WORKER_ITEM_ID).review).toEqual(originalReview);
+      expect(handlers.posted).toHaveLength(0);
+
+      await user.click(screen.getByRole("button", { name: "复核当前 context" }));
+      await waitFor(() => expect(storedDraft(WORKER_ITEM_ID).review).toMatchObject({
+        context: { run_id: RUN_ID, session_version: 6 },
+        execution_version: 8,
+      }));
+      expect(send).toBeDisabled();
+      expect(textbox).toHaveValue("Keep this reviewed draft after completion");
+      expect(handlers.posted).toHaveLength(0);
+      expect(handlers.nonCommandWrites).toEqual([]);
+    } finally {
+      queue.close();
+    }
+  });
+
+  it("keeps the old review pinned across a streamed owner and Run change until explicit review", async () => {
+    const handlers = installHandlers();
+    const user = userEvent.setup();
+    const page = renderPage(WORKER_ITEM_B_ID);
+    const queue = createInvalidationQueue(page.client, WORKSPACE_ID);
+
+    try {
+      const bTextbox = await screen.findByRole("textbox", { name: "介入这个 Worker" });
+      await waitFor(() => expect(bTextbox).toBeEnabled());
+      await user.type(bTextbox, "B independent draft");
+      const unrelatedDraft = storedDraft(WORKER_ITEM_B_ID);
+
+      await user.click(screen.getByRole("button", { name: "Open worker A" }));
+      const textbox = await screen.findByRole("textbox", { name: "介入这个 Worker" });
+      await waitFor(() => expect(textbox).toBeEnabled());
+      const initialReads = handlers.getContextReads(WORKER_ITEM_ID);
+      act(() => queue.enqueue(workerWorkspaceChange(1)));
+      await waitFor(() => expect(handlers.getContextReads(WORKER_ITEM_ID)).toBeGreaterThan(initialReads));
+      await user.type(textbox, "A draft stays pinned until review");
+      await user.click(screen.getByRole("button", { name: "复核当前 context" }));
+      const send = screen.getByRole("button", { name: "发送到当前 Session" });
+      await waitFor(() => expect(send).toBeEnabled());
+      const originalReview = storedDraft(WORKER_ITEM_ID).review;
+      expect(originalReview?.context.run_id).toBe(RUN_ID);
+      const contextReadsBefore = handlers.getContextReads(WORKER_ITEM_ID);
+      await user.click(screen.getByText("查看精确 native context"));
+      const replacementBinding: AgentBindingView = { ...binding, version: 3, profile_ref: PROFILE_HEAD_R2 };
+
+      handlers.setWorld(WORKER_ITEM_ID, {
+        ...worldB,
+        binding: replacementBinding,
+        context: {
+          ...nativeContextB,
+          worker_item_id: WORKER_ITEM_ID,
+          worker_item_version: 10,
+          binding: replacementBinding,
+          execution: {
+            ...nativeContextB.execution!,
+            worker_item_id: WORKER_ITEM_ID,
+            profile_ref: PROFILE_HEAD_R2,
+            binding_version: 3,
+          },
+          context: { ...contextB, worker_item_id: WORKER_ITEM_ID, binding_version: 3 },
+          run: { ...nativeContextB.run!, profile_ref: PROFILE_HEAD_R2 },
+        },
+        workspace: {
+          ...workspaceB,
+          worker_item: { ...workspace.worker_item, version: 10 },
+          intervention_context: { ...workspaceB.intervention_context!, worker_item_id: WORKER_ITEM_ID },
+        },
+        execution: { ...executionB, worker_item_id: WORKER_ITEM_ID, assigned_worker_id: WORKER_B_ID },
+      });
+      act(() => queue.enqueue({ ...workerWorkspaceChange(2), resource_version: 10 }));
+
+      expect(await screen.findByText(RUN_B_ID)).toBeVisible();
+      await waitFor(() => expect(send).toBeDisabled());
+      expect(handlers.getContextReads(WORKER_ITEM_ID)).toBeGreaterThan(contextReadsBefore);
+      expect(textbox).toHaveValue("A draft stays pinned until review");
+      expect(storedDraft(WORKER_ITEM_ID).review).toEqual(originalReview);
+      expect(storedDraft(WORKER_ITEM_B_ID)).toEqual(unrelatedDraft);
+      expect(handlers.posted).toHaveLength(0);
+
+      await user.click(screen.getByRole("button", { name: "复核当前 context" }));
+      await waitFor(() => expect(storedDraft(WORKER_ITEM_ID).review).toMatchObject({
+        context: {
+          worker_item_id: WORKER_ITEM_ID,
+          execution_id: EXECUTION_B_ID,
+          session_id: SESSION_B_ID,
+          worker_id: WORKER_B_ID,
+          run_id: RUN_B_ID,
+          binding_version: 3,
+        },
+        profile_ref: PROFILE_HEAD_R2,
+        binding_version: 3,
+      }));
+      await waitFor(() => expect(send).toBeEnabled());
+      expect(textbox).toHaveValue("A draft stays pinned until review");
+      expect(storedDraft(WORKER_ITEM_B_ID)).toEqual(unrelatedDraft);
+      expect(handlers.posted).toHaveLength(0);
+      expect(handlers.nonCommandWrites).toEqual([]);
+    } finally {
+      queue.close();
+    }
   });
 
   it("shows the saved R1 execution pin separately from current binding head R2", async () => {

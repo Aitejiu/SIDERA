@@ -156,6 +156,56 @@ describe("WorkspaceStreamProvider projection matching", () => {
     ).toBe(true);
   });
 
+  it.each([
+    { queryKey: ["native-worker-context", "workspace-1", "worker-item-1", "principal-A"], expected: true },
+    { queryKey: ["native-worker-context", "workspace-1", "worker-item-1", "principal-B"], expected: true },
+    { queryKey: ["native-worker-context", "workspace-1", "other-item", "principal-A"], expected: false },
+    { queryKey: ["native-worker-context", "other-workspace", "worker-item-1", "principal-A"], expected: false },
+    { queryKey: ["agent-assignment", "workspace-1", "worker_item", "worker-item-1", "principal-A"], expected: true },
+    { queryKey: ["agent-assignment", "workspace-1", "worker_item", "other-item", "principal-A"], expected: false },
+    { queryKey: ["agent-assignment", "workspace-1", "subtask", "worker-item-1", "principal-A"], expected: false },
+    { queryKey: ["agent-assignment", "other-workspace", "worker_item", "worker-item-1", "principal-A"], expected: false },
+    { queryKey: ["execution", "workspace-1", "execution-1"], expected: false },
+  ])("matches a WorkerItem workspace change for $queryKey as $expected", ({ queryKey, expected }) => {
+    expect(matchesProjectionQuery(
+      queryKey,
+      WORKSPACE_ID,
+      change("worker_item_workspace", WORKER_ITEM_ID),
+    )).toBe(expected);
+  });
+
+  it.each([
+    { queryKey: ["native-worker-context", "workspace-1", "worker-item-1", "principal-A"], expected: true },
+    { queryKey: ["native-worker-context", "workspace-1", "other-item", "principal-B"], expected: true },
+    { queryKey: ["native-worker-context", "other-workspace", "worker-item-1", "principal-A"], expected: false },
+    { queryKey: ["agent-assignment", "workspace-1", "worker_item", "worker-item-1", "principal-A"], expected: true },
+    { queryKey: ["agent-assignment", "workspace-1", "worker_item", "other-item", "principal-B"], expected: true },
+    { queryKey: ["agent-assignment", "workspace-1", "subtask", "worker-item-1", "principal-A"], expected: false },
+    { queryKey: ["agent-assignment", "other-workspace", "worker_item", "worker-item-1", "principal-A"], expected: false },
+    { queryKey: ["execution", "workspace-1", "execution-1"], expected: false },
+  ])("scopes a null WorkerItem workspace resource for $queryKey as $expected", ({ queryKey, expected }) => {
+    expect(matchesProjectionQuery(
+      queryKey,
+      WORKSPACE_ID,
+      change("worker_item_workspace", null),
+    )).toBe(expected);
+  });
+
+  it.each([WORKER_ITEM_ID, null])("does not refresh native context or assignment from activity resource %s", (resourceId) => {
+    const activityChange = change("worker_item_activity", resourceId);
+
+    expect(matchesProjectionQuery(
+      ["native-worker-context", WORKSPACE_ID, WORKER_ITEM_ID, "principal-A"],
+      WORKSPACE_ID,
+      activityChange,
+    )).toBe(false);
+    expect(matchesProjectionQuery(
+      ["agent-assignment", WORKSPACE_ID, "worker_item", WORKER_ITEM_ID, "principal-A"],
+      WORKSPACE_ID,
+      activityChange,
+    )).toBe(false);
+  });
+
   it("refreshes governance detail and resource queries without treating it as runtime", () => {
     const governanceChange = change("collaboration_governance", ROOT_TASK_ID);
 
