@@ -671,6 +671,9 @@ h1 {
   display: grid;
   gap: 8px;
   width: min(320px, calc(100vw - 40px));
+  max-height: min(320px, calc(100vh - 40px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .notification-item {
@@ -10124,6 +10127,11 @@ h1 {
 }
 
 .notification-item > a > span {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
   color: var(--muted);
   font-size: 11px;
 }
@@ -10132,6 +10140,7 @@ h1 {
   display: inline-grid;
   width: 24px;
   height: 24px;
+  flex-shrink: 0;
   padding: 0;
   place-items: center;
 }

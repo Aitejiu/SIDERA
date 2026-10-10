@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ProjectionChange } from "@/shared/api/projectionStream";
 
+import type { WorkspaceNotification } from "./notifications";
+
 import {
   appendNotification,
   browserNotificationIdsKey,
@@ -36,6 +38,20 @@ function change(overrides: Partial<ProjectionChange> = {}): ProjectionChange {
   };
 }
 
+function notification(overrides: Partial<WorkspaceNotification> = {}): WorkspaceNotification {
+  return {
+    id: "notice-1",
+    kind: "completed",
+    title: "Update 1",
+    summary: "Summary 1",
+    resourceId: "task-1",
+    resourceVersion: 1,
+    cursor: 1,
+    href: `/workspaces/${WORKSPACE_ID}/tasks/task-1?version=1#notice-1`,
+    ...overrides,
+  };
+}
+
 describe("workspace notifications", () => {
   it("deduplicates the same cursor and resource version", () => {
     const first = notificationFromChange(WORKSPACE_ID, change());
@@ -55,6 +71,84 @@ describe("workspace notifications", () => {
     expect(result).toHaveLength(1);
     expect(result[0]?.title).toContain("批量 2");
     expect(result[0]?.summary).toContain("Cursor 13");
+  });
+
+  it("keeps a 1000-notice burst bounded to the latest summary and metadata", () => {
+    let result = [notification()];
+    for (let update = 2; update <= 1000; update += 1) {
+      result = appendNotification(result, notification({
+        id: `notice-${update}`,
+        title: `Update ${update}`,
+        summary: `Summary ${update}`,
+        resourceVersion: update,
+        cursor: update,
+        href: `/workspaces/${WORKSPACE_ID}/tasks/task-1?version=${update}#notice-${update}`,
+      }));
+    }
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.summary).toHaveLength("Summary 1000，最近一次 Cursor 1000".length);
+    expect(result[0]).toEqual({
+      id: "notice-1",
+      kind: "completed",
+      title: "Update 1000（批量 1000）",
+      summary: "Summary 1000，最近一次 Cursor 1000",
+      resourceId: "task-1",
+      resourceVersion: 1000,
+      cursor: 1000,
+      href: `/workspaces/${WORKSPACE_ID}/tasks/task-1?version=1000#notice-1000`,
+    });
+  });
+
+  it("does not merge notices for different resources", () => {
+    const first = notification();
+    const second = notification({ id: "notice-2", resourceId: "task-2" });
+
+    expect(appendNotification([first], second)).toEqual([second, first]);
+  });
+
+  it("does not merge notices of different kinds for the same resource", () => {
+    const first = notification();
+    const second = notification({ id: "notice-2", kind: "blocked" });
+
+    expect(appendNotification([first], second)).toEqual([second, first]);
+  });
+
+  it("retains the latest six independent notices in newest-first order", () => {
+    let result: WorkspaceNotification[] = [];
+    for (let update = 1; update <= 8; update += 1) {
+      result = appendNotification(result, notification({
+        id: `notice-${update}`,
+        resourceId: `task-${update}`,
+      }));
+    }
+
+    expect(result.map((item) => item.id)).toEqual([
+      "notice-8", "notice-7", "notice-6", "notice-5", "notice-4", "notice-3",
+    ]);
+  });
+
+  it("moves an updated burst to the front while keeping its original id", () => {
+    const burst = notification();
+    const newer = notification({ id: "notice-2", resourceId: "task-2" });
+    const next = notification({
+      id: "notice-3",
+      title: "Latest update",
+      summary: "Latest summary",
+      resourceVersion: 3,
+      cursor: 3,
+      href: `/workspaces/${WORKSPACE_ID}/tasks/task-1?version=3#notice-3`,
+    });
+
+    expect(appendNotification([newer, burst], next)).toEqual([
+      {
+        ...next,
+        id: "notice-1",
+        title: "Latest update（批量 2）",
+        summary: "Latest summary，最近一次 Cursor 3",
+      },
+      newer,
+    ]);
   });
 
   it("persists notification cursors and explicit browser preference", () => {

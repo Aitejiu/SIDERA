@@ -238,7 +238,7 @@ export function appendNotification(
         ...next,
         id: burst.id,
         title: `${next.title}（批量 ${Number(burst.title.match(/批量 (\d+)/)?.[1] ?? 1) + 1}）`,
-        summary: `${burst.summary}，最近一次 Cursor ${next.cursor}`,
+        summary: `${next.summary}，最近一次 Cursor ${next.cursor}`,
       },
       ...current.filter((item) => item.id !== burst.id),
     ];
