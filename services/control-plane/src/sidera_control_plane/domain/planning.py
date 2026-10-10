@@ -1066,6 +1066,39 @@ class PlanningRequest:
         self.current_proposal_revision = None
         self.current_proposal_content_hash = None
 
+    def revise_failed(
+        self,
+        *,
+        failed_run_id: UUID,
+        feedback: str,
+        brief: PlanningBriefRevision,
+        new_run_id: UUID,
+        actor: str,
+        now: datetime,
+    ) -> None:
+        if self.status is not PlanningRequestStatus.FAILED:
+            raise InvalidTransition("only a failed planning request can be revised")
+        previous = self.runs[-1]
+        if (
+            previous.id != failed_run_id
+            or previous.status is not PlanningRunStatus.FAILED
+        ):
+            raise InvalidTransition(
+                "latest planning run is not the specified failed run"
+            )
+        clean_feedback = _required_text(feedback, "revision feedback")
+        if brief.user_feedback != clean_feedback:
+            raise ValidationError("brief user_feedback must match revision feedback")
+        self._validate_new_brief(brief, actor)
+        self._append_brief_and_run(
+            brief=brief,
+            run_id=new_run_id,
+            now=now,
+            attempt=previous.attempt + 1,
+        )
+        self.current_proposal_revision = None
+        self.current_proposal_content_hash = None
+
     def fail_run(
         self,
         *,

@@ -177,6 +177,9 @@ function validOriginal(
     || value.actor.type !== "user" || value.actor.id !== scope.principal_id
     || !isRecord(value.payload)) return false;
 
+  if (value.command_type === "ReviseFailedPlanningRequest") {
+    return validFailedPlanningFeedback(value.payload);
+  }
   if (scope.kind === "revision") {
     return value.command_type === "ConfirmPlanRevision"
       && validRevisionPayload(scope, review, value.expected_version, value.payload, status, choices);
@@ -448,6 +451,19 @@ function validFeedback(payload: Record<string, unknown>): boolean {
   return hasExactKeys(payload, ["current_proposal_revision", "current_proposal_content_hash", "feedback"])
     && positiveInteger(payload.current_proposal_revision)
     && nonblank(payload.current_proposal_content_hash)
+    && nonblank(payload.feedback);
+}
+
+function validFailedPlanningFeedback(payload: Record<string, unknown>): boolean {
+  return hasExactKeys(payload, [
+    "failed_planning_run_id", "expected_failed_planning_run_version", "expected_work_context_version",
+    "work_context_revision_id", "work_context_content_hash", "feedback",
+  ])
+    && typeof payload.failed_planning_run_id === "string" && UUID.test(payload.failed_planning_run_id)
+    && positiveInteger(payload.expected_failed_planning_run_version)
+    && positiveInteger(payload.expected_work_context_version)
+    && typeof payload.work_context_revision_id === "string" && UUID.test(payload.work_context_revision_id)
+    && typeof payload.work_context_content_hash === "string" && /^[0-9a-f]{64}$/.test(payload.work_context_content_hash)
     && nonblank(payload.feedback);
 }
 

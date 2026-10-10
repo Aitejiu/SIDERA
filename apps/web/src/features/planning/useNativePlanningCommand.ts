@@ -276,7 +276,8 @@ function matchesCommand(scope: PlanningDraftScope, original: CommandRequest): bo
     && original.actor.id === scope.principal_id
     && Number.isInteger(original.expected_version)
     && (original.expected_version ?? 0) > 0;
-  return matchesScope && (scope.kind === "create" || original.command_type === "ConfirmPlanRevision");
+  return matchesScope && (scope.kind === "create" || original.command_type === "ConfirmPlanRevision"
+    || original.command_type === "ReviseFailedPlanningRequest");
 }
 
 function draftMatchesScope(scope: PlanningDraftScope, draft: PlanningConfirmationDraft): boolean {

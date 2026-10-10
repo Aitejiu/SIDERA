@@ -155,6 +155,7 @@ def prepare_opencode_config(
         projected_config.get("model_id"), projected_config.get("provider_env")
     )
     native_tools = validate_native_tools(projected_config.get("native_tools", "none"))
+    permission = _tool_permission_policy(tools, native_tools=native_tools)
     directory: Path | None = None
     try:
         directory = Path(
@@ -190,7 +191,7 @@ def prepare_opencode_config(
             "instructions": [str(path) for path in paths],
             "mcp": {},
             "plugin": [],
-            "permission": _tool_permission_policy(tools, native_tools=native_tools),
+            "permission": permission,
         }
         if model_route is not None:
             provider, model = model_route
@@ -327,6 +328,24 @@ def preflight_opencode_config_sources(workspace: Path) -> None:
         raise _invalid("configuration_sources", "unsupported_capability")
 
 
+def _project_tool_identities(
+    tools: tuple[ToolConnection, ...],
+) -> tuple[tuple[ToolConnection, str], ...]:
+    connections: dict[str, ToolConnection] = {}
+    for tool in tools:
+        name = tool.name.strip()
+        if not name or "\x00" in name:
+            raise _invalid("tools")
+        alias = re.sub(r"[^A-Za-z0-9_-]", "_", name)
+        previous = connections.get(alias)
+        if previous is not None:
+            if tool != previous:
+                raise _invalid("tools")
+            continue
+        connections[alias] = tool
+    return tuple((tool, alias) for alias, tool in connections.items())
+
+
 def _tool_permission_policy(
     tools: tuple[ToolConnection, ...], *, native_tools: str
 ) -> dict[str, str]:
@@ -335,13 +354,8 @@ def _tool_permission_policy(
         policy.update(read="allow", glob="allow", grep="allow")
     if native_tools == "write":
         policy.update(edit="allow", bash="allow")
-    names: set[str] = set()
-    for tool in tools:
-        name = tool.name.strip()
-        if not name or re.fullmatch(r"[A-Za-z0-9_-]+", name) is None or name in names:
-            raise _invalid("tools")
-        names.add(name)
-        policy[f"{name}_*"] = "allow"
+    for _, alias in _project_tool_identities(tools):
+        policy[f"{alias}_*"] = "allow"
     return policy
 
 
@@ -349,12 +363,7 @@ def build_mcp_servers(
     tools: tuple[ToolConnection, ...], *, supports_http: bool
 ) -> tuple[dict[str, object], ...]:
     servers: list[dict[str, object]] = []
-    names: set[str] = set()
-    for tool in tools:
-        name = tool.name.strip()
-        if not name or "\x00" in name or name in names:
-            raise _invalid("tools")
-        names.add(name)
+    for tool, name in _project_tool_identities(tools):
         if tool.transport == "stdio":
             servers.append(_stdio_server(tool, name))
         elif tool.transport == "http":

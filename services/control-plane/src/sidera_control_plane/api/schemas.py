@@ -436,6 +436,17 @@ class RequestProposalRevisionPayload(BaseModel):
     feedback: NonEmptyString
 
 
+class ReviseFailedPlanningRequestPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    failed_planning_run_id: UUID
+    expected_failed_planning_run_version: int = Field(ge=1, strict=True)
+    expected_work_context_version: int = Field(ge=1, strict=True)
+    work_context_revision_id: UUID
+    work_context_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    feedback: NonEmptyString
+
+
 class RejectPlanningProposalPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -471,6 +482,15 @@ class RetryBlockedPlanningRunPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     unknown_outcome_decision: Literal["retry"]
+
+
+class RepairPlanningContextPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_planning_request_version: int = Field(ge=1, strict=True)
+    expected_work_context_version: int = Field(ge=1, strict=True)
+    work_context_revision_id: UUID
+    work_context_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class RetryContextAssemblyPayload(BaseModel):
@@ -3093,6 +3113,8 @@ class CommandRequest(BaseModel):
             "PrepareProfileHandoff",
             "ConfirmProfileHandoff",
             "ReportWorkerProgress",
+            "RepairPlanningContext",
+            "ReviseFailedPlanningRequest",
         }:
             version = value.get("expected_version")
             if type(version) is not int or version < 1:
@@ -3166,6 +3188,7 @@ class CommandRequest(BaseModel):
         elif self.command_type in {
             "AnswerPlanningClarification",
             "RequestProposalRevision",
+            "ReviseFailedPlanningRequest",
             "RejectPlanningProposal",
             "ConfirmPlanningProposal",
             "ConfirmPlanRevision",
@@ -3174,6 +3197,7 @@ class CommandRequest(BaseModel):
             payload_types = {
                 "AnswerPlanningClarification": AnswerPlanningClarificationPayload,
                 "RequestProposalRevision": RequestProposalRevisionPayload,
+                "ReviseFailedPlanningRequest": ReviseFailedPlanningRequestPayload,
                 "RejectPlanningProposal": RejectPlanningProposalPayload,
                 "ConfirmPlanningProposal": ConfirmPlanningProposalPayload,
                 "ConfirmPlanRevision": ConfirmPlanRevisionPayload,
@@ -3182,6 +3206,9 @@ class CommandRequest(BaseModel):
         elif self.command_type == "RetryBlockedPlanningRun":
             self._require_mutation_target("planning_run")
             parsed = RetryBlockedPlanningRunPayload.model_validate(self.payload)
+        elif self.command_type == "RepairPlanningContext":
+            self._require_mutation_target("planning_run")
+            parsed = RepairPlanningContextPayload.model_validate(self.payload)
         elif self.command_type == "RetryContextAssembly":
             self._require_mutation_target("context_assembly")
             parsed = RetryContextAssemblyPayload.model_validate(self.payload)

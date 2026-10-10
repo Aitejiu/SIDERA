@@ -153,6 +153,66 @@ describe("scoped native planning draft storage", () => {
     window.localStorage.clear();
   });
 
+  it.each([SCOPE, REVISION_SCOPE])("retains failed planning feedback without a proposal in $kind scope", (scope) => {
+    const original = command({
+      command_type: "ReviseFailedPlanningRequest",
+      target_id: scope.request_id,
+      payload: {
+        failed_planning_run_id: "c0000000-0000-0000-0000-000000000001",
+        expected_failed_planning_run_version: 3,
+        expected_work_context_version: 4,
+        work_context_revision_id: "d0000000-0000-0000-0000-000000000001",
+        work_context_content_hash: "a".repeat(64),
+        feedback: "Retain the original requirements",
+      },
+    });
+    for (const status of ["pending", "unknown", "applied", "rejected"] as const) {
+      const input: PlanningConfirmationDraft = { ...scope, schema_version: 1, review: null, choices: [], original, status };
+      expect(savePlanningDraft(scope, input)).toEqual({ ok: true });
+      expect(loadPlanningDraft(scope)).toEqual({ ok: true, draft: input });
+    }
+  });
+
+  it.each([SCOPE, REVISION_SCOPE])("strictly validates every failed planning feedback field in $kind scope", (scope) => {
+    const payload = {
+      failed_planning_run_id: "c0000000-0000-0000-0000-000000000001",
+      expected_failed_planning_run_version: 3, expected_work_context_version: 4,
+      work_context_revision_id: "d0000000-0000-0000-0000-000000000001",
+      work_context_content_hash: "a".repeat(64), feedback: "Keep history",
+    };
+    const original = command({ command_type: "ReviseFailedPlanningRequest", target_id: scope.request_id, payload });
+    const pending: PlanningConfirmationDraft = { ...scope, schema_version: 1, review: null, choices: [], original, status: "unknown" };
+    const damaged: Record<string, unknown>[] = [{ ...payload, closed: true }];
+    for (const field of Object.keys(payload)) {
+      const missing: Record<string, unknown> = { ...payload };
+      delete missing[field];
+      damaged.push(missing);
+    }
+    for (const field of ["expected_failed_planning_run_version", "expected_work_context_version"]) {
+      for (const value of [0, -1, 1.5, "1", true, null]) damaged.push({ ...payload, [field]: value });
+    }
+    for (const field of ["failed_planning_run_id", "work_context_revision_id"]) {
+      for (const value of ["bad", "", 1, null]) damaged.push({ ...payload, [field]: value });
+    }
+    for (const value of ["A".repeat(64), "a".repeat(63), "g".repeat(64), null]) damaged.push({ ...payload, work_context_content_hash: value });
+    for (const value of ["", " \n ", 123, null]) damaged.push({ ...payload, feedback: value });
+    for (const value of damaged) {
+      expect(savePlanningDraft(scope, { ...pending, original: { ...original, payload: value } }).ok).toBe(false);
+    }
+    for (const changes of [{ workspace_id: "foreign" }, { target_id: "foreign" }, { target_type: "task" },
+      { actor: { type: "user", id: "foreign" } }, { actor: { type: "system", id: scope.principal_id } },
+      { expected_version: 0 }, { correlation_id: "bad" }, { closed: true }]) {
+      window.localStorage.setItem(planningDraftKey(scope), JSON.stringify({ ...pending, original: { ...original, ...changes } }));
+      expect(loadPlanningDraft(scope).ok).toBe(false);
+    }
+    for (const field of Object.keys(original)) {
+      const incomplete = { ...original } as Record<string, unknown>;
+      delete incomplete[field];
+      window.localStorage.setItem(planningDraftKey(scope), JSON.stringify({ ...pending, original: incomplete }));
+      expect(loadPlanningDraft(scope).ok).toBe(false);
+    }
+  });
+
   it("round-trips a detached safe draft and keeps an unknown original after reload", () => {
     const original = command();
     const input = draft({ original, status: "unknown" });

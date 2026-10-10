@@ -608,6 +608,11 @@ def native_planning_instructions(planner_input: PlannerInput) -> tuple[str, ...]
         "No prose, markdown fences, extra keys or model-authored usage accounting. "
         "Clarifications use result_type=clarification and clarifications containing question, rationale, answer_type, options and blocking. "
         "Use only named catalog capabilities with truthful evidence; an unconfirmed feature is not verified support. "
+        "Require nonempty capability_requirements on WorkerItems and ExecutionIntents, using supported catalog names and matching each intent's requirements to its WorkerItem's capabilities. "
+        "Require nonempty required_evidence_refs on every ExecutionIntent, grounded in the brief's acceptance criteria and using acceptance:<criterion-ref> references. "
+        "When supported capabilities or acceptance evidence are unavailable, never invent capabilities or evidence; return a clarification instead of an impossible executable proposal. "
+        "impact_policy.manual_gate must be false because manual execution gates are unsupported. Normal explicit human plan confirmation is independent and still required. "
+        "Subtask dependency enforcement must be informational or control_plane. "
         "Responsibilities are independent of runtime features. Profile choices require later explicit human confirmation; pinned_worker_id is not a Profile ID. "
         + _DEPENDENCY_PROMPT_CONTRACT,
         json.dumps(metadata, sort_keys=True, separators=(",", ":")),

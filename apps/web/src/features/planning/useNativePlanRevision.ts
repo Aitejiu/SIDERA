@@ -42,6 +42,8 @@ import type {
 } from "./planningConfirmationDraft";
 import { AssignmentUnavailableError } from "@/features/assignments/types";
 import type { PlanningRequest, PlanningRun, RevisionDiff } from "./types";
+import type { ReviseFailedPlanningRequestPayload } from "./types";
+import { clearAppliedFailedPlanningFeedbackDraft } from "./failedPlanningFeedback.js";
 
 export type NativeRevisionOutcome = "none" | "command_applied" | "plan_enabled" | "base_conflicted";
 
@@ -241,7 +243,8 @@ export function useNativePlanRevision({
   useEffect(() => {
     if (mode !== "native_profile" || scope === null || scopeKey === ""
       || activeDraft?.kind !== "revision" || activeDraft.review !== null
-      || activeDraft.original !== null || activeDraft.status !== "idle"
+      || !(activeDraft.original === null && activeDraft.status === "idle"
+        || activeDraft.original?.command_type === "ReviseFailedPlanningRequest" && activeDraft.status === "applied")
       || reviewResult?.ok !== true) return;
     eligibleSuggestionKeys.current.set(scopeKey, new Set(reviewResult.targets
       .filter((target) => target.strategy !== "reuse")
@@ -389,6 +392,21 @@ export function useNativePlanRevision({
     && activeDraft.review !== null && reviewIsCurrent && !command.unresolved
     && !command.busy && !busyRevisitKeys.has(scopeKey) && !appliedRevision
     && missingOwnerReason === null;
+
+  const failedFeedbackDisabledReason = mode !== "native_profile" ? "无法核实当前原生规划模式"
+    : !sessionValid || scope === null ? INVALID_SESSION
+      : draftFailure ?? (activeDraft === null ? "正在恢复本地确认草稿"
+        : command.busy || command.unresolved ? "请先核对原始命令结果" : undefined);
+  const submitFailedFeedback = useCallback(async (expectedVersion: number, payload: ReviseFailedPlanningRequestPayload) => {
+    if (mode !== "native_profile" || scope === null || session === null || !isValidSession(session, workspaceId)
+      || activeDraft?.kind !== "revision" || draftFailure !== null || command.busy || command.unresolved) return;
+    try {
+      const original = buildNativeCommand({ session, workspaceId, commandType: "ReviseFailedPlanningRequest",
+        targetType: "planning_request", targetId: requestId, expectedVersion, payload });
+      setErrorFor(scopeKey, null);
+      await submitOriginal(original);
+    } catch { setErrorFor(scopeKey, "当前本地会话或命令内容不可用"); }
+  }, [activeDraft, command.busy, command.unresolved, draftFailure, mode, requestId, scope, scopeKey, session, setErrorFor, submitOriginal, workspaceId]);
 
   const onChoiceChange = useCallback((key: string, value: AssigneeValue | null) => {
     if (scopeKey === "" || scope === null || activeDraft?.kind !== "revision"
@@ -542,6 +560,9 @@ export function useNativePlanRevision({
   }, [queryClient, workspaceId]);
 
   return {
+    scope,
+    failedFeedbackDisabledReason,
+    submitFailedFeedback,
     mode,
     session,
     targets,
@@ -566,7 +587,14 @@ export function useNativePlanRevision({
     draft: activeDraft,
   };
 
-  function handleApplied(original: CommandRequest, result: CommandResponse | null): Promise<void> {
+  async function handleApplied(original: CommandRequest, result: CommandResponse | null): Promise<void> {
+    if (original.command_type === "ReviseFailedPlanningRequest") {
+      if (scope === null || scopeKey === "" || currentScopeKey.current !== scopeKey) return;
+      const cleared = clearAppliedFailedPlanningFeedbackDraft(scope, original);
+      if (!cleared.ok) setErrorFor(scopeKey, cleared.reason);
+      await onRefresh();
+      return;
+    }
     return applyRevisionOutcome({
       original,
       result,
@@ -718,7 +746,8 @@ function hasPersistedRevisionOriginal(workspaceId: string, rootTaskId: string, r
       try { value = JSON.parse(serialized); } catch { return true; }
       if (isRecord(value) && value.kind === "revision" && value.workspace_id === workspaceId
         && value.root_task_id === rootTaskId && value.request_id === requestId
-        && isRecord(value.original) && value.original.command_type === "ConfirmPlanRevision") return true;
+        && isRecord(value.original) && (value.original.command_type === "ConfirmPlanRevision"
+          || value.original.command_type === "ReviseFailedPlanningRequest")) return true;
     }
     return false;
   } catch {

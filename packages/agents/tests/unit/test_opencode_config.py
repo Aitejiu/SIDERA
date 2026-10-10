@@ -36,6 +36,35 @@ def _executable(tmp_path: Path) -> Path:
     return path
 
 
+def _http_tool(name: str = "SIDERA Task Tools") -> ToolConnection:
+    return ToolConnection(
+        name=name,
+        transport="http",
+        endpoint_or_argv="http://127.0.0.1:9912/mcp",
+        headers={"Authorization": SecretStr("N23_FAKE_HTTP_SECRET")},
+        environment={},
+    )
+
+
+def _invalid_tool_identities(case: str) -> tuple[ToolConnection, ...]:
+    if case == "collision":
+        return (_http_tool(), _http_tool("SIDERA_Task_Tools"))
+    tool = _http_tool("task-bridge")
+    if case == "endpoint":
+        changed = tool.model_copy(
+            update={"endpoint_or_argv": "http://127.0.0.1:9913/mcp"}
+        )
+    elif case == "header":
+        changed = tool.model_copy(
+            update={"headers": {"Authorization": SecretStr("N23_FAKE_OTHER_HEADER")}}
+        )
+    else:
+        changed = tool.model_copy(
+            update={"environment": {"TOOL_TOKEN": SecretStr("N23_FAKE_OTHER_ENV")}}
+        )
+    return (tool, changed)
+
+
 def test_opencode_config_writes_exact_skills_to_private_instruction_files(tmp_path):
     skill = _skill()
 
@@ -350,6 +379,93 @@ def test_invalid_native_tool_mode_fails_before_allocation(tmp_path, mode):
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.parametrize("case", ["collision", "endpoint", "header", "environment"])
+def test_prepare_invalid_tool_identity_creates_no_private_directory(tmp_path, case):
+    with pytest.raises(AgentError) as error:
+        prepare_opencode_config(
+            {}, (_skill(),), private_root=tmp_path, tools=_invalid_tool_identities(case)
+        )
+
+    assert error.value.code == "configuration_invalid"
+    assert error.value.field == "tools"
+    assert "N23_" not in str(error.value)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("case", ["collision", "endpoint", "header", "environment"])
+def test_prepare_invalid_tool_identity_forbids_mkdtemp(tmp_path, monkeypatch, case):
+    def forbidden_allocation(*args, **kwargs):
+        raise AssertionError("Invalid tool identity attempted private allocation.")
+
+    monkeypatch.setattr(opencode_config.tempfile, "mkdtemp", forbidden_allocation)
+
+    with pytest.raises(AgentError) as error:
+        prepare_opencode_config(
+            {}, (_skill(),), private_root=tmp_path, tools=_invalid_tool_identities(case)
+        )
+
+    assert error.value.code == "configuration_invalid"
+    assert error.value.field == "tools"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_prepare_product_tools_matches_acp_aliases_without_private_secrets(tmp_path):
+    tools = (
+        _http_tool(),
+        _http_tool(),
+        ToolConnection(
+            name="Local Tool",
+            transport="stdio",
+            endpoint_or_argv=(str(_executable(tmp_path)),),
+            headers={},
+            environment={"TOOL_TOKEN": SecretStr("N23_FAKE_TOOL_ENV_SECRET")},
+        ),
+    )
+    originals = tuple(tool.model_copy(deep=True) for tool in tools)
+    prepared = prepare_opencode_config(
+        {}, (_skill(),), private_root=tmp_path, tools=tools
+    )
+
+    try:
+        config = json.loads(prepared.content)
+        assert config["permission"] == {
+            "*": "deny",
+            "SIDERA_Task_Tools_*": "allow",
+            "Local_Tool_*": "allow",
+        }
+        assert [
+            server["name"] for server in build_mcp_servers(tools, supports_http=True)
+        ] == [
+            "SIDERA_Task_Tools",
+            "Local_Tool",
+        ]
+        assert config["mcp"] == {}
+        assert "N23_" not in prepared.content
+        assert all(
+            "N23_" not in path.read_text(encoding="utf-8")
+            for path in prepared.directory.rglob("*")
+            if path.is_file()
+        )
+        assert tools == originals
+    finally:
+        prepared.close()
+
+    assert not prepared.directory.exists()
+
+
+def test_prepare_config_oserror_removes_its_owned_directory(tmp_path, monkeypatch):
+    def failed_skill_write(*args, **kwargs):
+        raise OSError("Synthetic private skill write failure.")
+
+    monkeypatch.setattr(Path, "write_text", failed_skill_write)
+
+    with pytest.raises(AgentError) as error:
+        prepare_opencode_config({}, (_skill(),), private_root=tmp_path)
+
+    assert error.value.code == "configuration_invalid"
+    assert list(tmp_path.iterdir()) == []
+
+
 @pytest.mark.parametrize("key", ["XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"])
 def test_profile_cannot_override_private_xdg_roots(tmp_path, key):
     prepared = prepare_opencode_config({}, (), private_root=tmp_path)
@@ -431,6 +547,194 @@ def test_http_mcp_allows_only_https_or_loopback_http():
     with pytest.raises(AgentError) as error:
         build_mcp_servers((remote_http,), supports_http=True)
     assert error.value.code == "configuration_invalid"
+
+
+@pytest.mark.parametrize("projection", ["mcp", "permission"])
+@pytest.mark.parametrize(
+    "name,alias",
+    [
+        ("SIDERA Task Tools", "SIDERA_Task_Tools"),
+        ("  SIDERA Task Tools  ", "SIDERA_Task_Tools"),
+        ("task.bridge/v1!", "task_bridge_v1_"),
+        ("m\u00fcp-tool", "m_p-tool"),
+        ("\u4efb\u52a1\u5de5\u5177", "____"),
+        ("task-bridge", "task-bridge"),
+        ("task_bridge", "task_bridge"),
+        ("Task42", "Task42"),
+    ],
+)
+def test_tool_identity_projection_uses_native_safe_alias(projection, name, alias):
+    tool = _http_tool(name)
+    original = tool.model_copy(deep=True)
+
+    if projection == "mcp":
+        servers = build_mcp_servers((tool,), supports_http=True)
+        assert [server["name"] for server in servers] == [alias]
+    else:
+        assert opencode_config._tool_permission_policy(
+            (tool,), native_tools="none"
+        ) == {"*": "deny", f"{alias}_*": "allow"}
+
+    assert tool == original
+
+
+@pytest.mark.parametrize("projection", ["mcp", "permission"])
+def test_exact_product_tool_duplicate_projects_once(projection):
+    tools = (_http_tool(), _http_tool())
+
+    if projection == "mcp":
+        servers = build_mcp_servers(tools, supports_http=True)
+        assert [server["name"] for server in servers] == ["SIDERA_Task_Tools"]
+    else:
+        assert opencode_config._tool_permission_policy(tools, native_tools="none") == {
+            "*": "deny",
+            "SIDERA_Task_Tools_*": "allow",
+        }
+
+
+@pytest.mark.parametrize("projection", ["mcp", "permission"])
+def test_exact_tool_duplicates_coalesce_in_first_order_without_mutation(projection):
+    tools = (
+        _http_tool("Z Tool"),
+        _http_tool("a-tool"),
+        _http_tool("Z Tool"),
+        _http_tool("Third/Tool"),
+        _http_tool("a-tool"),
+    )
+    originals = tuple(tool.model_copy(deep=True) for tool in tools)
+
+    if projection == "mcp":
+        servers = build_mcp_servers(tools, supports_http=True)
+        assert [server["name"] for server in servers] == [
+            "Z_Tool",
+            "a-tool",
+            "Third_Tool",
+        ]
+    else:
+        policy = opencode_config._tool_permission_policy(tools, native_tools="none")
+        assert policy == {
+            "*": "deny",
+            "Z_Tool_*": "allow",
+            "a-tool_*": "allow",
+            "Third_Tool_*": "allow",
+        }
+        assert list(policy) == ["*", "Z_Tool_*", "a-tool_*", "Third_Tool_*"]
+
+    assert tools == originals
+
+
+def test_exact_tool_duplicates_preserve_stdio_secret_environment(tmp_path):
+    tool = ToolConnection(
+        name="task-bridge",
+        transport="stdio",
+        endpoint_or_argv=(str(_executable(tmp_path)), "argument with spaces"),
+        headers={},
+        environment={"TOOL_TOKEN": SecretStr("N23_FAKE_TOOL_ENV_SECRET")},
+    )
+    original = tool.model_copy(deep=True)
+
+    servers = build_mcp_servers((tool, tool.model_copy(deep=True)), supports_http=False)
+
+    assert len(servers) == 1
+    assert servers[0]["name"] == "task-bridge"
+    assert servers[0]["args"] == ["argument with spaces"]
+    assert servers[0]["env"] == [
+        {"name": "TOOL_TOKEN", "value": "N23_FAKE_TOOL_ENV_SECRET"}
+    ]
+    assert tool == original
+
+
+@pytest.mark.parametrize("projection", ["mcp", "permission"])
+@pytest.mark.parametrize(
+    "difference", ["transport", "endpoint", "argv", "header", "environment"]
+)
+def test_tool_identity_rejects_different_connections_with_same_name(
+    tmp_path, projection, difference
+):
+    tool = _http_tool("task-bridge")
+    if difference in {"argv", "environment"}:
+        tool = ToolConnection(
+            name="task-bridge",
+            transport="stdio",
+            endpoint_or_argv=(str(_executable(tmp_path)), "first argument"),
+            headers={},
+            environment={"TOOL_TOKEN": SecretStr("N23_FAKE_TOOL_ENV_SECRET")},
+        )
+    if difference == "transport":
+        changed = tool.model_copy(
+            update={
+                "transport": "stdio",
+                "endpoint_or_argv": (str(_executable(tmp_path)),),
+            }
+        )
+    elif difference == "endpoint":
+        changed = tool.model_copy(
+            update={"endpoint_or_argv": "http://127.0.0.1:9913/mcp"}
+        )
+    elif difference == "argv":
+        changed = tool.model_copy(
+            update={"endpoint_or_argv": (tool.endpoint_or_argv[0], "other argument")}
+        )
+    elif difference == "header":
+        changed = tool.model_copy(
+            update={"headers": {"Authorization": SecretStr("N23_FAKE_OTHER_HEADER")}}
+        )
+    else:
+        changed = tool.model_copy(
+            update={"environment": {"TOOL_TOKEN": SecretStr("N23_FAKE_OTHER_ENV")}}
+        )
+    tools = (tool, changed)
+    originals = tuple(connection.model_copy(deep=True) for connection in tools)
+
+    with pytest.raises(AgentError) as error:
+        if projection == "mcp":
+            build_mcp_servers(tools, supports_http=True)
+        else:
+            opencode_config._tool_permission_policy(tools, native_tools="none")
+
+    assert error.value.code == "configuration_invalid"
+    assert error.value.field == "tools"
+    assert "N23_" not in str(error.value)
+    assert tools == originals
+
+
+@pytest.mark.parametrize("projection", ["mcp", "permission"])
+@pytest.mark.parametrize(
+    "names",
+    [
+        ("SIDERA Task Tools", "SIDERA_Task_Tools"),
+        ("task.bridge", "task/bridge"),
+        ("m\u00fcp", "m_p"),
+        ("task-bridge", " task-bridge "),
+    ],
+)
+def test_tool_identity_rejects_distinct_names_with_same_alias(projection, names):
+    tools = tuple(_http_tool(name) for name in names)
+
+    with pytest.raises(AgentError) as error:
+        if projection == "mcp":
+            build_mcp_servers(tools, supports_http=True)
+        else:
+            opencode_config._tool_permission_policy(tools, native_tools="none")
+
+    assert error.value.code == "configuration_invalid"
+    assert error.value.field == "tools"
+    assert "N23_" not in str(error.value)
+
+
+@pytest.mark.parametrize("projection", ["mcp", "permission"])
+@pytest.mark.parametrize("name", ["", " \t\n ", "task\x00tool", "\x00"])
+def test_tool_identity_rejects_empty_or_nul_name(projection, name):
+    with pytest.raises(AgentError) as error:
+        if projection == "mcp":
+            build_mcp_servers((_http_tool(name),), supports_http=True)
+        else:
+            opencode_config._tool_permission_policy(
+                (_http_tool(name),), native_tools="none"
+            )
+
+    assert error.value.code == "configuration_invalid"
+    assert error.value.field == "tools"
 
 
 def test_managed_macos_policy_uses_os_account_not_login_environment(

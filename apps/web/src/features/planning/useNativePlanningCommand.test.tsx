@@ -7,6 +7,7 @@ import type { CommandRequest } from "@/features/assignments/types";
 import { server } from "@/test/server";
 import type { PlanningConfirmationDraft, PlanningDraftScope } from "./planningConfirmationDraft";
 import { useNativePlanningCommand } from "./useNativePlanningCommand";
+import { loadPlanningDraft, savePlanningDraft } from "./planningConfirmationDraft";
 
 type CreatePlanningDraft = Extract<PlanningConfirmationDraft, { kind: "create" }>;
 
@@ -149,12 +150,43 @@ function appliedStatus(command: CommandRequest) {
   };
 }
 
+function failedFeedbackOriginal(scope: PlanningDraftScope): CommandRequest {
+  return { ...originalFor(scope), command_type: "ReviseFailedPlanningRequest", payload: {
+    failed_planning_run_id: "c0000000-0000-0000-0000-000000000001", expected_failed_planning_run_version: 3,
+    expected_work_context_version: 4, work_context_revision_id: "d0000000-0000-0000-0000-000000000001",
+    work_context_content_hash: "a".repeat(64), feedback: "Retain the original requirements" } };
+}
+
+function emptyFeedbackDraft(scope: PlanningDraftScope): PlanningConfirmationDraft {
+  return { ...scope, schema_version: 1, review: null, choices: [], original: null, status: "idle" };
+}
+
 afterEach(() => {
   server.resetHandlers();
   vi.restoreAllMocks();
 });
 
 describe("native planning command lifecycle", () => {
+  it.each([SCOPE, REVISION_SCOPE])("stores failed planning feedback before one POST in $kind scope", async (scope) => {
+    window.localStorage.clear();
+    const command = failedFeedbackOriginal(scope);
+    const draft: PlanningConfirmationDraft = { ...scope, schema_version: 1, review: null, choices: [], original: null, status: "idle" };
+    let posts = 0;
+    server.use(http.post("/api/v1/commands", async ({ request }) => {
+      posts += 1;
+      expect(await request.json()).toEqual(command);
+      expect(loadPlanningDraft(scope)).toMatchObject({ ok: true, draft: { original: command, status: "pending" } });
+      return HttpResponse.json({ command_id: command.command_id, aggregate_id: scope.request_id, aggregate_version: 5, event_ids: [] });
+    }));
+    const { result } = renderHook(() => useNativePlanningCommand({
+      scope, session: SESSION, draft,
+      onDraftChange: (next) => savePlanningDraft(scope, next).ok,
+      onApplied: vi.fn(),
+    }));
+    await act(async () => { await Promise.all([result.current.submitOriginal(command), result.current.submitOriginal(command)]); });
+    expect(posts).toBe(1);
+    expect(result.current.status).toBe("applied");
+  });
   it("persists the complete original before one POST and applies only a matching result", async () => {
     const events: string[] = [];
     let sent: CommandRequest | null = null;
@@ -664,5 +696,75 @@ describe("native planning command lifecycle", () => {
 
     expect(posts).toBe(0);
     expect(result.current.original).toBeNull();
+  });
+});
+
+describe.each([SCOPE, REVISION_SCOPE])("failed feedback command recovery in $kind scope", (scope) => {
+  it.each(["rejected", "applied"] as const)("retains original identities after remount through pending, unknown, mismatched and %s receipts without POST", async (terminal) => {
+    window.localStorage.clear();
+    const command = failedFeedbackOriginal(scope); let posts = 0, reads = 0; let status = "pending"; let mismatch = false;
+    const onApplied = vi.fn();
+    server.use(http.post("/api/v1/commands", () => { posts += 1; return HttpResponse.error(); }),
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/commands/${command.command_id}`, () => {
+        reads += 1; return HttpResponse.json({ ...appliedStatus(command), status, result: null,
+          target_id: mismatch ? SCOPE_B.request_id : scope.request_id });
+      }));
+    const mount = () => renderHook(() => {
+      const loaded = loadPlanningDraft(scope); if (!loaded.ok) throw new Error(loaded.reason);
+      return useNativePlanningCommand({ scope, session: SESSION, draft: loaded.draft ?? emptyFeedbackDraft(scope),
+        onDraftChange: (next) => savePlanningDraft(scope, next).ok, onApplied });
+    });
+    const first = mount(); await act(async () => { await first.result.current.submitOriginal(command); });
+    expect(first.result.current.status).toBe("unknown");
+    await act(async () => { await first.result.current.submitOriginal(command); }); first.unmount();
+    const second = mount();
+    await act(async () => { await second.result.current.submitOriginal(command); });
+    for (const next of ["pending", "unknown", "mismatched", terminal]) {
+      mismatch = next === "mismatched"; status = mismatch ? "applied" : next;
+      await act(async () => { await second.result.current.lookupOriginal(); });
+      expect(second.result.current.status).toBe(mismatch ? "unknown" : next);
+      expect(second.result.current.original).toEqual(command);
+      expect(loadPlanningDraft(scope)).toMatchObject({ ok: true, draft: { original: command } });
+    }
+    expect(posts).toBe(1); expect(reads).toBe(4);
+    if (terminal === "applied") expect(onApplied).toHaveBeenCalledExactlyOnceWith(command, null);
+    else expect(onApplied).not.toHaveBeenCalled();
+  });
+
+  it.each(["storage", "expired", "foreign-principal", "foreign-workspace"] as const)("refuses feedback POST with %s", async (failure) => {
+    const session = { ...SESSION,
+      ...(failure === "expired" ? { expires_at: "2000-01-01T00:00:00Z" } : {}),
+      ...(failure === "foreign-principal" ? { principal_id: "other" } : {}),
+      ...(failure === "foreign-workspace" ? { workspace_id: "20000000-0000-0000-0000-000000000002" } : {}) };
+    let posts = 0;
+    server.use(http.post("/api/v1/commands", () => { posts += 1; return HttpResponse.json({}); }));
+    const { result } = renderHook(() => useNativePlanningCommand({ scope, session, draft: emptyFeedbackDraft(scope),
+      onDraftChange: () => failure !== "storage", onApplied: vi.fn() }));
+    await act(async () => { await result.current.submitOriginal(failedFeedbackOriginal(scope)); });
+    expect(posts).toBe(0); expect(result.current.status).toBe("idle");
+  });
+
+  it.each(["POST", "lookup"] as const)("fences a delayed feedback %s across a principal switch", async (transport) => {
+    const started = deferred(), release = deferred(); const original = failedFeedbackOriginal(scope);
+    const nextScope = { ...scope, principal_id: "other" }; const onApplied = vi.fn(); const saved: PlanningConfirmationDraft[] = [];
+    let posts = 0, reads = 0;
+    server.use(http.post("/api/v1/commands", async () => {
+      posts += 1; started.resolve(); await release.promise; return HttpResponse.json(appliedStatus(original).result);
+    }), http.get(`/api/v1/workspaces/${WORKSPACE_ID}/commands/${original.command_id}`, async () => {
+      reads += 1; started.resolve(); await release.promise; return HttpResponse.json({ ...appliedStatus(original), result: null });
+    }));
+    const draft = { ...emptyFeedbackDraft(scope), ...(transport === "lookup" ? { original, status: "unknown" as const } : {}) };
+    const { result, rerender } = renderHook(({ activeScope, activeDraft }) => useNativePlanningCommand({ scope: activeScope,
+      session: { ...SESSION, principal_id: activeScope.principal_id }, draft: activeDraft,
+      onDraftChange: (next) => { saved.push(next); return true; }, onApplied }),
+    { initialProps: { activeScope: scope, activeDraft: draft } });
+    let operation!: Promise<void>;
+    act(() => { operation = transport === "POST" ? result.current.submitOriginal(original) : result.current.lookupOriginal(); });
+    await started.promise;
+    rerender({ activeScope: nextScope, activeDraft: emptyFeedbackDraft(nextScope) });
+    release.resolve(); await act(async () => { await operation; });
+    expect(result.current.status).toBe("idle"); expect(result.current.original).toBeNull(); expect(onApplied).not.toHaveBeenCalled();
+    expect(saved.every((value) => value.principal_id === scope.principal_id && value.status === "pending")).toBe(true);
+    expect(posts).toBe(transport === "POST" ? 1 : 0); expect(reads).toBe(transport === "lookup" ? 1 : 0);
   });
 });

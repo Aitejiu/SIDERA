@@ -1,6 +1,6 @@
 import { test as base, expect, type Page, type Response } from "@playwright/test";
 import { createHash, randomUUID } from "node:crypto";
-import { constants, closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
+import { constants, accessSync, closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -34,6 +34,25 @@ export const NATIVE_SOURCE_PATHS = [
   "services/control-plane/src/sidera_control_plane/application/context_requests.py",
   "services/control-plane/src/sidera_control_plane/application/handoff_context.py",
 ] as const;
+export const REAL_NATIVE_SOURCE_PATHS = [...NATIVE_SOURCE_PATHS,
+  "apps/server/tests/support/real_native_product_flow.py", "apps/server/tests/unit/test_real_native_product_flow.py",
+  "apps/web/playwright.native-real.config.ts", "apps/web/tests/e2e/native-harness-real.spec.ts",
+  "packages/agents/src/sidera_agents/harnesses/opencode.py", "packages/agents/src/sidera_agents/harnesses/acp_transport.py",
+  "packages/agents/src/sidera_agents/harnesses/opencode_config.py", "packages/agents/src/sidera_agents/harnesses/opencode_descriptor.py",
+  "apps/server/src/sidera_product/composition.py", "apps/server/src/sidera_product/chat/projection.py",
+  "apps/server/src/sidera_product/task_tools/tools.py",
+  "services/control-plane/src/sidera_control_plane/application/agent_worker_adapter.py",
+  "services/control-plane/src/sidera_control_plane/application/agent_planner_adapter.py",
+] as const;
+export type RealCase = "main" | "input" | "handoff";
+export interface RealConfig {
+  settings: { workspace_id: string; principal_id: string; harness_id: "opencode"; executable: string; max_active: 4; max_sessions: 8 };
+  planning_budget: Record<string, number>;
+  real: { schema_version: 1; explicit_provider_run: true; model_id: "opencode-go/deepseek-v4.1-flash";
+    provider_env: "OPENCODE_API_KEY"; credential_source_alias: "SIDERA_N23_OPENCODE_API_KEY";
+    executable_sha256: string; actual_runtime_version: "1.18.32"; verification_python: string; budget: Record<string, number> };
+  verification: { seed_sha256: string; argv: string[]; timeout_seconds: 60 };
+}
 export const NATIVE_STAGES = ["configuration", "conversation", "goal_submitted", "proposal_ready", "plan_confirmed",
   "dependency_execution", "worker_input", "result_verified", "result_accepted", "navigation_history", "owned_cleanup"] as const;
 export type Stage = typeof NATIVE_STAGES[number];
@@ -95,13 +114,19 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 function sha(value: string | Buffer): string { return createHash("sha256").update(value).digest("hex"); }
-function noSecrets(value: unknown) {
+function noSecrets(value: unknown, rejectApiKeys = false) {
   if (object(value)) {
     for (const [key, item] of Object.entries(value)) {
-      if (/token|cookie|authorization|bootstrap|native_handle|password|secret/i.test(key)) throw new Error("native_checkpoint_secret_refused");
-      noSecrets(item);
+      if (/token|cookie|authorization|bootstrap|native_handle|password|secret/i.test(key) || (rejectApiKeys && /api[_-]?key/i.test(key))) throw new Error("native_checkpoint_secret_refused");
+      noSecrets(item, rejectApiKeys);
     }
-  } else if (Array.isArray(value)) value.forEach(noSecrets);
+  } else if (Array.isArray(value)) value.forEach(item => noSecrets(item, rejectApiKeys));
+}
+function cleanupOperationId(namespace: string) {
+  const bytes = createHash("sha1").update(Buffer.from(namespace.replaceAll("-", ""), "hex")).update("owned_cleanup").digest().subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50; bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 function writeProtected(path: string, value: unknown, replaceSession = false) {
   privateDirectory(dirname(path));
@@ -114,6 +139,10 @@ function loopback(value: unknown) {
   if (typeof value !== "string") throw new Error();
   const url = new URL(value);
   if (url.protocol !== "http:" || !["127.0.0.1", "[::1]"].includes(url.hostname) || !url.port || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error();
+}
+
+export function realNavigationRecovery(): boolean {
+  return process.env.SIDERA_NATIVE_RESUME === "1" && process.env.SIDERA_NATIVE_STAGE === "navigation_history";
 }
 
 export function loadOwnedManifest(path: string, allowUiChange = false): NativeManifest {
@@ -137,14 +166,107 @@ export function loadOwnedManifest(path: string, allowUiChange = false): NativeMa
     const config = readProtectedJson(value.config_path), owner = readProtectedJson(value.owner_receipt_path);
     if (!object(config) || !object(config.settings) || config.settings.workspace_id !== value.workspace_id || sha(canonical(config)) !== value.config_hash ||
       !object(owner) || owner.workspace_id !== value.workspace_id || owner.config_hash !== value.config_hash || owner.owner_pid !== value.process_identities.owner_pid) throw new Error();
-    if (!isAbsolute(value.source_root) || realpathSync(value.source_root) !== value.source_root || Object.keys(value.source_pins).sort().join() !== [...NATIVE_SOURCE_PATHS].sort().join()) throw new Error();
+    const paths = value.mode === "real" ? REAL_NATIVE_SOURCE_PATHS : NATIVE_SOURCE_PATHS;
+    if (!isAbsolute(value.source_root) || realpathSync(value.source_root) !== value.source_root || Object.keys(value.source_pins).sort().join() !== [...paths].sort().join()) throw new Error();
     for (const [name, pin] of Object.entries(value.source_pins)) {
       const source = join(value.source_root, name), scope = name.startsWith("apps/web/") ? "ui" : "producer";
       if (pin.scope !== scope || Object.keys(pin).sort().join() !== "scope,sha256" || !/^[0-9a-f]{64}$/.test(pin.sha256) || realpathSync(source) !== source ||
         (sha(readFileSync(source)) !== pin.sha256 && !(allowUiChange && scope === "ui"))) throw new Error();
     }
+    if (value.mode === "real") {
+      loadRealConfig(value);
+      const transport = readProtectedJson(value.transport_path);
+      if (!object(transport) || Object.keys(transport).sort().join() !== "bootstrap_file,schema_version,workspace_id" ||
+        transport.schema_version !== 1 || transport.workspace_id !== value.workspace_id || typeof transport.bootstrap_file !== "string" ||
+        dirname(transport.bootstrap_file) !== join(dirname(path), "bootstrap") || realpathSync(transport.bootstrap_file) !== transport.bootstrap_file) throw new Error();
+      privateDirectory(dirname(transport.bootstrap_file));
+      const ownerFields = ["schema_version", "owner_uid", "allocation_id", "workspace_id", "namespace", "config_hash", "owner_pid", "operation_id"];
+      if (Object.keys(owner).sort().join() !== ownerFields.sort().join() || owner.schema_version !== 1 || owner.owner_uid !== value.owner_uid ||
+        owner.allocation_id !== value.allocation_id || owner.namespace !== value.namespace || owner.operation_id !== cleanupOperationId(value.namespace) ||
+        !Number.isSafeInteger(owner.owner_pid) || Number(owner.owner_pid) <= 0) throw new Error();
+    }
     return value;
   } catch { throw new Error("native_manifest_refused"); }
+}
+
+export function loadRealConfig(manifest: NativeManifest): RealConfig {
+  try {
+    if (manifest.mode !== "real" || manifest.controlled_bridge || manifest.controller_url !== null) throw new Error();
+    const config = readProtectedJson(manifest.config_path);
+    if (!object(config) || !object(config.real) || !object(config.settings) || !object(config.verification) ||
+      sha(canonical(config)) !== manifest.config_hash || config.settings.workspace_id !== manifest.workspace_id) throw new Error();
+    const real = config.real, settings = config.settings;
+    if (Object.keys(real).sort().join() !== ["schema_version", "explicit_provider_run", "model_id", "provider_env", "credential_source_alias", "executable_sha256", "actual_runtime_version", "verification_python", "budget"].sort().join() ||
+      real.schema_version !== 1 || real.explicit_provider_run !== true || real.model_id !== "opencode-go/deepseek-v4.1-flash" ||
+      real.provider_env !== "OPENCODE_API_KEY" || real.credential_source_alias !== "SIDERA_N23_OPENCODE_API_KEY" || real.actual_runtime_version !== "1.18.32" ||
+      canonical(real.budget) !== canonical({ total_seconds: 7200, main_turns: 40, planner_runs: 16, worker_sessions: 64, adapter_prompts: 200 }) ||
+      settings.harness_id !== "opencode" || settings.max_active !== 4 || settings.max_sessions !== 8 ||
+      (config.scenario ?? "main") !== "main" || !/^[0-9a-f]{64}$/.test(String(real.executable_sha256))) throw new Error();
+    const planningBudget = config.planning_budget;
+    const planningBudgetFields = ["max_context_bytes", "max_tokens", "max_cost_microunits", "max_runtime_seconds", "max_revisions", "max_nodes", "max_concurrency"];
+    if (!object(planningBudget) || Object.keys(planningBudget).length !== planningBudgetFields.length ||
+      planningBudgetFields.some(key => !Object.hasOwn(planningBudget, key)) ||
+      Object.values(planningBudget).some(value => typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0)) throw new Error();
+    noSecrets(Object.fromEntries(Object.entries(config).filter(([key]) => key !== "planning_budget")), true);
+    for (const selected of [settings.executable, real.verification_python]) {
+      if (typeof selected !== "string" || !isAbsolute(selected) || resolve(selected) !== selected || !lstatSync(realpathSync(selected)).isFile()) throw new Error();
+      accessSync(selected, constants.X_OK);
+    }
+    if (sha(readFileSync(String(settings.executable))) !== real.executable_sha256 ||
+      canonical(config.verification.argv) !== canonical([real.verification_python, "-B", "verify_demo.py"]) ||
+      config.verification.timeout_seconds !== 60 || !/^[0-9a-f]{64}$/.test(String(config.verification.seed_sha256))) throw new Error();
+    return config as unknown as RealConfig;
+  } catch { throw new Error("native_real_config_refused"); }
+}
+
+export function realScenario(manifest: NativeManifest): RealCase {
+  loadRealConfig(manifest);
+  const selected = process.env.SIDERA_NATIVE_REAL_CASE ?? "main";
+  if (!["main", "input", "handoff"].includes(selected) || (selected !== "main" && !uuid(process.env.SIDERA_NATIVE_REAL_CASE_ID))) {
+    throw new Error("native_real_case_refused");
+  }
+  return selected as RealCase;
+}
+
+export function realCaseId(manifest: NativeManifest): string | null {
+  return realScenario(manifest) === "main" ? null : process.env.SIDERA_NATIVE_REAL_CASE_ID!;
+}
+
+export interface RealFocusedReceipt {
+  schema_version: 1; owner_uid: number; allocation_id: string; workspace_id: string; config_hash: string;
+  source_pins: NativeManifest["source_pins"]; case: "input" | "handoff"; case_uuid: string; step: Stage;
+  status: "pending" | "passed" | "failed" | "incomplete"; original_ids: Ids; observed: Ids; time: string; sequence: number;
+}
+
+export function realFocusedRecords(manifest: NativeManifest, selected: RealCase, caseId: string | null): RealFocusedReceipt[] {
+  if (manifest.mode !== "real" || selected === "main" || !uuid(caseId)) throw new Error("native_real_focused_receipt_refused");
+  const parent = dirname(manifest.transport_path);
+  privateDirectory(parent);
+  return readdirSync(parent).filter(name => name.startsWith("focused-real-") && name.endsWith(".json")).map(name => {
+    const record = readProtectedJson(join(parent, name)) as RealFocusedReceipt;
+    noSecrets(record, true);
+    if (record.schema_version !== 1 || record.owner_uid !== uid() || record.allocation_id !== manifest.allocation_id ||
+      record.workspace_id !== manifest.workspace_id || record.config_hash !== manifest.config_hash ||
+      canonical(record.source_pins) !== canonical(manifest.source_pins) || !["input", "handoff"].includes(record.case) || !uuid(record.case_uuid) ||
+      !NATIVE_STAGES.includes(record.step) || !["pending", "passed", "failed", "incomplete"].includes(record.status) ||
+      !Number.isSafeInteger(record.sequence) || !object(record.original_ids) || !object(record.observed)) throw new Error("native_real_focused_receipt_refused");
+    return record;
+  }).filter(record => record.case === selected && record.case_uuid === caseId).sort((a, b) => a.sequence - b.sequence);
+}
+
+export async function readRealNativeTrace(native: NativeFixture, pin: ReturnType<typeof currentNativeTracePin>): Promise<NativeTrace> {
+  if (native.manifest.mode !== "real") throw new Error("native_real_trace_refused");
+  let after = 0;
+  const events: NativeTrace["events"] = [];
+  for (let page = 0; page < 256; page++) {
+    const trace = await native.get<NativeTrace>(native.prefix() + `worker-items/${pin.worker_item_id}/executions/${pin.execution_id}/native-trace?after_sequence=${after}&limit=100`);
+    if (!exactNativeTrace(trace, pin) || trace.next_sequence < after || trace.events.some(event => event.sequence <= after) ||
+      (trace.events.length === 0 && trace.next_sequence !== after) || (trace.has_more && trace.next_sequence <= after)) throw new Error("native_real_trace_refused");
+    events.push(...trace.events);
+    if (!trace.has_more) return { ...trace, events };
+    after = trace.next_sequence;
+  }
+  throw new Error("native_real_trace_incomplete");
 }
 
 export function exactNativeTrace(value: unknown, pin: unknown): boolean {
@@ -172,6 +294,7 @@ export function currentNativeTracePin(value: unknown) {
 }
 
 export function nativeScenario(manifest: NativeManifest): "main" | "transition" {
+  if (manifest.mode !== "fake") throw new Error("native_provider_mode_not_authorized");
   const config = readProtectedJson(manifest.config_path);
   if (!object(config) || !object(config.settings) || config.settings.workspace_id !== manifest.workspace_id || sha(canonical(config)) !== manifest.config_hash) {
     throw new Error("native_scenario_refused");
@@ -220,6 +343,8 @@ export class NativeFixture {
   versions: Ids = {};
   readonly mutations: { path: string; command_type: string | null; command_id: string | null }[] = [];
   readonly readOnly: boolean;
+  readonly realCase: RealCase;
+  readonly caseId: string | null;
   loseInputResponse = false;
   configurationCapture: "primary" | "target" = "primary";
   private lostInput = false;
@@ -227,7 +352,17 @@ export class NativeFixture {
 
   constructor(page: Page, manifest: NativeManifest, readOnly = false) {
     this.page = page; this.manifest = manifest; this.readOnly = readOnly;
-    for (const record of nativeRecords(manifest)) Object.assign(this.ids, record.original_ids);
+    this.realCase = manifest.mode === "real" ? realScenario(manifest) : "main";
+    this.caseId = manifest.mode === "real" ? realCaseId(manifest) : null;
+    for (const record of nativeRecords(manifest)) {
+      if (this.realCase === "main") Object.assign(this.ids, record.original_ids);
+      else if (record.step === "configuration" && record.status === "passed") {
+        for (const [key, value] of Object.entries(record.original_ids)) {
+          if (/^(runtime_|profile_|target_|configuration_|task_tool_|credential_|planning_policy_|setup_)/.test(key)) this.ids[key] = value;
+        }
+      }
+    }
+    if (this.caseId) for (const record of realFocusedRecords(manifest, this.realCase, this.caseId)) Object.assign(this.ids, record.original_ids);
   }
   id(key: string): string {
     const value = this.ids[key];
@@ -248,6 +383,7 @@ export class NativeFixture {
     return await response.json() as T;
   }
   async readSourceContext(workerItemId: string, originalRun: string): Promise<NativeContext | null> {
+    if (this.manifest.mode !== "fake") throw new Error("native_controlled_bridge_disabled");
     const workspace = this.manifest.workspace_id;
     const path = this.prefix() + `worker-items/${workerItemId}/native-context`;
     const current = (value: NativeContext): boolean => {
@@ -274,6 +410,7 @@ export class NativeFixture {
     return latest;
   }
   async waitForSourceContext(workerItemId: string): Promise<NativeContext> {
+    if (this.manifest.mode !== "fake") throw new Error("native_controlled_bridge_disabled");
     const source: { run: string | null; context: NativeContext | null } = { run: null, context: null };
     await expect.poll(async () => {
       const facts = await this.facts();
@@ -307,9 +444,61 @@ export class NativeFixture {
     const record: Checkpoint = { schema_version: 1, owner_uid: uid(), workspace_id: this.manifest.workspace_id, allocation_id: this.manifest.allocation_id,
       config_hash: this.manifest.config_hash, step: this.stage, step_id: stepId, status, original_ids: structuredClone(this.ids), versions: { ...this.versions },
       fingerprint: stageFingerprint(this.manifest, this.stage), observed, time: new Date().toISOString(), sequence };
-    noSecrets(record);
+    noSecrets(record, this.manifest.mode === "real");
+    if (this.realCase !== "main") {
+      if (status === "invalidated") throw new Error("native_real_focused_receipt_refused");
+      this.recordFocusedReal(status, observed);
+      return record;
+    }
     writeProtected(join(this.manifest.checkpoint_path, `${record.sequence}-${randomUUID()}.json`), record);
     return record;
+  }
+  recordFocusedReal(status: RealFocusedReceipt["status"], observed: Ids = {}): string {
+    const previous = realFocusedRecords(this.manifest, this.realCase, this.caseId);
+    for (const record of previous) for (const [key, value] of Object.entries(record.original_ids)) {
+      if (this.ids[key] === undefined || canonical(this.ids[key]) !== canonical(value)) throw new Error("native_real_original_identity_changed");
+    }
+    if (this.realCase === "main" || !this.caseId) throw new Error("native_real_focused_receipt_refused");
+    const sequence = Math.max(Date.now() * 1000, (previous.at(-1)?.sequence ?? 0) + 1);
+    const receipt: RealFocusedReceipt = { schema_version: 1, owner_uid: uid(), allocation_id: this.manifest.allocation_id,
+      workspace_id: this.manifest.workspace_id, config_hash: this.manifest.config_hash, source_pins: structuredClone(this.manifest.source_pins),
+      case: this.realCase, case_uuid: this.caseId, step: this.stage, status, original_ids: structuredClone(this.ids), observed,
+      sequence, time: new Date().toISOString() };
+    noSecrets(receipt, true);
+    const path = join(dirname(this.manifest.transport_path), `focused-real-${this.realCase}-${this.caseId}-${sequence}-${randomUUID()}.json`);
+    writeProtected(path, receipt);
+    return path;
+  }
+  async queryRealOriginalOperations() {
+    if (this.manifest.mode !== "real") throw new Error("native_real_mutation_refused");
+    const ids: Ids = { ...this.ids };
+    if (this.caseId) {
+      for (const record of realFocusedRecords(this.manifest, this.realCase, this.caseId)) Object.assign(ids, record.original_ids);
+    }
+    for (const [name, original] of Object.entries(ids)) {
+      if (typeof original !== "string" || !uuid(original)) continue;
+      if (name.endsWith("_command_id")) await this.get(this.prefix() + `commands/${original}`);
+      else if (/^(?:target_)?(?:profile_create|configuration|task_tool_resource)_operation_id$/.test(name)) {
+        await this.get(`/product/v1/workspaces/${this.manifest.workspace_id}/configuration-requests?operationId=${original}`);
+      }
+    }
+    if (typeof ids.turn_operation_id === "string" && uuid(ids.thread_id)) {
+      await this.get(`/main-agent/v1/threads/${String(ids.thread_id)}`);
+      if (uuid(ids.turn_id)) await this.get(`/main-agent/v1/threads/${String(ids.thread_id)}/turns/${String(ids.turn_id)}`);
+    }
+    if (uuid(ids.input_operation_id) && uuid(ids.source_execution_id) && uuid(ids.source_session_id)) {
+      await this.get(`/api/v1/gateway/inputs?workspace_id=${this.manifest.workspace_id}&execution_id=${String(ids.source_execution_id)}&session_id=${String(ids.source_session_id)}`);
+    }
+    if (uuid(ids.handoff_transition_id)) await this.get(this.prefix() + `handoff-transitions/${String(ids.handoff_transition_id)}`);
+  }
+  async requireFreshRealMutation(key: string, value: Json) {
+    if (this.manifest.mode !== "real") throw new Error("native_real_mutation_refused");
+    if (this.caseId) await this.queryRealOriginalOperations();
+    if (this.ids[key] !== undefined) {
+      if (!this.caseId && key.endsWith("_command_id")) await this.get(this.prefix() + `commands/${String(this.ids[key])}`);
+      throw new Error("native_real_original_admission_query_only");
+    }
+    this.original(key, value);
   }
   recordFocusedTransition(observed: Ids): string {
     if (nativeScenario(this.manifest) !== "transition") throw new Error("native_focused_receipt_refused");
@@ -334,7 +523,9 @@ export class NativeFixture {
   }
   async observe(record: Checkpoint): Promise<boolean> {
     await this.saveSession();
-    return this.python("import importlib.util,json,sys\nfrom pathlib import Path\np=json.load(sys.stdin)\ns=importlib.util.spec_from_file_location('native_check',Path(p['source_root'])/'scripts/native-harness-check.py')\nm=importlib.util.module_from_spec(s);s.loader.exec_module(m)\nc=m.NativeCheck(m.read_manifest(p['manifest'],allow_ui_change=True))\nprint(json.dumps(c._observe(p['record'])))", {
+    if (this.realCase !== "main") throw new Error("native_real_focused_public_proof_required");
+    const observer = this.manifest.mode === "real" ? "_observe_real" : "_observe";
+    return this.python(`import importlib.util,json,sys\nfrom pathlib import Path\np=json.load(sys.stdin)\ns=importlib.util.spec_from_file_location('native_check',Path(p['source_root'])/'scripts/native-harness-check.py')\nm=importlib.util.module_from_spec(s);s.loader.exec_module(m)\nc=m.NativeCheck(m.read_manifest(p['manifest'],allow_ui_change=True))\nprint(json.dumps(c.${observer}(p['record'])))`, {
       source_root: this.manifest.source_root, manifest: join(dirname(this.manifest.transport_path), "manifest.json"), record,
     }) === true;
   }
@@ -414,17 +605,24 @@ export class NativeFixture {
       if (this.readOnly) { await route.abort("blockedbyclient"); return; }
       if (commandId && commandType) {
         const key = { ConfirmPlanningProposal: "confirmation_command_id", SendExecutionInput: "input_command_id", CompleteTask: "acceptance_command_id",
-          PrepareProfileHandoff: "handoff_prepare_command_id", ConfirmProfileHandoff: "handoff_confirm_command_id" }[commandType];
+          PrepareProfileHandoff: "handoff_prepare_command_id", ConfirmProfileHandoff: "handoff_confirm_command_id" }[commandType] ??
+          (this.manifest.mode === "real" ? `planning_feedback_${String(body.expected_version)}_command_id` : undefined);
         if (key) {
+          if (this.manifest.mode === "real") await this.requireFreshRealMutation(key, commandId);
           if (this.ids[key] && this.ids[key] !== commandId) throw new Error("native_replacement_command_refused");
           this.ids[key] = commandId;
         }
         if (typeof body.expected_version === "number") this.versions[commandType] = body.expected_version;
       }
       if (typeof body.operationId === "string") {
-        if (url.pathname.endsWith("/turns")) this.ids.turn_operation_id = body.operationId;
+        if (url.pathname.endsWith("/turns")) {
+          if (this.manifest.mode === "real") await this.requireFreshRealMutation("turn_operation_id", body.operationId);
+          else this.ids.turn_operation_id = body.operationId;
+        }
         else this.configurationIntent(url.pathname, body);
       }
+      if (this.manifest.mode === "real" && url.pathname === "/main-agent/v1/threads") await this.requireFreshRealMutation("thread_create_intent_id", randomUUID());
+      if (this.manifest.mode === "real" && url.pathname.endsWith("/runtimes")) await this.requireFreshRealMutation("runtime_registration_intent_id", randomUUID());
       this.record("pending", { payload_fingerprint: sha(canonical(body)), mutating_intent: true });
       if (commandType === "SendExecutionInput" && this.loseInputResponse && !this.lostInput) {
         this.lostInput = true;
@@ -458,7 +656,7 @@ export class NativeFixture {
     if ((create || bind) && ["succeeded", "reconciled"].includes(String(value.state))) {
       const operationKey = create ? "profile_create_operation_id" : "configuration_operation_id";
       const prefixes = ["", "target_"].filter(prefix => this.ids[`${prefix}${operationKey}`] === value.operationId);
-      if (prefixes.length !== 1) throw new Error("native_configuration_capture_refused");
+      if (prefixes.length !== 1 || (this.manifest.mode === "real" && !uuid(value.operationId))) throw new Error("native_configuration_capture_refused");
       const prefix = prefixes[0];
       const ref = value.result_ref;
       if (!object(ref) || Object.keys(ref).sort().join() !== "profile_id,revision,workspace_id" || !uuid(ref.profile_id) ||
@@ -469,15 +667,24 @@ export class NativeFixture {
       if (create) {
         this.original(`${prefix}profile_create_ref`, ref as Json);
         this.original(`${prefix}profile_id`, ref.profile_id);
-        if (this.ids[`${prefix}profile_ref`] === undefined) this.ids[`${prefix}profile_ref`] = ref as Json;
+        if (this.manifest.mode === "fake" && this.ids[`${prefix}profile_ref`] === undefined) this.ids[`${prefix}profile_ref`] = ref as Json;
       } else {
         const created = this.ids[`${prefix}profile_create_ref`], current = this.ids[`${prefix}profile_ref`];
+        const resource = this.ids.task_tool_resource_ref;
         if (!object(created) || created.revision !== 1 || created.profile_id !== ref.profile_id ||
           path !== root + `/profiles/${ref.profile_id}/revisions` ||
           canonical(this.ids[`${prefix}configuration_expected_ref`]) !== canonical(created) ||
-          !object(this.ids.task_tool_resource_ref) || canonical(this.ids[`${prefix}configuration_resource_ref`]) !== canonical(this.ids.task_tool_resource_ref) ||
-          (canonical(current) !== canonical(created) && canonical(current) !== canonical(ref))) throw new Error("native_configuration_capture_refused");
-        this.ids[`${prefix}profile_ref`] = ref as Json;
+          !object(resource) || canonical(this.ids[`${prefix}configuration_resource_ref`]) !== canonical(resource) ||
+          (this.manifest.mode === "real" ?
+            Object.keys(created).sort().join() !== "profile_id,revision,workspace_id" || created.workspace_id !== this.manifest.workspace_id ||
+            Object.keys(resource).sort().join() !== "resource_id,revision,workspace_id" || !uuid(resource.resource_id) ||
+            resource.workspace_id !== this.manifest.workspace_id || resource.revision !== 1 ||
+            !uuid(this.ids[`${prefix}profile_create_operation_id`]) || !uuid(this.ids.task_tool_resource_operation_id) ||
+            new Set([this.ids[`${prefix}profile_create_operation_id`], value.operationId, this.ids.task_tool_resource_operation_id]).size !== 3 ||
+            (current !== undefined && canonical(current) !== canonical(ref)) :
+            canonical(current) !== canonical(created) && canonical(current) !== canonical(ref))) throw new Error("native_configuration_capture_refused");
+        if (this.manifest.mode === "real") this.original(`${prefix}profile_ref`, ref as Json);
+        else this.ids[`${prefix}profile_ref`] = ref as Json;
       }
     }
     if (path === "/main-agent/v1/threads" && uuid(value.id)) this.ids.thread_id = value.id;
@@ -513,8 +720,17 @@ export class NativeFixture {
     await this.saveSession();
   }
   repositoryProof(candidate: ResultDetail["candidate"], checks: ResultDetail["verifications"]): Json {
+    if (this.manifest.mode !== "fake") throw new Error("native_fake_repository_proof_disabled");
     return this.python("import json,sys\nfrom pathlib import Path\nfrom types import SimpleNamespace\nfrom tests.support.native_product_flow import verify_result_repository\np=json.load(sys.stdin)\nlab=SimpleNamespace(repository=Path(p['repository']),manifest={'repository_head':p['original_head']})\nprint(json.dumps(verify_result_repository(lab,p['candidate'],p['checks'])))", {
       repository: this.manifest.repository_directory, original_head: this.manifest.repository_head, candidate, checks,
+    }) as Json;
+  }
+  realRepositoryProof(candidate: ResultDetail["candidate"], checks: ResultDetail["verifications"]): Json {
+    if (this.manifest.mode !== "real" || !candidate.result_commit || !candidate.result_tree ||
+      !/^[0-9a-f]{40}$/.test(candidate.result_commit) || !/^[0-9a-f]{40}$/.test(candidate.result_tree)) throw new Error("native_real_candidate_refused");
+    const config = loadRealConfig(this.manifest);
+    return this.python(`import hashlib,json,os,re,subprocess,sys\nfrom pathlib import Path\np=json.load(sys.stdin)\nc=p['candidate'];commit=c['result_commit'];tree=c['result_tree']\nassert re.fullmatch('[0-9a-f]{40}',commit) and re.fullmatch('[0-9a-f]{40}',tree)\ndef git(*args):\n r=subprocess.run(['git','-C',p['repository'],*args],capture_output=True,timeout=30,check=True,env={'HOME':os.environ['HOME'],'PATH':'/usr/bin:/bin','PYTHONDONTWRITEBYTECODE':'1'})\n assert len(r.stdout)<=2097152\n return r.stdout\nassert git('rev-parse',commit+'^{tree}').decode().strip()==tree\nseed=git('show',p['original_head']+':verify_demo.py')\nassert hashlib.sha256(seed).hexdigest()==p['seed_sha256']\nassert git('show',commit+':verify_demo.py')==seed\nassert any(v['candidate_id']==c['candidate_id'] and v['check_key']=='owned-check' and v['status']=='passed' and type(v['exit_code']) is int and v['exit_code']==0 and v['actual_commit']==commit and v['actual_tree']==tree for v in p['checks'])\noutputs={}\nfor name in ('config_contract.json','config_cli.py','test_config_cli.py','integration_report.md'):\n raw=git('show',commit+':'+name)\n assert raw.strip()\n outputs[name]={'sha256':hashlib.sha256(raw).hexdigest(),'bytes':len(raw)}\n if name=='config_contract.json':\n  contract=json.loads(raw);assert contract['exit_codes']=={'OK':0,'INVALID_CONFIGURATION':2,'INVALID_JSON':3,'INPUT_UNAVAILABLE':4}\nprint(json.dumps({'result_commit':commit,'result_tree':tree,'verifier_sha256':p['seed_sha256'],'outputs':outputs}))`, {
+      repository: this.manifest.repository_directory, original_head: this.manifest.repository_head, seed_sha256: config.verification.seed_sha256, candidate, checks,
     }) as Json;
   }
   async screenshot(name: string) {
@@ -546,7 +762,24 @@ export const test = base.extend<{ native: NativeFixture }>({
 });
 export { expect };
 
+export const realTest = base.extend<{ native: NativeFixture }>({
+  native: async ({ page }, runFixture) => {
+    const path = process.env.SIDERA_NATIVE_MANIFEST;
+    if (!path || process.env.SIDERA_NATIVE_REAL_ENTRY !== "1") throw new Error("native_real_explicit_entry_required");
+    const manifest = loadOwnedManifest(path, realNavigationRecovery());
+    if (manifest.mode !== "real") throw new Error("native_real_mode_required");
+    const native = new NativeFixture(page, manifest, process.env.SIDERA_NATIVE_READ_ONLY === "1");
+    await native.installObservation();
+    try { await runFixture(native); }
+    catch {
+      native.record("incomplete", { admission: "UNKNOWN", reason: "native_real_original_read_required" });
+      throw new Error("native_real_original_read_required");
+    } finally { await native.saveSession(); }
+  },
+});
+
 export async function assertNativeNavigation(native: NativeFixture): Promise<Ids> {
+  if (native.manifest.mode !== "fake") throw new Error("native_fake_navigation_disabled");
   const { page } = native, root = native.id("root_task_id"), source = native.id("source_worker_item_id");
   const before = native.mutations.length;
   const screenshots: Json[] = [];

@@ -516,6 +516,7 @@ class ProductRequestAuthorizer:
                     "CancelPlanningRequest",
                     "AnswerPlanningClarification",
                     "RequestProposalRevision",
+                    "ReviseFailedPlanningRequest",
                     "RejectPlanningProposal",
                     "ConfirmPlanningProposal",
                     "ConfirmPlanRevision",
@@ -545,6 +546,7 @@ class ProductRequestAuthorizer:
                     "CancelWorkerHandoff",
                     "RecoverWorkerHandoff",
                     "RetryBlockedPlanningRun",
+                    "RepairPlanningContext",
                 }
             ):
                 return

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import cast
 from uuid import UUID, uuid4
 
@@ -44,6 +46,11 @@ from sidera_control_plane.domain.planning import (
     PlanningRunStatus,
 )
 from sidera_control_plane.domain.revision_diff import NormalizedRevisionDiff
+from tests.unit.test_agent_planner import (
+    native_snapshot,
+    native_start_case,  # noqa: F401
+    planner_drain_case,  # noqa: F401
+)
 from tests.unit.test_planning_commands import module_facts, profile
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
@@ -123,8 +130,7 @@ class RunStore:
         return tuple(
             run
             for run in self.state.request.runs
-            if run.status is PlanningRunStatus.QUEUED
-            and run.queued_at <= now
+            if run.status is PlanningRunStatus.QUEUED and run.queued_at <= now
         )[:limit]
 
     def get(self, run_id, workspace_id, *, for_update=False):
@@ -223,13 +229,15 @@ class ProjectionStore:
         self.state.projection_changes.append(kwargs)
 
 
-def _request() -> PlanningRequest:
+def _request(*, profile_snapshot=None) -> PlanningRequest:
     definition, instance = module_facts()
     assert isinstance(definition.capabilities, PlannerAdapterCapabilityProfile)
-    snapshot = profile(instance.id).snapshot(definition.capabilities)
+    snapshot = profile_snapshot or profile(instance.id).snapshot(
+        definition.capabilities
+    )
     return PlanningRequest.create(
         request_id=uuid4(),
-        workspace_id=WORKSPACE_ID,
+        workspace_id=snapshot.workspace_id,
         profile_snapshot=snapshot,
         objective="Build a recoverable planner worker",
         constraints=("Keep the API request non-blocking",),
@@ -264,9 +272,11 @@ def test_registry_does_not_fallback_for_an_unknown_provider() -> None:
     assert isinstance(definition.capabilities, PlannerAdapterCapabilityProfile)
     snapshot = profile(instance.id).snapshot(definition.capabilities)
     factory = RegistryPlannerAdapterFactory(
-        {"fake": lambda config, secrets: FakePlannerAdapter(
-            FakePlannerConfig(scenario="proposal")
-        )}
+        {
+            "fake": lambda config, secrets: FakePlannerAdapter(
+                FakePlannerConfig(scenario="proposal")
+            )
+        }
     )
 
     with pytest.raises(PlanningAdapterUnavailable) as exc_info:
@@ -289,9 +299,11 @@ def test_registry_secret_failure_is_safe(monkeypatch: pytest.MonkeyPatch) -> Non
     )
     monkeypatch.delenv("PLANNING_TEST_MISSING", raising=False)
     factory = RegistryPlannerAdapterFactory(
-        {"fake": lambda config, secrets: FakePlannerAdapter(
-            FakePlannerConfig(scenario="proposal")
-        )}
+        {
+            "fake": lambda config, secrets: FakePlannerAdapter(
+                FakePlannerConfig(scenario="proposal")
+            )
+        }
     )
 
     with pytest.raises(PlanningAdapterUnavailable) as exc_info:
@@ -408,9 +420,7 @@ def test_fake_planner_emits_v3_for_a_revision_context() -> None:
         kind=PlanningRequestKind.REVISION,
     )
 
-    result = FakePlannerAdapter(
-        FakePlannerConfig(scenario="revision")
-    ).plan(
+    result = FakePlannerAdapter(FakePlannerConfig(scenario="revision")).plan(
         planner_input,
         PlannerRunControl(
             operation_id=planner_input.operation_id,
@@ -501,3 +511,597 @@ def test_runner_persists_structured_failures(scenario: str) -> None:
     assert result.failed == 1 or result.blocked == 1
     assert state.request.status is PlanningRequestStatus.FAILED
     assert state.request.runs[-1].error_code in {"timeout", "unknown_outcome"}
+
+
+@pytest.fixture
+def native_result_case(request):
+    from sidera_agents.contracts import EventPage, RunEvent
+
+    from sidera_control_plane.application.agent_planner_adapter import (
+        AgentPlannerAdapter,
+    )
+    from sidera_control_plane.application.agent_worker_adapter import (
+        request_fingerprint,
+    )
+    from sidera_control_plane.domain.context_packages import (
+        ContextAssemblyStatus,
+        ContextPackageStatus,
+    )
+
+    original = request.getfixturevalue("planner_drain_case")
+    snapshot = replace(
+        native_snapshot(_request().profile_snapshot),
+        workspace_id=original.authority.workspace_id,
+        planner_agent_ref=original.authority.profile_ref,
+    )
+    state = MemoryState(_request(profile_snapshot=snapshot))
+    state.owner = True
+    state.authority = None
+    state.link = None
+    state.uow_calls = 0
+    state.recover_calls = 0
+    state.observations = []
+    package = SimpleNamespace(
+        status=ContextPackageStatus.ACTIVE,
+        expires_at=NOW + timedelta(minutes=1),
+        work_context_revision_id=uuid4(),
+    )
+
+    def save_link(link, **changes):
+        assert link == state.link
+        state.link = replace(link, **changes)
+        return state.link
+
+    def save_observation(link, *, event_cursor, response_id, closed):
+        state.observations.append((event_cursor, response_id, closed))
+        return save_link(
+            link,
+            event_cursor=event_cursor,
+            response_id=response_id,
+            status="closed" if closed else link.status,
+            closed=closed,
+        )
+
+    @contextmanager
+    def owned_uow():
+        state.uow_calls += 1
+        uow = MemoryUow(state)
+        uow.context_assemblies = SimpleNamespace(
+            get_for_consumer=lambda *args: SimpleNamespace(
+                status=ContextAssemblyStatus.READY
+            )
+        )
+        uow.context_packages = SimpleNamespace(get_for_consumer=lambda *args: package)
+        uow.work_contexts = SimpleNamespace(
+            get_revision=lambda *args: SimpleNamespace()
+        )
+        uow.planning_authorities = SimpleNamespace(
+            get=lambda authority_id, **kwargs: (
+                state.authority
+                if state.authority is not None and authority_id == state.authority.id
+                else None
+            ),
+            get_link=lambda workspace_id, run_id, **kwargs: (
+                state.link
+                if (workspace_id, run_id)
+                == (state.request.workspace_id, state.request.runs[-1].id)
+                else None
+            ),
+            save_link=save_link,
+            save_original_observation=save_observation,
+        )
+        yield uow
+
+    def install_original():
+        run = state.request.runs[-1]
+        lease = next(iter(state.leases.values()))
+        start = original.state.link.start_request.model_copy(
+            update={"operation_id": run.operation_id}
+        )
+        state.authority = replace(
+            original.authority,
+            planning_request_id=state.request.id,
+            planning_run_id=run.id,
+            planning_profile_id=snapshot.profile_id,
+            planning_profile_version=snapshot.profile_version,
+            operation_id=run.operation_id,
+            lease_id=lease.id,
+            owner_id="planner",
+            fencing_token=lease.fencing_token,
+            actions=("run.read", "run.stop", "profile.read"),
+        )
+        state.link = replace(
+            original.state.link,
+            planning_run_id=run.id,
+            start_operation_id=run.operation_id,
+            start_request=start,
+            request_sha256=request_fingerprint(start),
+            start_receipt=original.state.link.start_receipt.model_copy(
+                update={"operation_id": run.operation_id}
+            ),
+        )
+        original.state.snapshot = type(original.state.snapshot).model_validate(
+            {
+                **original.state.snapshot.model_dump(),
+                "state": "completed",
+                "last_event_sequence": 4,
+            }
+        )
+        original.state.events = tuple(
+            RunEvent(
+                run_id=state.link.run_id,
+                sequence=sequence,
+                kind=kind,
+                occurred_at=NOW,
+                operation_id=run.operation_id,
+                response_id=original.response_id if sequence < 4 else None,
+                data=data,
+            )
+            for sequence, kind, data in (
+                (1, "response.started", {}),
+                (
+                    2,
+                    "message",
+                    {
+                        "update_type": "agent_message",
+                        "text": '{"result_type":"clarification","clarifications":[{"question":"Which output?","rationale":"Missing output","answer_type":"text","options":[],"blocking":true}]}',
+                    },
+                ),
+                (3, "response.completed", {}),
+                (4, "run.closed", {"status": "completed"}),
+            )
+        )
+        return state.link
+
+    def events(workspace_id, run_id, cursor, limit=100, *, grant_id):
+        assert (workspace_id, run_id, grant_id) == (
+            state.link.workspace_id,
+            state.link.run_id,
+            state.link.authority_id,
+        )
+        visible = tuple(
+            event for event in original.state.events if event.sequence > cursor
+        )[:limit]
+        return EventPage(
+            events=visible,
+            next_sequence=visible[-1].sequence if visible else cursor,
+            has_more=False,
+        )
+
+    services = original.adapter._services
+    services.execution.list_events = events
+    adapter = AgentPlannerAdapter(
+        services=services,
+        uow_factory=owned_uow,
+        workspace_provider=SimpleNamespace(),
+        materializer=None,
+        authorizer=SimpleNamespace(require=lambda *args: None),
+        clock=lambda: NOW,
+        owner_check=lambda: state.owner,
+    )
+    factory = StaticPlannerFactory(adapter)
+    runner = PlanningRunner(
+        uow_factory=owned_uow,
+        adapter_factory=factory,
+        owner_id="planner",
+        lease_renew_interval_seconds=0,
+        clock=lambda: NOW,
+        owner_check=lambda: state.owner,
+    )
+    return SimpleNamespace(
+        runner=runner,
+        adapter=adapter,
+        factory=factory,
+        state=state,
+        original=original,
+        install_original=install_original,
+    )
+
+
+def _claim_native_original(case):
+    batch = case.runner._claim(1)
+    assert len(batch.items) == 1
+    case.install_original()
+    return batch
+
+
+def test_native_live_result_owns_recovery_until_persistence(
+    native_result_case, monkeypatch
+):
+    case = native_result_case
+    claim = _claim_native_original(case)
+    monkeypatch.setattr(case.runner, "_claim", lambda limit: claim)
+    live_plan = case.adapter.plan
+    recover = case.adapter.recover_original_result
+    persist = case.runner._persist_result
+    seen = []
+
+    def observe_recovery(planner_input):
+        case.state.recover_calls += 1
+        return recover(planner_input)
+
+    def competing_recovery(planner_input, control):
+        before = case.state.uow_calls
+        result = case.runner.reconcile_original_run(case.state.link)
+        seen.append((result, case.state.uow_calls - before))
+        return live_plan(planner_input, control)
+
+    def persist_after_probe(item, result):
+        before = case.state.uow_calls
+        recovered = case.runner.reconcile_original_run(case.state.link)
+        seen.append((recovered, case.state.uow_calls - before))
+        return persist(item, result)
+
+    monkeypatch.setattr(case.adapter, "recover_original_result", observe_recovery)
+    monkeypatch.setattr(case.adapter, "plan", competing_recovery)
+    monkeypatch.setattr(case.runner, "_persist_result", persist_after_probe)
+    batch = case.runner.run_once(1)
+    assert seen == [(None, 0), (None, 0)]
+    assert batch.clarifications == 1 and len(case.state.clarifications) == 1
+    assert case.state.recover_calls == 0 and case.state.observations == []
+    assert case.factory.calls == 1
+    assert not case.original.state.starts and not case.original.state.stops
+    before = case.state.uow_calls
+    assert case.runner.reconcile_original_run(case.state.link) is None
+    assert case.state.uow_calls > before
+
+
+def test_native_outer_failure_persistence_keeps_result_ownership(
+    native_result_case, monkeypatch
+):
+    case = native_result_case
+    claim = _claim_native_original(case)
+    monkeypatch.setattr(case.runner, "_claim", lambda limit: claim)
+    persist = case.runner._persist_failure
+    seen = []
+
+    def fail_execute(item):
+        raise RuntimeError("controlled outer execution failure")
+
+    def persist_after_probe(item, failure, **kwargs):
+        before = case.state.uow_calls
+        result = case.runner.reconcile_original_run(case.state.link)
+        seen.append((result, case.state.uow_calls - before))
+        return persist(item, failure, **kwargs)
+
+    monkeypatch.setattr(case.runner, "_execute", fail_execute)
+    monkeypatch.setattr(case.runner, "_persist_failure", persist_after_probe)
+    batch = case.runner.run_once(1)
+    assert seen == [(None, 0)]
+    assert batch.failed == 1 and batch.outcomes[0].code == "planning_worker_error"
+    assert case.state.observations == [] and case.factory.calls == 0
+    before = case.state.uow_calls
+    assert case.runner.reconcile_original_run(case.state.link) is None
+    assert case.state.uow_calls > before
+
+
+def test_native_duplicate_recovery_skips_business_read_and_releases(
+    native_result_case, monkeypatch
+):
+    case = native_result_case
+    _claim_native_original(case)
+    recover = case.adapter.recover_original_result
+    seen = []
+    entered = False
+
+    def recover_after_probe(planner_input):
+        nonlocal entered
+        if not entered:
+            entered = True
+            before = case.state.uow_calls
+            result = case.runner.reconcile_original_run(case.state.link)
+            seen.append((result, case.state.uow_calls - before))
+        case.state.recover_calls += 1
+        return recover(planner_input)
+
+    monkeypatch.setattr(case.adapter, "recover_original_result", recover_after_probe)
+    outcome = case.runner.reconcile_original_run(case.state.link)
+    assert seen == [(None, 0)]
+    assert outcome.status is PlanningRunStatus.NEEDS_CLARIFICATION
+    assert case.state.recover_calls == 1 and len(case.state.clarifications) == 1
+    assert len(case.state.observations) == 1 and case.factory.calls == 1
+    before = case.state.uow_calls
+    assert case.runner.reconcile_original_run(case.state.link) is None
+    assert case.state.uow_calls > before
+    assert not case.original.state.starts and not case.original.state.stops
+
+
+@pytest.mark.parametrize("different", ("run", "workspace"))
+def test_native_other_key_recovery_enters_business_read(
+    native_result_case, monkeypatch, different
+):
+    from sidera_control_plane.application.agent_worker_adapter import (
+        request_fingerprint,
+    )
+    from sidera_control_plane.domain.planning import planning_operation_id
+
+    case = native_result_case
+    _claim_native_original(case)
+    other_request = replace(
+        case.state.request,
+        runs=tuple(replace(run) for run in case.state.request.runs),
+    )
+    other_run = other_request.runs[-1]
+    if different == "run":
+        other_run.id = uuid4()
+    else:
+        other_request.workspace_id = other_run.workspace_id = uuid4()
+        other_request.profile_snapshot = other_run.profile_snapshot = replace(
+            other_run.profile_snapshot,
+            workspace_id=other_request.workspace_id,
+            planner_agent_ref=other_run.profile_snapshot.planner_agent_ref.model_copy(
+                update={"workspace_id": other_request.workspace_id}
+            ),
+        )
+    other_run.operation_id = planning_operation_id(other_run.id, other_run.attempt)
+    other_lease = replace(
+        next(iter(case.state.leases.values())),
+        id=uuid4(),
+        workspace_id=other_request.workspace_id,
+        planning_run_id=other_run.id,
+    )
+    other_run.lease_id = other_lease.id
+    other_authority = replace(
+        case.state.authority,
+        id=uuid4(),
+        workspace_id=other_request.workspace_id,
+        planning_run_id=other_run.id,
+        operation_id=other_run.operation_id,
+        lease_id=other_lease.id,
+        profile_ref=other_run.profile_snapshot.planner_agent_ref,
+        runtime_ref=case.state.authority.runtime_ref.model_copy(
+            update={"workspace_id": other_request.workspace_id}
+        ),
+    )
+    start = case.state.link.start_request.model_copy(
+        update={
+            "operation_id": other_run.operation_id,
+            "grant_id": other_authority.id,
+            "profile_ref": other_authority.profile_ref,
+        }
+    )
+    other_native_run_id = uuid4()
+    other_link = replace(
+        case.state.link,
+        workspace_id=other_request.workspace_id,
+        planning_run_id=other_run.id,
+        authority_id=other_authority.id,
+        start_operation_id=other_run.operation_id,
+        profile_ref=other_authority.profile_ref,
+        start_request=start,
+        request_sha256=request_fingerprint(start),
+        run_id=other_native_run_id,
+        start_receipt=case.state.link.start_receipt.model_copy(
+            update={
+                "operation_id": other_run.operation_id,
+                "run_id": other_native_run_id,
+            }
+        ),
+    )
+    other_events = tuple(
+        event.model_copy(
+            update={
+                "run_id": other_native_run_id,
+                "operation_id": other_run.operation_id,
+            }
+        )
+        for event in case.original.state.events
+    )
+    other_snapshot = case.original.state.snapshot.model_copy(
+        update={
+            "run_id": other_native_run_id,
+            "workspace_id": other_request.workspace_id,
+            "profile_ref": other_authority.profile_ref,
+            "effective_config": case.original.state.snapshot.effective_config.model_copy(
+                update={
+                    "profile_ref": other_authority.profile_ref,
+                    "runtime_ref": other_authority.runtime_ref,
+                }
+            ),
+        }
+    )
+    recover = case.adapter.recover_original_result
+    seen = []
+    entered = False
+
+    def recover_after_probe(planner_input):
+        nonlocal entered
+        if not entered:
+            entered = True
+            saved = (
+                case.state.request,
+                case.state.leases,
+                case.state.authority,
+                case.state.link,
+                case.original.state.events,
+                case.original.state.snapshot,
+            )
+            try:
+                case.state.request, case.state.leases = (
+                    other_request,
+                    {other_lease.id: other_lease},
+                )
+                case.state.authority, case.state.link = other_authority, other_link
+                case.original.state.events, case.original.state.snapshot = (
+                    other_events,
+                    other_snapshot,
+                )
+                seen.append(case.runner.reconcile_original_run(other_link))
+                assert other_lease.status is PlanningRunLeaseStatus.RELEASED
+            finally:
+                (
+                    case.state.request,
+                    case.state.leases,
+                    case.state.authority,
+                    case.state.link,
+                    case.original.state.events,
+                    case.original.state.snapshot,
+                ) = saved
+        return recover(planner_input)
+
+    monkeypatch.setattr(case.adapter, "recover_original_result", recover_after_probe)
+    assert (
+        case.runner.reconcile_original_run(case.state.link).status
+        is PlanningRunStatus.NEEDS_CLARIFICATION
+    )
+    assert len(seen) == 1 and seen[0].run_id == other_run.id
+    assert seen[0].status is PlanningRunStatus.NEEDS_CLARIFICATION
+    assert len(case.state.clarifications) == 2 and len(case.state.observations) == 2
+    assert not case.original.state.starts and not case.original.state.stops
+
+
+@pytest.mark.parametrize("ending", ("success", "early", "exception"))
+def test_native_recovery_releases_slot_on_every_exit(
+    native_result_case, monkeypatch, ending
+):
+    case = native_result_case
+    _claim_native_original(case)
+    authority = case.state.authority
+    events = case.adapter._services.execution.list_events
+    if ending == "early":
+        case.state.authority = None
+        assert case.runner.reconcile_original_run(case.state.link) is None
+        case.state.authority = authority
+    elif ending == "exception":
+
+        def fail_read(*args, **kwargs):
+            raise RuntimeError("controlled original read failure")
+
+        monkeypatch.setattr(case.adapter._services.execution, "list_events", fail_read)
+        with pytest.raises(RuntimeError, match="controlled original read failure"):
+            case.runner.reconcile_original_run(case.state.link)
+        monkeypatch.setattr(case.adapter._services.execution, "list_events", events)
+    else:
+        assert (
+            case.runner.reconcile_original_run(case.state.link).status
+            is PlanningRunStatus.NEEDS_CLARIFICATION
+        )
+    before = case.state.uow_calls
+    outcome = case.runner.reconcile_original_run(case.state.link)
+    assert case.state.uow_calls > before
+    if ending != "success":
+        assert outcome.status is PlanningRunStatus.NEEDS_CLARIFICATION
+    assert not case.original.state.starts and not case.original.state.stops
+
+
+def test_native_busy_recovery_still_requires_gateway_owner(
+    native_result_case, monkeypatch
+):
+    from sidera_agents.errors import AgentError
+
+    case = native_result_case
+    _claim_native_original(case)
+    recover = case.adapter.recover_original_result
+
+    def lose_owner_during_recovery(planner_input):
+        before = case.state.uow_calls
+        case.state.owner = False
+        try:
+            with pytest.raises(AgentError) as exc_info:
+                case.runner.reconcile_original_run(case.state.link)
+            assert exc_info.value.code == "gateway_owner_lost"
+            assert case.state.uow_calls == before
+        finally:
+            case.state.owner = True
+        return recover(planner_input)
+
+    monkeypatch.setattr(
+        case.adapter, "recover_original_result", lose_owner_during_recovery
+    )
+    assert (
+        case.runner.reconcile_original_run(case.state.link).status
+        is PlanningRunStatus.NEEDS_CLARIFICATION
+    )
+
+
+def test_native_duplicate_claim_does_not_execute_or_persist_failure(
+    native_result_case, monkeypatch
+):
+    case = native_result_case
+    claim = _claim_native_original(case)
+    monkeypatch.setattr(case.runner, "_claim", lambda limit: claim)
+    live_plan = case.adapter.plan
+    duplicate = []
+
+    def plan_after_duplicate(planner_input, control):
+        if not duplicate:
+            duplicate.append(None)
+            duplicate[0] = case.runner.run_once(1)
+        return live_plan(planner_input, control)
+
+    monkeypatch.setattr(case.adapter, "plan", plan_after_duplicate)
+    result = case.runner.run_once(1)
+    outcome = duplicate[0].outcomes[0]
+    assert (outcome.status, outcome.code, outcome.attempt, outcome.run_id) == (
+        "stale",
+        "native_original_active",
+        claim.items[0].attempt,
+        claim.items[0].run_id,
+    )
+    assert result.clarifications == 1 and len(case.state.clarifications) == 1
+    assert case.factory.calls == 1 and not case.state.observations
+    assert not case.original.state.starts and not case.original.state.stops
+
+
+def test_native_live_persistence_exception_releases_for_original_recovery(
+    native_result_case, monkeypatch
+):
+    case = native_result_case
+    claim = _claim_native_original(case)
+    monkeypatch.setattr(case.runner, "_claim", lambda limit: claim)
+
+    def fail_persistence(*args, **kwargs):
+        raise RuntimeError("controlled business persistence failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(case.runner, "_persist_result", fail_persistence)
+        patch.setattr(case.runner, "_persist_failure", fail_persistence)
+        with pytest.raises(
+            RuntimeError, match="controlled business persistence failure"
+        ):
+            case.runner.run_once(1)
+    outcome = case.runner.reconcile_original_run(case.state.link)
+    assert outcome.status is PlanningRunStatus.NEEDS_CLARIFICATION
+    assert len(case.state.clarifications) == 1
+
+
+@pytest.mark.parametrize("failure", (False, True))
+def test_legacy_execution_and_failure_persistence_do_not_acquire_native_slot(
+    monkeypatch, failure
+):
+    state = MemoryState(_request())
+    runner = _runner(
+        state, FakePlannerAdapter(FakePlannerConfig(scenario="clarification"))
+    )
+
+    def forbidden_slot(*args):
+        pytest.fail("legacy work entered the native result slot")
+
+    monkeypatch.setattr(runner, "_native_result_slot", forbidden_slot, raising=False)
+    if failure:
+
+        def fail_execute(item):
+            raise RuntimeError("controlled legacy execution failure")
+
+        monkeypatch.setattr(runner, "_execute", fail_execute)
+    result = runner.run_once(1)
+    assert result.failed == int(failure) and result.clarifications == int(not failure)
+
+
+@pytest.mark.parametrize("stale", ("lease", "profile", "brief", "revoked"))
+def test_native_recovery_preserves_original_fences(native_result_case, stale):
+    case = native_result_case
+    _claim_native_original(case)
+    if stale == "lease":
+        next(iter(case.state.leases.values())).expires_at = NOW
+    elif stale == "profile":
+        case.state.request.profile_snapshot = replace(
+            case.state.request.profile_snapshot, profile_version=2
+        )
+    elif stale == "brief":
+        case.state.request.runs[-1].brief_revision += 1
+    else:
+        case.state.authority = replace(case.state.authority, revoked=True)
+    assert case.runner.reconcile_original_run(case.state.link) is None
+    assert case.factory.calls == 0 and not case.state.observations
+    assert not case.original.state.starts and not case.original.state.stops

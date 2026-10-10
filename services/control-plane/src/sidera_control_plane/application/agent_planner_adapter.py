@@ -2,12 +2,13 @@
 
 import time
 from contextlib import ExitStack, nullcontext
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import uuid4
 
 from sidera_agents.contracts import (
     EventPage,
+    RunEvent,
     RunSnapshot,
     RunStart,
     RunStop,
@@ -48,6 +49,27 @@ from sidera_control_plane.domain.planning_authority import (
     PlanningAgentLink,
     PlanningAuthority,
 )
+
+
+@dataclass
+class _AssistantSegment:
+    text: str = ""
+    output_bytes: int = 0
+
+    def consume(self, event: RunEvent) -> None:
+        if event.kind == "tool":
+            self.text = ""
+            return
+        if event.kind not in {"message", "progress.updated"}:
+            return
+        update_type, value = event.data.get("update_type"), event.data.get("text")
+        if update_type not in {
+            "agent_message_chunk",
+            "agent_message",
+        } or not isinstance(value, str):
+            return
+        self.output_bytes += len(value.encode("utf-8"))
+        self.text = self.text + value if update_type == "agent_message_chunk" else value
 
 
 class AgentPlannerAdapter:
@@ -102,7 +124,8 @@ class AgentPlannerAdapter:
             return self.classify_failure(
                 planner_input, getattr(exc, "code", "permission_denied"), usage=usage
             )
-        text, cursor, response_id, response_completed = "", 0, None, False
+        assistant = _AssistantSegment()
+        cursor, response_id, response_completed = 0, None, False
         busy_count = 0
         while True:
             usage = replace(
@@ -227,29 +250,18 @@ class AgentPlannerAdapter:
                             )
                         response_id = event.response_id
                     elif response_id is not None and event.response_id == response_id:
-                        if event.kind in {"message", "progress.updated"}:
-                            update_type = event.data.get("update_type")
-                            value = event.data.get("text")
-                            if update_type in {
-                                "agent_message_chunk",
-                                "agent_message",
-                            } and isinstance(value, str):
-                                text = (
-                                    text + value
-                                    if update_type == "agent_message_chunk"
-                                    else value
-                                )
-                                if (
-                                    len(text.encode("utf-8"))
-                                    > planner_input.profile_snapshot.budget.max_context_bytes
-                                ):
-                                    return self._halt(
-                                        planner_input,
-                                        link,
-                                        "native_output_budget_exceeded",
-                                        usage,
-                                    )
-                        elif event.kind == "response.completed":
+                        assistant.consume(event)
+                        if (
+                            assistant.output_bytes
+                            > planner_input.profile_snapshot.budget.max_context_bytes
+                        ):
+                            return self._halt(
+                                planner_input,
+                                link,
+                                "native_output_budget_exceeded",
+                                usage,
+                            )
+                        if event.kind == "response.completed":
                             response_completed = True
                         elif event.kind == "usage":
                             usage = self._observed_usage(event, usage)
@@ -281,7 +293,10 @@ class AgentPlannerAdapter:
                         )
                     try:
                         return parse_planner_result(
-                            text, planner_input, "agent-run", observed_usage=usage
+                            assistant.text,
+                            planner_input,
+                            "agent-run",
+                            observed_usage=usage,
                         )
                     except (PlannerContractError, DomainError, TypeError, ValueError):
                         return self._failure(
@@ -303,7 +318,8 @@ class AgentPlannerAdapter:
         link = self._original(planner_input)
         if link is None or link.run_id is None:
             return None
-        text, cursor, response_id, completed = "", 0, None, False
+        assistant = _AssistantSegment()
+        cursor, response_id, completed = 0, None, False
         usage = PlanningUsage.unknown()
         # The saved cursor is observation progress, not a durable output buffer.
         for _ in range(100):
@@ -338,29 +354,16 @@ class AgentPlannerAdapter:
                         )
                     response_id = event.response_id
                 elif response_id is not None and event.response_id == response_id:
-                    if event.kind in {"message", "progress.updated"}:
-                        value, update_type = (
-                            event.data.get("text"),
-                            event.data.get("update_type"),
+                    assistant.consume(event)
+                    if (
+                        assistant.output_bytes
+                        > planner_input.profile_snapshot.budget.max_context_bytes
+                    ):
+                        raise AgentError(
+                            "native_output_budget_exceeded",
+                            "Original planning output exceeds its saved budget.",
                         )
-                        if isinstance(value, str) and update_type in {
-                            "agent_message_chunk",
-                            "agent_message",
-                        }:
-                            text = (
-                                text + value
-                                if update_type == "agent_message_chunk"
-                                else value
-                            )
-                            if (
-                                len(text.encode("utf-8"))
-                                > planner_input.profile_snapshot.budget.max_context_bytes
-                            ):
-                                raise AgentError(
-                                    "native_output_budget_exceeded",
-                                    "Original planning output exceeds its saved budget.",
-                                )
-                    elif event.kind == "response.completed":
+                    if event.kind == "response.completed":
                         completed = True
                     elif event.kind == "usage":
                         usage = self._observed_usage(event, usage)
@@ -389,9 +392,17 @@ class AgentPlannerAdapter:
                         closed=True,
                     )
                 if completed and snapshot.state.value == "completed":
-                    return parse_planner_result(
-                        text, planner_input, "agent-run", observed_usage=usage
-                    )
+                    try:
+                        return parse_planner_result(
+                            assistant.text,
+                            planner_input,
+                            "agent-run",
+                            observed_usage=usage,
+                        )
+                    except (PlannerContractError, DomainError, TypeError, ValueError):
+                        return self._failure(
+                            "invalid_planner_output", False, usage, retryable=True
+                        )
                 return self._failure(
                     "invalid_planner_output", False, usage, retryable=True
                 )
@@ -766,20 +777,25 @@ class AgentPlannerAdapter:
     def _check_snapshot(self, link, snapshot):
         with self._uow_factory() as uow:
             authority = uow.planning_authorities.get(link.authority_id)
-        if not isinstance(snapshot, RunSnapshot) or authority is None or (
-            snapshot.run_id,
-            snapshot.workspace_id,
-            snapshot.profile_ref,
-            snapshot.policy.value,
-            snapshot.effective_config.profile_ref,
-            snapshot.effective_config.runtime_ref,
-        ) != (
-            link.run_id,
-            link.workspace_id,
-            link.profile_ref,
-            "bounded",
-            link.profile_ref,
-            authority.runtime_ref,
+        if (
+            not isinstance(snapshot, RunSnapshot)
+            or authority is None
+            or (
+                snapshot.run_id,
+                snapshot.workspace_id,
+                snapshot.profile_ref,
+                snapshot.policy.value,
+                snapshot.effective_config.profile_ref,
+                snapshot.effective_config.runtime_ref,
+            )
+            != (
+                link.run_id,
+                link.workspace_id,
+                link.profile_ref,
+                "bounded",
+                link.profile_ref,
+                authority.runtime_ref,
+            )
         ):
             raise AgentError(
                 "configuration_mismatch", "Native planning Run identity changed."

@@ -19,6 +19,7 @@ import {
 } from "@/features/assignments/types";
 import { assignmentTargetKey as assignmentKey } from "@/features/assignments/api";
 import { ProposalAssignees } from "@/features/assignments/ProposalAssignees";
+import { workContextByPlanningRequestQueryKey } from "@/features/context/api";
 
 import {
   buildAnswerPlanningClarificationCommand,
@@ -41,6 +42,9 @@ import {
 import { ClarificationPanel } from "./ClarificationPanel";
 import { PlanningInspector } from "./PlanningInspector";
 import { PlanningRunStatus } from "./PlanningRunStatus";
+// @ts-expect-error Explicit TSX avoids the case-insensitive helper basename collision.
+import { FailedPlanningFeedback } from "./FailedPlanningFeedback.tsx";
+import { clearAppliedFailedPlanningFeedbackDraft } from "./failedPlanningFeedback.js";
 import { ProposalFeedbackComposer } from "./ProposalFeedbackComposer";
 import { ProposalView } from "./ProposalView";
 import { detectPlanningMode, reviewInitialNativeProposal } from "./nativePlanningReview";
@@ -227,10 +231,21 @@ export function PlanningPage() {
     onApplied: handleNativeApplied,
   });
 
+  const refreshNativePlanningViews = useCallback(async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: planningRequestQueryKey(workspaceId, planningRequestId) }),
+      queryClient.invalidateQueries({ queryKey: planningRunsQueryKey(workspaceId, planningRequestId) }),
+      queryClient.invalidateQueries({ queryKey: planningBriefsQueryKey(workspaceId, planningRequestId) }),
+      queryClient.invalidateQueries({ queryKey: planningClarificationsQueryKey(workspaceId, planningRequestId) }),
+      queryClient.invalidateQueries({ queryKey: workContextByPlanningRequestQueryKey(workspaceId, planningRequestId) }),
+    ]);
+  }, [planningRequestId, queryClient, workspaceId]);
+
   useEffect(() => {
     if (planningMode !== "native_profile" || scope === null || scopeKey === ""
       || activeDraft === null || activeDraft.kind !== "create" || activeDraftFailure !== null
-      || activeDraft.review !== null || activeDraft.original !== null || activeDraft.status !== "idle"
+      || activeDraft.review !== null || !(activeDraft.original === null && activeDraft.status === "idle"
+        || activeDraft.original?.command_type === "ReviseFailedPlanningRequest" && activeDraft.status === "applied")
       || nativeReview === null || !nativeReview.ok
       || !catalogQuery.isFetched || !defaultsQuery.isFetched) return;
 
@@ -365,12 +380,11 @@ export function PlanningPage() {
 
   async function handleNativeApplied(original: NativeCommandRequest, result: NativeCommandResponse | null) {
     const appliedScopeKey = scopeKey;
-    await Promise.all([
-      queryClient.invalidateQueries({ queryKey: planningRequestQueryKey(workspaceId, planningRequestId) }),
-      queryClient.invalidateQueries({ queryKey: planningRunsQueryKey(workspaceId, planningRequestId) }),
-      queryClient.invalidateQueries({ queryKey: planningBriefsQueryKey(workspaceId, planningRequestId) }),
-      queryClient.invalidateQueries({ queryKey: planningClarificationsQueryKey(workspaceId, planningRequestId) }),
-    ]);
+    if (original.command_type === "ReviseFailedPlanningRequest" && scope !== null) {
+      const cleared = clearAppliedFailedPlanningFeedbackDraft(scope, original);
+      if (!cleared.ok) setCommandError(cleared.reason);
+    }
+    await refreshNativePlanningViews();
     if (currentScopeKey.current !== appliedScopeKey) return;
     if (original.command_type === "ConfirmPlanningProposal") {
       if (result === null) {
@@ -722,6 +736,15 @@ export function PlanningPage() {
               ? () => setConfirmation("cancel")
               : undefined}
           />
+
+          {request.kind === "create" && request.status === "failed" && hasNativeHint ? (
+            <FailedPlanningFeedback scope={scope} session={session} request={request} runs={runsQuery.data?.items}
+              command={nativeCommand}
+              disabledReason={planningMode !== "native_profile" ? "无法核实当前规划模式"
+                : activeDraftFailure ?? (activeDraft === null ? "正在恢复本地确认草稿" : undefined)}
+              onSubmit={(expectedVersion, payload) => submitNativePlanningCommand("ReviseFailedPlanningRequest", expectedVersion, payload)}
+              onRefresh={refreshNativePlanningViews} />
+          ) : null}
 
           {request.status === "waiting_for_user" && !unresolvedNativeCommand ? (
             <ClarificationPanel

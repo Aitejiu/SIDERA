@@ -6,6 +6,7 @@ import { Link, useParams } from "react-router-dom";
 import { ApiProblem } from "@/shared/api/client";
 import { LocalSessionButton } from "@/features/local-session/LocalSessionDialog";
 import { ProposalAssignees } from "@/features/assignments/ProposalAssignees";
+import { workContextByRootTaskQueryKey } from "@/features/context/api";
 
 import {
   buildConfirmPlanRevisionCommand,
@@ -16,6 +17,7 @@ import {
   planRevisionDiffQueryKey,
   planningRequestQueryKey,
   planningRunsQueryKey,
+  planningBriefsQueryKey,
 } from "./api";
 import { getTask, taskGraphQueryKey, taskQueryKey } from "@/features/tasks/api";
 import { RevisionDagDiff } from "./RevisionDagDiff";
@@ -24,6 +26,8 @@ import { RevisionHierarchyDiff } from "./RevisionHierarchyDiff";
 import { RevisionImpactPanel } from "./RevisionImpactPanel";
 import type { ConfirmPlanRevisionPayload, PlanningRequest, RevisionDiff } from "./types";
 import { useNativePlanRevision } from "./useNativePlanRevision";
+// @ts-expect-error Explicit TSX avoids the case-insensitive helper basename collision.
+import { FailedPlanningFeedback } from "./FailedPlanningFeedback.tsx";
 
 export function PlanRevisionPage() {
   const {
@@ -67,6 +71,8 @@ export function PlanRevisionPage() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: planningRequestQueryKey(workspaceId, planningRequestId) }),
       queryClient.invalidateQueries({ queryKey: planningRunsQueryKey(workspaceId, planningRequestId) }),
+      queryClient.invalidateQueries({ queryKey: planningBriefsQueryKey(workspaceId, planningRequestId) }),
+      queryClient.invalidateQueries({ queryKey: workContextByRootTaskQueryKey(workspaceId, rootTaskId) }),
       queryClient.invalidateQueries({ queryKey: planRevisionDiffQueryKey(workspaceId, planningRequestId) }),
       queryClient.invalidateQueries({ queryKey: taskQueryKey(workspaceId, rootTaskId) }),
       queryClient.invalidateQueries({ queryKey: taskGraphQueryKey(workspaceId, rootTaskId) }),
@@ -216,7 +222,7 @@ export function PlanRevisionPage() {
 
       {nativeRevision.command.original !== null ? (
         <div className="plan-revision-page__message" role="group" aria-label="原始命令恢复">
-          <span>{nativeRevisionStatusLabel(nativeRevision.command.status)}</span>
+          <span>{nativeRevisionStatusLabel(nativeRevision.command.status, nativeRevision.command.original.command_type)}</span>
           {nativeRevision.command.unresolved ? (
             <button
               className="quiet-button"
@@ -255,6 +261,12 @@ export function PlanRevisionPage() {
 
       <div className="plan-revision-page__layout">
         <main className="plan-revision-page__main">
+          {request.status === "failed" && nativeRevision.nativeHint ? (
+            <FailedPlanningFeedback scope={nativeRevision.scope} session={nativeRevision.session} request={request}
+              runs={runsQuery.data?.items} command={nativeRevision.command}
+              disabledReason={nativeRevision.failedFeedbackDisabledReason}
+              onSubmit={nativeRevision.submitFailedFeedback} onRefresh={refreshRevisionViews} />
+          ) : null}
           {isRevisionTerminal(request.status) ? (
             <RevisionTerminalState status={request.status} />
           ) : diffQuery.isPending ? (
@@ -298,7 +310,7 @@ export function PlanRevisionPage() {
                   onChange={nativeRevision.onChoiceChange}
                   disabled={!nativeRevision.sessionValid || nativeRevision.stale
                     || nativeRevision.command.unresolved || nativeRevision.command.busy
-                    || nativeRevision.command.status === "applied"}
+                    || nativeRevision.command.status === "applied" && nativeRevision.command.original?.command_type === "ConfirmPlanRevision"}
                 />
                 {nativeRevision.missingOwnerReason ? (
                   <p role="status">{nativeRevision.missingOwnerReason}</p>
@@ -471,7 +483,16 @@ function rootTitleFromDiff(diff: RevisionDiff | undefined): string | undefined {
   return path?.split(" / ")[0] || undefined;
 }
 
-function nativeRevisionStatusLabel(status: string): string {
+function nativeRevisionStatusLabel(status: string, commandType: string): string {
+  if (commandType === "ReviseFailedPlanningRequest") {
+    switch (status) {
+      case "pending": return "原始补充要求仍在处理中";
+      case "unknown": return "原始补充要求结果待核对";
+      case "applied": return "原始补充要求已处理";
+      case "rejected": return "原始补充要求被拒绝";
+      default: return "原始补充要求状态不可用";
+    }
+  }
   switch (status) {
     case "pending": return "原始确认仍在处理中";
     case "unknown": return "原始确认结果待核对";

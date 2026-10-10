@@ -335,6 +335,16 @@ def _request(
     )
 
 
+def _product_http_tool(name: str = "SIDERA Task Tools") -> ToolConnection:
+    return ToolConnection(
+        name=name,
+        transport="http",
+        endpoint_or_argv="http://127.0.0.1:9912/mcp",
+        headers={"Authorization": SecretStr("N23_FAKE_HTTP_SECRET")},
+        environment={},
+    )
+
+
 def _records(capture: Path) -> list[dict[str, object]]:
     if not capture.exists():
         return []
@@ -1054,6 +1064,155 @@ def test_http_mcp_is_projected_only_after_owned_peer_advertises_http(tmp_path):
         assert "N06_HTTP_HEADER_SECRET" not in capture.read_text()
     finally:
         adapter.close(handle)
+
+
+def test_product_http_duplicate_uses_one_owned_acp_alias_and_permission(
+    tmp_path, monkeypatch
+):
+    capture = tmp_path / "peer.jsonl"
+    opencode = _launcher(tmp_path, "opencode", capture=capture, http=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    private_root = tmp_path / "private"
+    private_root.mkdir(mode=0o700)
+    monkeypatch.setattr(opencode_config.tempfile, "tempdir", str(private_root))
+    tools = (_product_http_tool(), _product_http_tool())
+    originals = tuple(tool.model_copy(deep=True) for tool in tools)
+    adapter = OpenCodeHarness(
+        request_timeout_seconds=2, stop_grace_seconds=0.2, parent_environment={}
+    )
+    handle = adapter.open(_request(opencode, workspace, tools=tools, http=True))
+    prepared = adapter._sessions[handle.process_identity.owned_nonce].prepared
+
+    try:
+        new_session = _request_record(capture, "session/new")
+        assert new_session["params"]["mcpServers"] == [
+            {
+                "name": "SIDERA_Task_Tools",
+                "transport": "http",
+                "url": "http://127.0.0.1:9912/mcp",
+                "header_names": ["Authorization"],
+            }
+        ]
+        environment = next(
+            row for row in _records(capture) if row.get("kind") == "environment"
+        )
+        assert environment["permission"] == {
+            "*": "deny",
+            "SIDERA_Task_Tools_*": "allow",
+        }
+        assert json.loads(prepared.content)["permission"] == {
+            "*": "deny",
+            "SIDERA_Task_Tools_*": "allow",
+        }
+        assert prepared.directory.parent == private_root
+        assert prepared.directory.exists()
+        assert "N23_" not in prepared.content
+        assert "N23_" not in capture.read_text(encoding="utf-8")
+        assert tools == originals
+        assert (
+            len([row for row in _records(capture) if row.get("kind") == "launcher"])
+            == 1
+        )
+    finally:
+        closed = adapter.close(handle)
+
+    assert closed.status is NativeCloseState.CLOSED
+    assert not prepared.directory.exists()
+    assert list(private_root.iterdir()) == []
+    assert adapter._sessions == {}
+    assert adapter._orphaned == {}
+
+
+@pytest.mark.parametrize("case", ["collision", "endpoint", "header", "environment"])
+def test_open_invalid_tool_identity_forbids_allocation_and_peer_spawn(
+    tmp_path, monkeypatch, case
+):
+    capture = tmp_path / "peer.jsonl"
+    opencode = _launcher(tmp_path, "opencode", capture=capture, http=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    private_root = tmp_path / "private"
+    private_root.mkdir(mode=0o700)
+    monkeypatch.setattr(opencode_config.tempfile, "tempdir", str(private_root))
+    tool = _product_http_tool()
+    if case == "collision":
+        changed = _product_http_tool("SIDERA_Task_Tools")
+    elif case == "endpoint":
+        changed = tool.model_copy(
+            update={"endpoint_or_argv": "http://127.0.0.1:9913/mcp"}
+        )
+    elif case == "header":
+        changed = tool.model_copy(
+            update={"headers": {"Authorization": SecretStr("N23_FAKE_OTHER_HEADER")}}
+        )
+    else:
+        changed = tool.model_copy(
+            update={"environment": {"TOOL_TOKEN": SecretStr("N23_FAKE_OTHER_ENV")}}
+        )
+
+    def forbidden_allocation(*args, **kwargs):
+        raise AssertionError("Invalid tool identity attempted private allocation.")
+
+    def forbidden_spawn(*args, **kwargs):
+        raise AssertionError("Invalid tool identity attempted ACP peer spawn.")
+
+    monkeypatch.setattr(opencode_config.tempfile, "mkdtemp", forbidden_allocation)
+    monkeypatch.setattr(ACPProcessTransport, "spawn_argv", forbidden_spawn)
+    adapter = OpenCodeHarness(
+        request_timeout_seconds=2, stop_grace_seconds=0.2, parent_environment={}
+    )
+
+    with pytest.raises(AgentError) as error:
+        adapter.open(_request(opencode, workspace, tools=(tool, changed), http=True))
+
+    assert error.value.code == "configuration_invalid"
+    assert error.value.field == "tools"
+    assert "N23_" not in str(error.value)
+    assert not capture.exists()
+    assert list(private_root.iterdir()) == []
+    assert adapter._sessions == {}
+    assert adapter._orphaned == {}
+
+
+@pytest.mark.parametrize(
+    "snapshot_http,peer_http", [(False, False), (False, True), (True, False)]
+)
+def test_product_http_requires_both_snapshot_and_negotiated_capability(
+    tmp_path, monkeypatch, snapshot_http, peer_http
+):
+    capture = tmp_path / "peer.jsonl"
+    opencode = _launcher(tmp_path, "opencode", capture=capture, http=peer_http)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    private_root = tmp_path / "private"
+    private_root.mkdir(mode=0o700)
+    monkeypatch.setattr(opencode_config.tempfile, "tempdir", str(private_root))
+    adapter = OpenCodeHarness(
+        request_timeout_seconds=2, stop_grace_seconds=0.2, parent_environment={}
+    )
+
+    with pytest.raises(AgentError) as error:
+        adapter.open(
+            _request(
+                opencode,
+                workspace,
+                tools=(_product_http_tool(), _product_http_tool()),
+                http=snapshot_http,
+            )
+        )
+
+    assert error.value.code == "unsupported_capability"
+    assert error.value.field == "tools"
+    records = _records(capture)
+    assert any(row.get("method") == "initialize" for row in records)
+    assert not any(row.get("method") == "session/new" for row in records)
+    pid = next(row["pid"] for row in records if row.get("kind") == "launcher")
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    assert list(private_root.iterdir()) == []
+    assert adapter._sessions == {}
+    assert adapter._orphaned == {}
 
 
 def test_native_error_diagnostic_is_not_exposed(tmp_path):

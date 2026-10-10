@@ -129,6 +129,8 @@ EXPECTED_PLANNING_COMMAND_PAYLOADS = {
     "RequestProposalRevision": "RequestProposalRevisionPayload",
     "RejectPlanningProposal": "RejectPlanningProposalPayload",
     "RetryBlockedPlanningRun": "RetryBlockedPlanningRunPayload",
+    "RepairPlanningContext": "RepairPlanningContextPayload",
+    "ReviseFailedPlanningRequest": "ReviseFailedPlanningRequestPayload",
     "ConfirmPlanningProposal": "ConfirmPlanningProposalPayload",
     "ConfirmPlanRevision": "ConfirmPlanRevisionPayload",
     "ReviseWorkContext": "ReviseWorkContextPayload",
@@ -709,6 +711,79 @@ def test_committed_openapi_matches_current_export(tmp_path: Path) -> None:
     committed_path = Path(__file__).resolve().parents[4] / "apps/web/openapi.json"
 
     assert json.loads(committed_path.read_text(encoding="utf-8")) == exported
+
+
+def test_repair_planning_context_export_is_exact_and_closed(tmp_path: Path) -> None:
+    exported = export_openapi(tmp_path / "repair-openapi.json")
+    assert exported["x-sidera-command-payloads"]["RepairPlanningContext"] == {
+        "$ref": "#/components/schemas/RepairPlanningContextPayload"
+    }
+    payload = exported["components"]["schemas"]["RepairPlanningContextPayload"]
+    fields = {
+        "expected_planning_request_version",
+        "expected_work_context_version",
+        "work_context_revision_id",
+        "work_context_content_hash",
+    }
+    assert set(payload["required"]) == fields
+    assert set(payload["properties"]) == fields
+    assert payload["additionalProperties"] is False
+    for field in ("expected_planning_request_version", "expected_work_context_version"):
+        assert payload["properties"][field]["type"] == "integer"
+        assert payload["properties"][field]["minimum"] == 1
+    assert payload["properties"]["work_context_revision_id"]["format"] == "uuid"
+    assert (
+        payload["properties"]["work_context_content_hash"]["pattern"]
+        == "^[0-9a-f]{64}$"
+    )
+
+
+def test_failed_planning_feedback_export_is_exact_and_preserves_native_closure(
+    tmp_path: Path,
+) -> None:
+    exported = export_openapi(tmp_path / "failed-feedback-openapi.json")
+    assert exported["x-sidera-command-payloads"]["ReviseFailedPlanningRequest"] == {
+        "$ref": "#/components/schemas/ReviseFailedPlanningRequestPayload"
+    }
+    schemas = exported["components"]["schemas"]
+    payload = schemas["ReviseFailedPlanningRequestPayload"]
+    fields = {
+        "failed_planning_run_id",
+        "expected_failed_planning_run_version",
+        "expected_work_context_version",
+        "work_context_revision_id",
+        "work_context_content_hash",
+        "feedback",
+    }
+    assert set(payload["required"]) == set(payload["properties"]) == fields
+    assert payload["additionalProperties"] is False
+    for field in (
+        "expected_failed_planning_run_version",
+        "expected_work_context_version",
+    ):
+        assert payload["properties"][field]["type"] == "integer"
+        assert payload["properties"][field]["minimum"] == 1
+    for field in ("failed_planning_run_id", "work_context_revision_id"):
+        assert payload["properties"][field]["format"] == "uuid"
+    assert (
+        payload["properties"]["work_context_content_hash"]["pattern"]
+        == "^[0-9a-f]{64}$"
+    )
+    native = schemas["PlanningNativeRunResponse"]
+    assert native["additionalProperties"] is False
+    assert (
+        set(native["required"])
+        == set(native["properties"])
+        == {
+            "start_operation_id",
+            "run_id",
+            "status",
+            "reason_code",
+            "event_cursor",
+            "response_id",
+            "closed",
+        }
+    )
 
 
 def test_active_handoff_export_allows_only_truthful_nullable_target(

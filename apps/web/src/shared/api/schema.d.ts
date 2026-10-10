@@ -6690,6 +6690,20 @@ export interface components {
             /** Title */
             title: string;
         };
+        /** RepairPlanningContextPayload */
+        RepairPlanningContextPayload: {
+            /** Expected Planning Request Version */
+            expected_planning_request_version: number;
+            /** Expected Work Context Version */
+            expected_work_context_version: number;
+            /** Work Context Content Hash */
+            work_context_content_hash: string;
+            /**
+             * Work Context Revision Id
+             * Format: uuid
+             */
+            work_context_revision_id: string;
+        };
         /** RequestProposalRevisionPayload */
         RequestProposalRevisionPayload: {
             /** Current Proposal Content Hash */
@@ -7564,6 +7578,27 @@ export interface components {
              * Format: uuid
              */
             verification_operation_id: string;
+        };
+        /** ReviseFailedPlanningRequestPayload */
+        ReviseFailedPlanningRequestPayload: {
+            /** Expected Failed Planning Run Version */
+            expected_failed_planning_run_version: number;
+            /** Expected Work Context Version */
+            expected_work_context_version: number;
+            /**
+             * Failed Planning Run Id
+             * Format: uuid
+             */
+            failed_planning_run_id: string;
+            /** Feedback */
+            feedback: string;
+            /** Work Context Content Hash */
+            work_context_content_hash: string;
+            /**
+             * Work Context Revision Id
+             * Format: uuid
+             */
+            work_context_revision_id: string;
         };
         /** ReviseWorkContextPayload */
         ReviseWorkContextPayload: {

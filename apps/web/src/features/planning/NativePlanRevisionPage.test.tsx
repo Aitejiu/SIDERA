@@ -1,14 +1,19 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { profileAt } from "@/features/agents/testFixtures";
-import type { AgentBindingView } from "@/features/assignments/types";
+import type { AgentBindingView, CommandRequest } from "@/features/assignments/types";
+import type { WorkContextDetail } from "@/features/context/types";
 import { server } from "@/test/server";
+import { planningRequestQueryKey, planningRunsQueryKey } from "./api";
+import { failedPlanningFeedbackDraftKey, reviewFailedPlanningFeedback } from "./failedPlanningFeedback.js";
+import { loadPlanningDraft } from "./planningConfirmationDraft";
 import { PlanRevisionPage } from "./PlanRevisionPage";
+import type { PlanningRequest, PlanningRun } from "./types";
 
 const WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 const ROOT_TASK_ID = "30000000-0000-0000-0000-000000000001";
@@ -22,6 +27,8 @@ const PRINCIPAL_ID = "principal-current";
 const HASH = "a".repeat(64);
 const PROPOSAL_HASH = "b".repeat(64);
 const DIFF_HASH = "c".repeat(64);
+const DRAFT_SCOPE = { kind: "revision" as const, workspace_id: WORKSPACE_ID, request_id: REQUEST_ID,
+  principal_id: PRINCIPAL_ID, root_task_id: ROOT_TASK_ID };
 
 const base = {
   workspace_id: WORKSPACE_ID,
@@ -172,6 +179,65 @@ const savedBinding: AgentBindingView = {
   not_runnable_reasons: ["profile_disabled"],
 };
 
+function failedFeedbackFacts() {
+  const plannerRef = { workspace_id: WORKSPACE_ID, profile_id: AGENT_PROFILE_ID, revision: 1 };
+  const failedRun: PlanningRun = { ...run(), execution_mode: "native_profile", status: "failed", result_kind: "failure",
+    provider_ref: "agent-run", error_code: "invalid_output", planner_agent_ref: plannerRef,
+    native_run: { status: "closed", closed: true, run_id: RUN_ID, response_id: SNAPSHOT_ID, event_cursor: 3,
+      start_operation_id: "90000000-0000-0000-0000-000000000001", reason_code: null } };
+  const failedRequest: PlanningRequest = { ...request, kind: "revision", status: "failed",
+    current_proposal_revision: null, current_proposal_content_hash: null, active_run: failedRun,
+    profile: { ...request.profile, execution_mode: "native_profile", status: "active", version: 3, planner_agent_ref: plannerRef,
+      profile_key: "native-planner", display_name: "Planner", capabilities: null, planner_interface_version: "1.0",
+      planner_module_instance_id: null, planner_module_config_version: null, planner_provider: null,
+      user_selectable: true, created_at: "2026-10-07T00:00:00Z" } };
+  const context: WorkContextDetail = { id: "c0000000-0000-0000-0000-000000000001", workspace_id: WORKSPACE_ID,
+    planning_request_id: "e0000000-0000-0000-0000-000000000001", root_task_id: ROOT_TASK_ID, status: "active", version: 4,
+    current_revision_number: 2, current_revision_id: "d0000000-0000-0000-0000-000000000001",
+    created_at: "2026-10-07T00:00:00Z", updated_at: "2026-10-07T00:00:02Z", timeline: [], next_cursor: null,
+    current_revision: { id: "d0000000-0000-0000-0000-000000000001", workspace_id: WORKSPACE_ID,
+      work_context_id: "c0000000-0000-0000-0000-000000000001", revision_number: 2,
+      brief_planning_request_id: REQUEST_ID, brief_revision: 2, content_hash: HASH,
+      created_at: "2026-10-07T00:00:02Z", created_by: PRINCIPAL_ID, reason: "user_intervention",
+      plan_snapshot_id: null, proposal_revision_id: null,
+      snapshot: { schema_version: 1, objective: "Revise retained Task", constraints: [], acceptance_criteria: [], requested_outputs: [],
+        accepted_decisions: [], clarification_decisions: [], unresolved_questions: [], artifact_refs: [], evidence_refs: [],
+        checkpoint_refs: [], knowledge_refs: [], missing_fact_codes: [] } } };
+  return { request: failedRequest, runs: [failedRun], context };
+}
+
+function installFailedFeedback() {
+  const facts = failedFeedbackFacts(); installNativeHandlers();
+  const reads = { request: 0, runs: 0, context: 0 };
+  const path = `/api/v1/workspaces/${WORKSPACE_ID}/planning-requests/${REQUEST_ID}`;
+  let currentDiff = diff;
+  server.use(
+    http.get(path, () => { reads.request += 1; return HttpResponse.json(facts.request); }),
+    http.get(`${path}/runs`, () => { reads.runs += 1; return HttpResponse.json({ items: facts.runs }); }),
+    http.get(`${path}/diff`, () => HttpResponse.json(currentDiff)),
+    http.get(`/api/v1/workspaces/${WORKSPACE_ID}/tasks/${ROOT_TASK_ID}/work-context`, () => { reads.context += 1; return HttpResponse.json(facts.context); }),
+  );
+  function successor() {
+    const nextRun: PlanningRun = { ...facts.runs[0]!, id: "50000000-0000-0000-0000-000000000002",
+      attempt: 2, brief_revision: 3, status: "succeeded", result_kind: "proposal", native_run: null };
+    facts.runs = [...facts.runs, nextRun];
+    facts.request = { ...facts.request, version: 6, status: "proposal_ready", current_run_id: nextRun.id, active_run: nextRun,
+      current_brief_revision: 3, current_proposal_revision: 3, current_proposal_content_hash: "e".repeat(64) };
+    facts.context = { ...facts.context, version: 5, current_revision: { ...facts.context.current_revision!, brief_revision: 3 } };
+    currentDiff = { ...diff, proposal_revision: 3, proposal_content_hash: "e".repeat(64), diff_hash: "f".repeat(64) };
+  }
+  const reviewed = reviewFailedPlanningFeedback({ scope: DRAFT_SCOPE, ...facts });
+  if (!reviewed.ok) throw new Error(reviewed.reason);
+  return { facts, reads, successor, textKey: failedPlanningFeedbackDraftKey(reviewed.basis) };
+}
+
+async function enterFailedFeedback(user: ReturnType<typeof userEvent.setup>, text = "Retain the original Task") {
+  await screen.findByRole("button", { name: "补充要求并重新规划" });
+  await waitFor(() => expect(screen.getByRole("button", { name: "补充要求并重新规划" })).toBeEnabled());
+  await user.click(screen.getByRole("button", { name: "补充要求并重新规划" }));
+  await user.type(screen.getByLabelText("补充要求"), text);
+}
+
 function installNativeHandlers({
   requestView = request,
   runs = [run()],
@@ -244,7 +310,7 @@ function renderPage() {
       </MemoryRouter>
     </QueryClientProvider>
   );
-  return render(<PlanRevisionPage />, { wrapper });
+  return { ...render(<PlanRevisionPage />, { wrapper }), queryClient };
 }
 
 function deferred<T = void>() {
@@ -259,6 +325,165 @@ describe("native PlanRevisionPage", () => {
     vi.restoreAllMocks();
     window.localStorage.clear();
     document.cookie = "sidera_csrf=phase2c-page; Path=/";
+  });
+
+  it("opens failed planning feedback against the revision root context", async () => {
+    installFailedFeedback();
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByRole("button", { name: "补充要求并重新规划" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "补充要求并重新规划" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "补充要求并重新规划" }));
+    expect(screen.getByLabelText("补充要求")).toBeVisible();
+  });
+
+  it("applies failed feedback without a plan outcome and initializes a usable new revision review", async () => {
+    const setup = installFailedFeedback(); const sent: CommandRequest[] = [];
+    window.localStorage.setItem("sidera:proposal-feedback:untouched", "proposal history");
+    server.use(http.post("/api/v1/commands", async ({ request }) => {
+      const command = await request.json() as CommandRequest; sent.push(command);
+      expect(loadPlanningDraft(DRAFT_SCOPE)).toMatchObject({ ok: true, draft: { status: "pending", original: command } });
+      setup.successor();
+      return HttpResponse.json({ command_id: command.command_id, aggregate_id: REQUEST_ID, aggregate_version: 5, event_ids: [] });
+    }));
+    const user = userEvent.setup(); renderPage(); await enterFailedFeedback(user);
+    const reads = { ...setup.reads };
+    await user.dblClick(screen.getByRole("button", { name: "补充要求并重新规划" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "确认并启用新计划" })).toBeEnabled());
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ command_type: "ReviseFailedPlanningRequest", expected_version: 4,
+      payload: { failed_planning_run_id: RUN_ID, expected_failed_planning_run_version: 1,
+        expected_work_context_version: 4, work_context_revision_id: "d0000000-0000-0000-0000-000000000001",
+        work_context_content_hash: HASH, feedback: "Retain the original Task" } });
+    expect(Object.keys(sent[0]!.payload)).toHaveLength(6);
+    expect(window.localStorage.getItem(setup.textKey)).toBeNull();
+    expect(window.localStorage.getItem("sidera:proposal-feedback:untouched")).toBe("proposal history");
+    expect(loadPlanningDraft(DRAFT_SCOPE)).toMatchObject({ ok: true, draft: { status: "applied", original: sent[0], review: { proposalRevision: 3 } } });
+    expect(screen.getByText("原始补充要求已处理")).toBeVisible();
+    expect(screen.queryByText("原始确认已处理")).not.toBeInTheDocument();
+    expect(screen.queryByText("新计划已启用")).not.toBeInTheDocument();
+    expect(screen.queryByText(/命令已处理，等待/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Root / New API owner")).toBeEnabled();
+    for (const key of ["request", "runs", "context"] as const) expect(setup.reads[key]).toBe(reads[key] + 1);
+  });
+
+  it("recovers failed feedback through pending and unknown reads then applies a null result without POST", async () => {
+    const setup = installFailedFeedback(); let posts = 0, lookups = 0; let sent: CommandRequest | null = null; let status = "pending";
+    server.use(http.post("/api/v1/commands", async ({ request }) => { posts += 1; sent = await request.json() as CommandRequest; return HttpResponse.error(); }),
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/commands/:commandId`, ({ params }) => {
+        lookups += 1; expect(params.commandId).toBe(sent!.command_id); if (status === "applied") setup.successor();
+        return HttpResponse.json({ command_id: sent!.command_id, command_type: sent!.command_type, target_type: "planning_request",
+          target_id: REQUEST_ID, expected_version: 4, status, result: null });
+      }));
+    const user = userEvent.setup(); const first = renderPage(); await enterFailedFeedback(user);
+    await user.click(screen.getByRole("button", { name: "补充要求并重新规划" }));
+    await waitFor(() => expect(loadPlanningDraft(DRAFT_SCOPE)).toMatchObject({ ok: true, draft: { status: "unknown" } }));
+    const bytes = window.localStorage.getItem(setup.textKey); first.unmount(); renderPage();
+    await screen.findByRole("group", { name: "原始命令恢复" });
+    for (const next of ["pending", "unknown", "applied"]) {
+      status = next; await user.click(screen.getByRole("button", { name: "核对原始命令" }));
+      await waitFor(() => expect(loadPlanningDraft(DRAFT_SCOPE)).toMatchObject({ ok: true, draft: { status: next, original: sent } }));
+      if (next !== "applied") expect(window.localStorage.getItem(setup.textKey)).toBe(bytes);
+    }
+    await waitFor(() => expect(window.localStorage.getItem(setup.textKey)).toBeNull());
+    await waitFor(() => expect(screen.getByRole("button", { name: "确认并启用新计划" })).toBeEnabled());
+    expect(posts).toBe(1); expect(lookups).toBe(3); expect(screen.queryByText("新计划已启用")).not.toBeInTheDocument();
+  });
+
+  it("refreshes rejected feedback once and retains its text until an explicit recheck permits a new original", async () => {
+    const setup = installFailedFeedback(); const sent: CommandRequest[] = []; let lookups = 0;
+    server.use(http.post("/api/v1/commands", async ({ request }) => {
+      sent.push(await request.json() as CommandRequest);
+      return HttpResponse.json({ error: { code: "conflict", message: "stale" } }, { status: 409 });
+    }), http.get(`/api/v1/workspaces/${WORKSPACE_ID}/commands/:commandId`, ({ params }) => {
+      lookups += 1; setup.facts.request = { ...setup.facts.request, version: 5 };
+      setup.facts.context = { ...setup.facts.context, version: 5 };
+      return HttpResponse.json({ command_id: params.commandId, command_type: "ReviseFailedPlanningRequest", target_type: "planning_request",
+        target_id: REQUEST_ID, expected_version: 4, status: "rejected", result: null });
+    }));
+    const user = userEvent.setup(); renderPage(); await enterFailedFeedback(user, "Keep retained choices");
+    await user.click(screen.getByRole("button", { name: "补充要求并重新规划" }));
+    await waitFor(() => expect(loadPlanningDraft(DRAFT_SCOPE)).toMatchObject({ ok: true, draft: { status: "unknown" } }));
+    const reads = { ...setup.reads };
+    expect(screen.getByLabelText("补充要求")).toHaveAttribute("readonly");
+    await user.click(screen.getByRole("button", { name: "核对原始命令" }));
+    await waitFor(() => expect(setup.reads.context).toBe(reads.context + 1));
+    await waitFor(() => expect(screen.getByRole("button", { name: "补充要求并重新规划" })).toBeDisabled());
+    expect(screen.getByLabelText("补充要求")).toHaveValue("Keep retained choices");
+    expect(sent).toHaveLength(1); expect(lookups).toBe(1);
+    await user.click(screen.getByRole("button", { name: "重新核对" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "补充要求并重新规划" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "补充要求并重新规划" }));
+    await waitFor(() => expect(sent).toHaveLength(2));
+    expect(sent[1]).toMatchObject({ expected_version: 5, payload: { expected_work_context_version: 5, feedback: "Keep retained choices" } });
+    expect(sent[1]!.command_id).not.toBe(sent[0]!.command_id);
+  });
+
+  it("retains older revision review and owners across failed feedback until explicit revisit", async () => {
+    installNativeHandlers(); const user = userEvent.setup(); const page = renderPage();
+    await screen.findByLabelText("Root / New API owner");
+    await waitFor(() => expect(screen.getByRole("button", { name: "确认并启用新计划" })).toBeEnabled());
+    await user.selectOptions(screen.getByLabelText("Root / New API owner"), "human");
+    const previous = loadPlanningDraft(DRAFT_SCOPE); if (!previous.ok || !previous.draft) throw new Error("missing review");
+    const setup = installFailedFeedback();
+    setup.facts.request = { ...setup.facts.request, current_proposal_revision: 2, current_proposal_content_hash: PROPOSAL_HASH };
+    page.queryClient.setQueryData(planningRequestQueryKey(WORKSPACE_ID, REQUEST_ID), setup.facts.request);
+    page.queryClient.setQueryData(planningRunsQueryKey(WORKSPACE_ID, REQUEST_ID), { items: setup.facts.runs });
+    let sent: CommandRequest | null = null; let posts = 0;
+    server.use(http.post("/api/v1/commands", async ({ request }) => {
+      posts += 1; sent = await request.json() as CommandRequest; setup.successor();
+      return HttpResponse.json({ command_id: sent.command_id, aggregate_id: REQUEST_ID, aggregate_version: 5, event_ids: [] });
+    }));
+    await enterFailedFeedback(user); await user.click(screen.getByRole("button", { name: "补充要求并重新规划" }));
+    await waitFor(() => expect(loadPlanningDraft(DRAFT_SCOPE)).toMatchObject({ ok: true, draft: { status: "applied" } }));
+    await screen.findByRole("button", { name: "重新审阅最新 Revision" });
+    expect(screen.getByRole("button", { name: "确认并启用新计划" })).toBeDisabled();
+    expect(loadPlanningDraft(DRAFT_SCOPE)).toMatchObject({ ok: true, draft: { review: previous.draft.review,
+      choices: previous.draft.choices, original: sent, status: "applied" } });
+    await user.click(screen.getByRole("button", { name: "重新审阅最新 Revision" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "确认并启用新计划" })).toBeEnabled());
+    expect(screen.getByLabelText("Root / New API owner")).toHaveValue("human");
+    expect(loadPlanningDraft(DRAFT_SCOPE)).toMatchObject({ ok: true, draft: { original: sent, status: "applied", review: { proposalRevision: 3 } } });
+    expect(posts).toBe(1);
+  });
+
+  it.each(["POST", "lookup"] as const)("isolates delayed failed feedback %s cleanup from the next principal", async (transport) => {
+    const setup = installFailedFeedback(); const started = deferred(), release = deferred();
+    const sent: CommandRequest[] = []; let lookups = 0;
+    server.use(http.post("/api/v1/commands", async ({ request }) => {
+      const command = await request.json() as CommandRequest; sent.push(command);
+      if (sent.length === 1) {
+        if (transport === "lookup") return HttpResponse.error();
+        started.resolve(); await release.promise;
+      }
+      return HttpResponse.json({ command_id: command.command_id, aggregate_id: REQUEST_ID, aggregate_version: 5, event_ids: [] });
+    }), http.get(`/api/v1/workspaces/${WORKSPACE_ID}/commands/:commandId`, async ({ params }) => {
+      lookups += 1; started.resolve(); await release.promise;
+      return HttpResponse.json({ command_id: params.commandId, command_type: "ReviseFailedPlanningRequest", target_type: "planning_request",
+        target_id: REQUEST_ID, expected_version: 4, status: "applied", result: null });
+    }));
+    const user = userEvent.setup(); const page = renderPage(); await enterFailedFeedback(user, "Private old text");
+    const bytes = window.localStorage.getItem(setup.textKey);
+    await user.click(screen.getByRole("button", { name: "补充要求并重新规划" }));
+    if (transport === "lookup") {
+      await waitFor(() => expect(loadPlanningDraft(DRAFT_SCOPE)).toMatchObject({ ok: true, draft: { status: "unknown" } }));
+      await user.click(screen.getByRole("button", { name: "核对原始命令" }));
+    }
+    await started.promise;
+    await act(async () => { page.queryClient.setQueryData(["local-session", WORKSPACE_ID], {
+      session_id: "b0000000-0000-0000-0000-000000000002", workspace_id: WORKSPACE_ID,
+      principal_id: "other-human", expires_at: "2099-01-01T00:00:00Z" }); });
+    await enterFailedFeedback(user, "Other requirements");
+    const reads = setup.reads.request;
+    await act(async () => release.resolve());
+    await user.click(screen.getByRole("button", { name: "补充要求并重新规划" }));
+    const otherScope = { ...DRAFT_SCOPE, principal_id: "other-human" };
+    await waitFor(() => expect(loadPlanningDraft(otherScope)).toMatchObject({ ok: true, draft: { status: "applied" } }));
+    await waitFor(() => expect(setup.reads.request).toBe(reads + 1));
+    expect(window.localStorage.getItem(setup.textKey)).toBe(bytes);
+    expect(loadPlanningDraft(DRAFT_SCOPE)).toMatchObject({ ok: true, draft: { original: sent[0], status: transport === "POST" ? "pending" : "unknown" } });
+    expect(sent).toHaveLength(2); expect(sent[1]!.actor.id).toBe("other-human"); expect(lookups).toBe(transport === "lookup" ? 1 : 0);
+    expect(screen.queryByText("新计划已启用")).not.toBeInTheDocument();
   });
 
   it("uses exact saved REUSE pins and confirms only independently selected NEW owners", async () => {

@@ -1,6 +1,8 @@
 import importlib.util
 import sys
-from uuid import UUID
+from dataclasses import replace
+from types import SimpleNamespace
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -245,3 +247,311 @@ async def test_mount_keeps_cp_api_path_and_inert_health_denies_anonymous(
         invalid = await client.get("/agents/v1/workspaces/unknown/profiles")
         assert invalid.status_code == 422
     assert app.state.product_runtime.close(grace_seconds=0) is True
+
+
+def _repair_request_target(settings):
+    from sidera_control_plane.application.request_authority import (
+        ControlPlaneRequestTarget,
+    )
+    from sidera_control_plane.domain.commands import CommandEnvelope
+
+    command = CommandEnvelope(
+        id=uuid4(),
+        workspace_id=settings.workspace_id,
+        command_type="RepairPlanningContext",
+        target_type="planning_run",
+        target_id=uuid4(),
+        expected_version=4,
+        actor_type="user",
+        actor_id=settings.local_principal_id,
+        idempotency_key=uuid4().hex,
+        correlation_id=uuid4(),
+        payload={
+            "expected_planning_request_version": 7,
+            "expected_work_context_version": 3,
+            "work_context_revision_id": str(uuid4()),
+            "work_context_content_hash": "a" * 64,
+        },
+    )
+    return ControlPlaneRequestTarget(
+        settings.workspace_id,
+        settings.local_principal_id,
+        "POST",
+        "/api/v1/commands",
+        (),
+        (),
+        command,
+    )
+
+
+def test_human_authorizer_admits_exact_repair_planning_context_command(settings_values):
+    composition = product_module()
+    from sidera_control_plane.application.assignments import TrustedAssignmentIdentity
+
+    from sidera_product.config import ProductSettings
+
+    settings = ProductSettings.model_validate(settings_values)
+    identity = TrustedAssignmentIdentity(
+        settings.local_principal_id, uuid4(), actor_type="user"
+    )
+    host = composition.ProductRequestAuthorizer(settings)
+    host.local_sessions = SimpleNamespace(
+        identity_for_grant=lambda supplied: (
+            identity if supplied == identity.grant_id else None
+        )
+    )
+    host.require(
+        identity.grant_id,
+        "control_plane.command:RepairPlanningContext",
+        _repair_request_target(settings),
+    )
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "target_workspace",
+        "target_principal",
+        "command_workspace",
+        "command_principal",
+        "actor_type",
+        "action",
+        "identity_type",
+        "identity_principal",
+    ],
+)
+def test_human_authorizer_refuses_foreign_repair_scope(settings_values, damage):
+    composition = product_module()
+    from sidera_control_plane.application.assignments import TrustedAssignmentIdentity
+
+    from sidera_product.config import ProductSettings
+
+    settings = ProductSettings.model_validate(settings_values)
+    identity = TrustedAssignmentIdentity(
+        settings.local_principal_id, uuid4(), actor_type="user"
+    )
+    host = composition.ProductRequestAuthorizer(settings)
+    target = _repair_request_target(settings)
+    action = "control_plane.command:RepairPlanningContext"
+    if damage.startswith("target_"):
+        target = replace(
+            target,
+            **(
+                {"workspace_id": uuid4()}
+                if damage == "target_workspace"
+                else {"principal_id": "foreign"}
+            ),
+        )
+    elif damage in {"command_workspace", "command_principal", "actor_type"}:
+        target = replace(
+            target,
+            command=replace(
+                target.command,
+                **{
+                    "command_workspace": {"workspace_id": uuid4()},
+                    "command_principal": {"actor_id": "foreign"},
+                    "actor_type": {"actor_type": "agent"},
+                }[damage],
+            ),
+        )
+    elif damage == "action":
+        action = "control_plane.command:RetryBlockedPlanningRun"
+    else:
+        identity = replace(
+            identity,
+            **(
+                {"actor_type": "system"}
+                if damage == "identity_type"
+                else {"principal_id": "foreign"}
+            ),
+        )
+    host.local_sessions = SimpleNamespace(identity_for_grant=lambda supplied: identity)
+    with pytest.raises(AgentError, match="permission_denied"):
+        host.require(identity.grant_id, action, target)
+
+
+@pytest.mark.parametrize("role", ["main", "worker", "planner"])
+def test_task_tool_authorizer_never_admits_repair_planning_context(
+    settings_values, tmp_path, role
+):
+    from tests.unit.test_task_tools import host_tool_fixture
+
+    lab, _token, verified = host_tool_fixture(settings_values, tmp_path, role=role)
+    target = _repair_request_target(lab.sessions.settings)
+    target = replace(target, command=replace(target.command, actor_type="agent"))
+    with pytest.raises(AgentError, match="permission_denied"):
+        lab.host.require(
+            verified.record.grant_id,
+            "control_plane.command:RepairPlanningContext",
+            target,
+        )
+
+
+def test_background_authorizer_never_admits_repair_planning_context(settings_values):
+    composition = product_module()
+    from sidera_product.config import ProductSettings
+
+    host = composition.ProductRequestAuthorizer(
+        ProductSettings.model_validate(settings_values)
+    )
+    target = _repair_request_target(host.settings)
+    target = replace(target, command=replace(target.command, actor_type="system"))
+    with pytest.raises(AgentError, match="permission_denied"):
+        host.require(
+            host.background_identity.grant_id,
+            "control_plane.command:RepairPlanningContext",
+            target,
+        )
+
+
+def _failed_feedback_request_target(settings):
+    target = _repair_request_target(settings)
+    return replace(
+        target,
+        command=replace(
+            target.command,
+            command_type="ReviseFailedPlanningRequest",
+            target_type="planning_request",
+            payload={
+                "failed_planning_run_id": str(uuid4()),
+                "expected_failed_planning_run_version": 4,
+                "expected_work_context_version": 3,
+                "work_context_revision_id": str(uuid4()),
+                "work_context_content_hash": "a" * 64,
+                "feedback": "Keep four workers and explicit verification.",
+            },
+        ),
+    )
+
+
+def test_human_authorizer_admits_exact_failed_planning_feedback(settings_values):
+    composition = product_module()
+    from sidera_control_plane.application.assignments import TrustedAssignmentIdentity
+
+    from sidera_product.config import ProductSettings
+
+    settings = ProductSettings.model_validate(settings_values)
+    identity = TrustedAssignmentIdentity(
+        settings.local_principal_id, uuid4(), actor_type="user"
+    )
+    host = composition.ProductRequestAuthorizer(settings)
+    host.local_sessions = SimpleNamespace(
+        identity_for_grant=lambda supplied: (
+            identity if supplied == identity.grant_id else None
+        )
+    )
+    host.require(
+        identity.grant_id,
+        "control_plane.command:ReviseFailedPlanningRequest",
+        _failed_feedback_request_target(settings),
+    )
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "target_workspace",
+        "target_principal",
+        "command_workspace",
+        "command_principal",
+        "actor_type",
+        "action",
+        "identity_type",
+        "identity_principal",
+        "closed_session",
+        "missing_session",
+    ],
+)
+def test_human_authorizer_refuses_foreign_failed_planning_feedback(
+    settings_values, damage
+):
+    composition = product_module()
+    from sidera_control_plane.application.assignments import TrustedAssignmentIdentity
+
+    from sidera_product.config import ProductSettings
+
+    settings = ProductSettings.model_validate(settings_values)
+    identity = TrustedAssignmentIdentity(
+        settings.local_principal_id, uuid4(), actor_type="user"
+    )
+    host = composition.ProductRequestAuthorizer(settings)
+    target = _failed_feedback_request_target(settings)
+    action = "control_plane.command:ReviseFailedPlanningRequest"
+    grant_id = identity.grant_id
+    if damage in {"target_workspace", "target_principal"}:
+        target = replace(
+            target,
+            **(
+                {"workspace_id": uuid4()}
+                if damage == "target_workspace"
+                else {"principal_id": "foreign"}
+            ),
+        )
+    elif damage in {"command_workspace", "command_principal", "actor_type"}:
+        target = replace(
+            target,
+            command=replace(
+                target.command,
+                **{
+                    "command_workspace": {"workspace_id": uuid4()},
+                    "command_principal": {"actor_id": "foreign"},
+                    "actor_type": {"actor_type": "agent"},
+                }[damage],
+            ),
+        )
+    elif damage == "action":
+        action = "control_plane.command:RequestProposalRevision"
+    elif damage in {"identity_type", "identity_principal"}:
+        identity = replace(
+            identity,
+            **(
+                {"actor_type": "system"}
+                if damage == "identity_type"
+                else {"principal_id": "foreign"}
+            ),
+        )
+    elif damage == "missing_session":
+        grant_id = uuid4()
+    host.local_sessions = SimpleNamespace(
+        identity_for_grant=lambda supplied: (
+            identity
+            if supplied == identity.grant_id and damage != "closed_session"
+            else None
+        )
+    )
+    with pytest.raises(AgentError, match="permission_denied"):
+        host.require(grant_id, action, target)
+
+
+@pytest.mark.parametrize("role", ["main", "worker", "planner"])
+def test_task_tool_authorizer_never_admits_failed_planning_feedback(
+    settings_values, tmp_path, role
+):
+    from tests.unit.test_task_tools import host_tool_fixture
+
+    lab, _token, verified = host_tool_fixture(settings_values, tmp_path, role=role)
+    target = _failed_feedback_request_target(lab.sessions.settings)
+    target = replace(target, command=replace(target.command, actor_type="agent"))
+    with pytest.raises(AgentError, match="permission_denied"):
+        lab.host.require(
+            verified.record.grant_id,
+            "control_plane.command:ReviseFailedPlanningRequest",
+            target,
+        )
+
+
+def test_background_authorizer_never_admits_failed_planning_feedback(settings_values):
+    composition = product_module()
+    from sidera_product.config import ProductSettings
+
+    host = composition.ProductRequestAuthorizer(
+        ProductSettings.model_validate(settings_values)
+    )
+    target = _failed_feedback_request_target(host.settings)
+    target = replace(target, command=replace(target.command, actor_type="system"))
+    with pytest.raises(AgentError, match="permission_denied"):
+        host.require(
+            host.background_identity.grant_id,
+            "control_plane.command:ReviseFailedPlanningRequest",
+            target,
+        )

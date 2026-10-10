@@ -273,7 +273,7 @@ function allReuseDiff(): RevisionDiff {
   });
 }
 
-function saveUnknownNativeOriginal(): { scope: RevisionPlanningDraftScope; commandId: string } {
+function saveUnknownNativeOriginal(commandType = "ConfirmPlanRevision"): { scope: RevisionPlanningDraftScope; commandId: string } {
   const reviewed = reviewNativeRevision({
     workspaceId: WORKSPACE_ID,
     rootTaskId: ROOT_TASK_ID,
@@ -295,11 +295,14 @@ function saveUnknownNativeOriginal(): { scope: RevisionPlanningDraftScope; comma
   const original = buildNativeCommand({
     session,
     workspaceId: WORKSPACE_ID,
-    commandType: "ConfirmPlanRevision",
+    commandType,
     targetType: "planning_request",
     targetId: REQUEST_ID,
     expectedVersion: reviewed.binding.requestVersion,
-    payload: {
+    payload: commandType === "ReviseFailedPlanningRequest" ? {
+      failed_planning_run_id: RUN_ID, expected_failed_planning_run_version: 2, expected_work_context_version: 3,
+      work_context_revision_id: SNAPSHOT_ID, work_context_content_hash: HASH, feedback: "Keep the original Task",
+    } : {
       expected_proposal_revision: reviewed.binding.proposalRevision,
       expected_proposal_content_hash: reviewed.binding.proposalContentHash,
       expected_diff_hash: reviewed.binding.diffHash,
@@ -313,7 +316,7 @@ function saveUnknownNativeOriginal(): { scope: RevisionPlanningDraftScope; comma
   const draft: PlanningConfirmationDraft = {
     ...scope,
     schema_version: 1,
-    review: reviewed.binding,
+    review: commandType === "ReviseFailedPlanningRequest" ? null : reviewed.binding,
     choices: [],
     original,
     status: "unknown",
@@ -671,9 +674,9 @@ describe("native plan revision hook", () => {
     expect(result.current.canConfirm).toBe(false);
   });
 
-  it("blocks legacy downgrade with a persisted native original and recovers only by lookup", async () => {
+  it.each(["ConfirmPlanRevision", "ReviseFailedPlanningRequest"])("blocks legacy downgrade with a persisted %s original and recovers only by lookup", async (commandType) => {
     installReadHandlers();
-    const { commandId } = saveUnknownNativeOriginal();
+    const { commandId } = saveUnknownNativeOriginal(commandType);
     const legacy = legacyRequest();
     let reads = 0;
     let posts = 0;
@@ -682,7 +685,7 @@ describe("native plan revision hook", () => {
         reads += 1;
         return HttpResponse.json({
           command_id: commandId,
-          command_type: "ConfirmPlanRevision",
+          command_type: commandType,
           target_type: "planning_request",
           target_id: REQUEST_ID,
           expected_version: 4,

@@ -3,7 +3,8 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -453,6 +454,24 @@ class PlanningRunner:
         self._context_package_cutover_at = context_package_cutover_at
         self._candidate_submission_service = candidate_submission_service
         self._acceptance_guard = acceptance_guard
+        self._native_result_lock = threading.Lock()
+        self._native_result_active: set[tuple[UUID, UUID]] = set()
+
+    @contextmanager
+    def _native_result_slot(
+        self, workspace_id: UUID, planning_run_id: UUID
+    ) -> Iterator[bool]:
+        key = (workspace_id, planning_run_id)
+        with self._native_result_lock:
+            acquired = key not in self._native_result_active
+            if acquired:
+                self._native_result_active.add(key)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                with self._native_result_lock:
+                    self._native_result_active.remove(key)
 
     def run_once(self, limit: int = 10) -> PlanningBatchResult:
         if limit <= 0:
@@ -461,29 +480,42 @@ class PlanningRunner:
         outcomes: list[PlanningRunOutcome] = list(claim_batch.preblocked)
         for item in claim_batch.items:
             started_at = self._clock()
-            try:
-                outcome = self._execute(item)
-            except Exception:  # noqa: BLE001
-                logger.error(
-                    "planning run failed outside result boundary",
-                    extra={
-                        "workspace_id": str(item.workspace_id),
-                        "planning_request_id": str(item.request_id),
-                        "planning_run_id": str(item.run_id),
-                        "operation_id": str(item.operation_id),
-                        "lease_id": str(item.lease_id),
-                        "fencing_token": item.fencing_token,
-                    },
-                )
-                outcome = self._persist_failure(
-                    item,
-                    PlannerExplicitFailure(
-                        code="planning_worker_error",
-                        safe_message="planning worker failed before a durable result",
-                        retryable=True,
-                        unknown_outcome=False,
-                    ),
-                )
+            with (
+                self._native_result_slot(item.workspace_id, item.run_id)
+                if item.profile_snapshot.execution_mode == "native_profile"
+                else nullcontext(True)
+            ) as acquired:
+                if not acquired:
+                    outcome = PlanningRunOutcome(
+                        run_id=item.run_id,
+                        status="stale",
+                        attempt=item.attempt,
+                        code="native_original_active",
+                    )
+                else:
+                    try:
+                        outcome = self._execute(item)
+                    except Exception:  # noqa: BLE001
+                        logger.error(
+                            "planning run failed outside result boundary",
+                            extra={
+                                "workspace_id": str(item.workspace_id),
+                                "planning_request_id": str(item.request_id),
+                                "planning_run_id": str(item.run_id),
+                                "operation_id": str(item.operation_id),
+                                "lease_id": str(item.lease_id),
+                                "fencing_token": item.fencing_token,
+                            },
+                        )
+                        outcome = self._persist_failure(
+                            item,
+                            PlannerExplicitFailure(
+                                code="planning_worker_error",
+                                safe_message="planning worker failed before a durable result",
+                                retryable=True,
+                                unknown_outcome=False,
+                            ),
+                        )
             outcomes.append(outcome)
             self._log_outcome(item, outcome, started_at)
         return PlanningBatchResult(
@@ -733,6 +765,21 @@ class PlanningRunner:
     def reconcile_original_run(
         self, expected: PlanningAgentLink
     ) -> PlanningRunOutcome | None:
+        from sidera_control_plane.application.agent_worker_adapter import (
+            require_gateway_owner,
+        )
+
+        require_gateway_owner(self._owner_check)
+        with self._native_result_slot(
+            expected.workspace_id, expected.planning_run_id
+        ) as acquired:
+            if not acquired:
+                return None
+            return self._reconcile_original_run(expected)
+
+    def _reconcile_original_run(
+        self, expected: PlanningAgentLink
+    ) -> PlanningRunOutcome | None:
         from sidera_control_plane.application.agent_planner_adapter import (
             AgentPlannerAdapter,
         )
@@ -740,7 +787,6 @@ class PlanningRunner:
             require_gateway_owner,
         )
 
-        require_gateway_owner(self._owner_check)
         if expected.status == "cleanup_pending" or (
             self._native_shutdown_check is not None and self._native_shutdown_check()
         ):
