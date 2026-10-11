@@ -307,12 +307,24 @@ def test_public_dtos_do_not_accept_secret_values() -> None:
 def test_public_api_protocol_method_names_and_parameter_modes() -> None:
     expected = {
         AgentCatalog: {
-            "create_profile": ("self", "workspace_id", "draft", "grant_id"),
+            "create_profile": (
+                "self",
+                "workspace_id",
+                "draft",
+                "grant_id",
+                "profile_id",
+            ),
             "revise_profile": ("self", "ref", "draft", "grant_id"),
             "get_profile": ("self", "ref", "grant_id"),
             "get_profile_status": ("self", "ref", "grant_id"),
             "list_profiles": ("self", "workspace_id", "grant_id"),
-            "create_resource": ("self", "workspace_id", "draft", "grant_id"),
+            "create_resource": (
+                "self",
+                "workspace_id",
+                "draft",
+                "grant_id",
+                "resource_id",
+            ),
             "revise_resource": ("self", "ref", "draft", "grant_id"),
             "get_resource": ("self", "ref", "grant_id"),
             "get_resource_status": ("self", "ref", "grant_id"),
@@ -335,6 +347,8 @@ def test_public_api_protocol_method_names_and_parameter_modes() -> None:
             ),
         },
         AgentRuntimes: {
+            "registered_harness_ids": ("self",),
+            "list_descriptors": ("self", "workspace_id", "grant_id"),
             "discover": ("self", "workspace_id", "grant_id"),
             "register": (
                 "self",
@@ -421,6 +435,14 @@ def test_public_api_protocol_method_names_and_parameter_modes() -> None:
                 )
             if "limit" in parameters:
                 assert method_signature.parameters["limit"].default == 100
+
+    for protocol, method_name, parameter_name in (
+        (AgentCatalog, "create_profile", "profile_id"),
+        (AgentCatalog, "create_resource", "resource_id"),
+    ):
+        parameter = signature(getattr(protocol, method_name)).parameters[parameter_name]
+        assert parameter.kind is Parameter.KEYWORD_ONLY
+        assert parameter.default is None
 
 
 def test_agent_error_preserves_public_error_fields() -> None:
