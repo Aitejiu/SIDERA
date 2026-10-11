@@ -228,7 +228,7 @@ const session: ExecutionSession = {
   id: SESSION_ID,
   input_mode: "queued",
   last_activity_at: "2026-10-07T00:00:00Z",
-  last_sequence: 5,
+  last_sequence: 3,
   status: "active",
   updated_at: "2026-10-07T00:00:00Z",
   version: 5,
@@ -630,6 +630,19 @@ describe("NativeWorkerIntervention Page", () => {
   beforeEach(() => {
     server.resetHandlers();
     document.cookie = `sidera_csrf=${PAGE_CSRF_TOKEN}; Path=/`;
+  });
+
+  it.each([
+    ["A", worldA],
+    ["B", worldB],
+  ] as const)("keeps world %s canonical Session counters valid", (_name, world) => {
+    expect(Number.isSafeInteger(world.session.version)).toBe(true);
+    expect(world.session.version).toBeGreaterThan(0);
+    expect(Number.isSafeInteger(world.session.last_sequence)).toBe(true);
+    expect(world.session.last_sequence).toBeGreaterThanOrEqual(0);
+    expect(world.session.last_sequence).toBeLessThan(world.session.version);
+    expect(world.context.context!.session_version).toBe(world.session.version);
+    expect(world.context.context).not.toHaveProperty("session_last_sequence");
   });
 
   it("renders the native composer for a native WorkerItem source", async () => {
