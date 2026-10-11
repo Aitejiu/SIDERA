@@ -1,6 +1,9 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
+import type { PropsWithChildren } from "react";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { server } from "@/test/server";
@@ -21,6 +24,8 @@ function renderActions(
   view: Parameters<typeof ResultOperationActions>[0]["view"],
   overrides: Partial<Parameters<typeof ResultOperationActions>[0]> = {},
 ) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  const wrapper = ({ children }: PropsWithChildren) => <QueryClientProvider client={queryClient}><MemoryRouter>{children}</MemoryRouter></QueryClientProvider>;
   return render(
     <ResultOperationActions
       workspaceId={RESULT_WORKSPACE_ID}
@@ -35,12 +40,14 @@ function renderActions(
       onOpenResults={() => undefined}
       {...overrides}
     />,
+    { wrapper },
   );
 }
 
 describe("ResultOperationActions", () => {
   beforeEach(() => {
     server.resetHandlers();
+    server.use(http.get("/main-agent/v1/health", () => HttpResponse.json({ status: "ok", service: "sidera-main-agent-gateway" })));
   });
 
   it("does not offer blind retry for an unknown application", async () => {
@@ -74,6 +81,7 @@ describe("ResultOperationActions", () => {
     };
     renderActions(resultView({ available_actions: [action] }));
 
+    await waitFor(() => expect(screen.getByRole("button", { name: "局部返工" })).toBeEnabled());
     await user.click(screen.getByRole("button", { name: "局部返工" }));
     const form = screen.getByRole("form", { name: "局部返工" });
     expect(within(form).getByText(/当前 WorkerItem/)).toBeVisible();
@@ -158,6 +166,7 @@ describe("ResultOperationActions", () => {
 
     expect(screen.getByText("自动返工额度")).toBeVisible();
     expect(screen.getByText("2 / 3 轮")).toBeVisible();
+    await waitFor(() => expect(screen.getByRole("button", { name: "增加返工额度" })).toBeEnabled());
     await user.click(screen.getByRole("button", { name: "增加返工额度" }));
     await user.clear(screen.getByLabelText("追加轮数"));
     await user.type(screen.getByLabelText("追加轮数"), "1");
@@ -175,5 +184,18 @@ describe("ResultOperationActions", () => {
         reason: "用户确认继续返工",
       },
     });
+  });
+
+  it("requires fresh positive legacy host evidence when a previously opened form is submitted", async () => {
+    const user = userEvent.setup(); let posts = 0;
+    server.use(http.post("/api/v1/commands", () => { posts += 1; return HttpResponse.error(); }));
+    renderActions(resultView({ available_actions: [{ ...resultAction("RequestTaskRework"), allowed_worker_item_ids: [WORKER_ITEM_ID] }] }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "局部返工" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "局部返工" }));
+    await user.type(screen.getByLabelText("返工说明"), "审阅过的局部返工");
+    server.use(http.get("/main-agent/v1/health", () => HttpResponse.json({ status: "ok", service: "unknown-native" })));
+    await user.click(screen.getByRole("button", { name: "提交局部返工" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "局部返工" })).toBeDisabled());
+    expect(posts).toBe(0);
   });
 });

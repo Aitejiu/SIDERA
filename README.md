@@ -8,8 +8,9 @@
 你负责目标与判断，Agent 分工执行，SIDERA 帮你看清进展、依赖和需要介入的位置。
 
 > 当前为 **macOS 本机单人、OpenCode 驱动的桌面 Web 预览版**，不是托管服务或正式稳定版。
-> 新版源码位于 [`feat/native-harness-modularity`](https://github.com/Aitejiu/SIDERA/tree/feat/native-harness-modularity)。
-> 默认 `main` 分支仍保留旧版实现；体验下面的真实执行能力，请使用新版分支。
+> 新版代码已合入 `main`，首次安装请使用主分支。
+> 原开发分支 [`feat/native-harness-modularity`](https://github.com/Aitejiu/SIDERA/tree/feat/native-harness-modularity)
+> 继续保留，供查阅本轮开发历史。
 
 ## 现在能做什么
 
@@ -47,7 +48,7 @@
 先获取新版源码，安装 Web 依赖和隔离的后端环境：
 
 ```bash
-git clone --branch feat/native-harness-modularity https://github.com/Aitejiu/SIDERA.git
+git clone --branch main https://github.com/Aitejiu/SIDERA.git
 cd SIDERA
 npm --prefix apps/web ci
 SIDERA_INSTALL_ROOT="$(mktemp -d /private/tmp/sidera-install.XXXXXX)"
@@ -57,8 +58,8 @@ python3.12 scripts/check-agent-module-installation.py \
 export PATH="$SIDERA_INSTALL_ROOT/native-product-venv/bin:$PATH"
 ```
 
-接着按[安装指南](https://github.com/Aitejiu/SIDERA/blob/feat/native-harness-modularity/docs/deployment/initial-demo.md#配置产品环境)创建四个专用数据库、
-设置产品环境，并按[凭据设置](https://github.com/Aitejiu/SIDERA/blob/feat/native-harness-modularity/docs/deployment/initial-demo.md#配置模型凭据)启用本地凭据入口。
+接着按[安装指南](docs/deployment/initial-demo.md#配置产品环境)创建四个专用数据库、
+设置产品环境，并按[凭据设置](docs/deployment/initial-demo.md#配置模型凭据)启用本地凭据入口。
 不要跳过环境配置直接启动；产品不会自动读取 `.env` 或导入全局 OpenCode 登录。
 准备完成后执行：
 
@@ -91,19 +92,19 @@ sidera open
 在打开的网页进入“智能体”→“本地会话”，使用 bootstrap 输出的私有文件里的 `token`
 连接。不要粘贴文件路径或整份 JSON；该令牌默认五分钟内有效，只能兑换一次。
 
-只想看页面、不希望调用模型？选择[无模型演示](https://github.com/Aitejiu/SIDERA/blob/feat/native-harness-modularity/docs/deployment/initial-demo.md#可操作的网页版演示)，
+只想看页面、不希望调用模型？选择[无模型演示](docs/deployment/initial-demo.md#可操作的网页版演示)，
 它与上面的真实执行使用独立环境，不要混用数据库或启动命令。
 
 ## 第一次使用
 
 1. **配置智能体。** 在“运行环境”登记本机 OpenCode，在“新建 Profile”中配置模型、指令和凭据；需要改代码的 Worker 要明确启用编码工具权限。
 2. **安排角色。** 在“默认安排”指定 Main、Planner 和 Worker；可复用同一个 Profile，也可分别配置。Runtime 容量由这些 Profile 共享。
-3. **连接项目。** 使用[项目配置命令](https://github.com/Aitejiu/SIDERA/blob/feat/native-harness-modularity/docs/deployment/initial-demo.md#配置项目与验证)登记要处理的 Git 仓库、Planner 和真正的验证命令。这一步目前仍需 CLI。
+3. **连接项目。** 使用[项目配置命令](docs/deployment/initial-demo.md#配置项目与验证)登记要处理的 Git 仓库、Planner 和真正的验证命令。这一步目前仍需 CLI。
 4. **提交并确认。** 与主 Agent 描述目标和验收标准，查看关联规划，确认子任务、依赖和负责人后开始执行。仅收到聊天回复不代表任务已开始。
 5. **跟踪并介入。** 日常看任务与子任务的看板；需要理解依赖时切换 DAG。点进 WorkerItem 查看步骤、发送局部要求，必要时展开 Trace。
 6. **检查并验收。** 查看成果、变更和项目检查结果，再显式验收；后续是否应用到原项目由你决定。
 
-完整操作和[首个任务示例](https://github.com/Aitejiu/SIDERA/blob/feat/native-harness-modularity/docs/guide/workspace.md#试一个有依赖的小任务)见使用指南。请先在可以试验的 Git 项目中体验，
+完整操作和[首个任务示例](docs/guide/workspace.md#试一个有依赖的小任务)见使用指南。请先在可以试验的 Git 项目中体验，
 为 Agent 明确配置权限和检查命令，不要把不可恢复的数据交给未验证的自动化执行。
 
 ## 接下来要做什么
@@ -126,8 +127,8 @@ sidera open
 
 ## 文档与反馈
 
-- [快速开始](https://github.com/Aitejiu/SIDERA/blob/feat/native-harness-modularity/docs/deployment/initial-demo.md)：安装、启动与常见问题。
-- [使用指南](https://github.com/Aitejiu/SIDERA/blob/feat/native-harness-modularity/docs/guide/workspace.md)：查看任务、定位卡点、介入和阅读 Trace。
-- [旧版演示与维护](https://github.com/Aitejiu/SIDERA/blob/feat/native-harness-modularity/docs/deployment/initial-demo.md#legacy无模型预置-demo)：无模型演示、既有环境维护及其边界；不是新版安装的必需步骤。
-- [集成与 API](https://github.com/Aitejiu/SIDERA/blob/feat/native-harness-modularity/docs/api/README.md)：接入自己的 Agent、工具或界面。
+- [快速开始](docs/deployment/initial-demo.md)：安装、启动与常见问题。
+- [使用指南](docs/guide/workspace.md)：查看任务、定位卡点、介入和阅读 Trace。
+- [旧版演示与维护](docs/deployment/initial-demo.md#legacy无模型预置-demo)：无模型演示、既有环境维护及其边界；不是新版安装的必需步骤。
+- [集成与 API](docs/api/README.md)：接入自己的 Agent、工具或界面。
 - [问题反馈](https://github.com/Aitejiu/SIDERA/issues)：提交使用问题，请勿附带密钥或私人任务内容。

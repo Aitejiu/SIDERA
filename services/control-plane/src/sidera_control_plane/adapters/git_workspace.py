@@ -1,9 +1,12 @@
 import hashlib
+import re
 import subprocess
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from subprocess import CompletedProcess
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from sidera_control_plane.application.result_ports import CodeInputReceipt
@@ -58,15 +61,14 @@ class GitWorktreeWorkspaceManager:
         self._manifests_by_id: dict[UUID, ExecutionWorkspaceManifest] = {}
         self._manifest_ids_by_location: dict[str, set[UUID]] = {}
         self._target_manifest_id_by_handoff_operation: dict[UUID, UUID] = {}
-        self._handoff_target_identity_by_operation: dict[
-            UUID, tuple[UUID, UUID, UUID, UUID, UUID, int, UUID, int]
-        ] = {}
+        self._handoff_target_identity_by_operation: dict[UUID, tuple[object, ...]] = {}
         self._handoff_inspection_by_operation: dict[
             UUID, HandoffWorkspaceInspection
         ] = {}
         self._physical_location_by_manifest_id: dict[UUID, Path] = {}
         self._workspace_binding_by_manifest_id: dict[UUID, tuple[UUID, int]] = {}
         self._repository_by_ref: dict[str, Path] = {}
+        self._native_refence_proposals: dict[UUID, ExecutionWorkspaceManifest] = {}
 
     def prepare(
         self, spec: ExecutionSpec, *, operation_id: UUID
@@ -160,6 +162,107 @@ class GitWorktreeWorkspaceManager:
         )
         return manifest
 
+    def physical_directory(self, manifest: ExecutionWorkspaceManifest) -> Path:
+        stored = self._manifests_by_id.get(manifest.id)
+        if stored is not None:
+            _require_manifest_identity(stored, manifest)
+        if manifest.lifecycle not in {
+            WorkspaceLifecycle.READY,
+            WorkspaceLifecycle.ACTIVE,
+            WorkspaceLifecycle.FROZEN,
+            WorkspaceLifecycle.RETAINED,
+        }:
+            raise WorkspaceProviderError("prepared workspace lifecycle is unavailable")
+        checkout = self._require_checkout(manifest)
+        if stored is None:
+            if not re.fullmatch(
+                r"git-repository://[0-9a-f]{64}", checkout.repository_ref
+            ):
+                raise WorkspaceProviderError("prepared workspace repository is invalid")
+            try:
+                location_id = UUID(urlsplit(manifest.location_ref).netloc)
+            except ValueError:
+                raise WorkspaceProviderError(
+                    "prepared workspace location is invalid"
+                ) from None
+            if (
+                manifest.location_ref != f"git-worktree://{location_id}"
+                or checkout.branch != f"sidera/execution/{location_id}"
+            ):
+                raise WorkspaceProviderError(
+                    "prepared workspace location identity changed"
+                )
+            location = self._workspace_root / str(location_id)
+        else:
+            location = self._physical_location_by_manifest_id.get(manifest.id)
+        if location is None or location.is_symlink() or not location.is_dir():
+            raise WorkspaceProviderError("prepared workspace directory is unavailable")
+        location = location.resolve()
+        if self._workspace_root not in location.parents:
+            raise WorkspaceProviderError("prepared workspace directory escapes root")
+        repository = self._resolve_repository_for_manifest(manifest, location)
+        if self._opaque_repository_ref(repository) != checkout.repository_ref:
+            raise WorkspaceProviderError("prepared workspace repository changed")
+        self._verify_worktree(
+            location, repository=repository, expected_branch=checkout.branch
+        )
+        if stored is None:
+            self._remember_manifest(manifest, physical_location=location)
+        return location
+
+    def refence_not_admitted(
+        self, manifest, *, pin, binding, physical_input, operation_id
+    ):
+        candidate = replace(manifest)
+        candidate.refence_not_admitted(pin=pin, binding=binding)
+        directory = self.physical_directory(manifest)
+        expected_commit = manifest.checkouts[0].current_head
+        if physical_input is not None:
+            if (
+                not isinstance(physical_input, CodeInputReceipt)
+                or not physical_input.succeeded
+                or physical_input.execution_id != manifest.execution_id
+            ):
+                raise WorkspaceProviderError("native refence input receipt is invalid")
+            expected_commit = physical_input.actual_commit
+            if (
+                self._git_output(("rev-parse", "HEAD^{tree}"), cwd=directory)
+                != physical_input.actual_tree
+            ):
+                raise WorkspaceProviderError(
+                    "native refence prepared input tree changed"
+                )
+        if self._git_output(
+            ("rev-parse", "HEAD"), cwd=directory
+        ) != expected_commit or self._git_output(
+            ("status", "--porcelain", "--untracked-files=all"), cwd=directory
+        ):
+            raise WorkspaceProviderError(
+                "native refence requires unchanged clean prepared inputs"
+            )
+        existing = self._native_refence_proposals.get(operation_id)
+        if existing is not None and existing != candidate:
+            raise WorkspaceProviderError("native refence operation identity changed")
+        self._native_refence_proposals[operation_id] = replace(candidate)
+        return candidate
+
+    def confirm_not_admitted_refence(self, persisted, *, operation_id):
+        proposed = self._native_refence_proposals.get(operation_id)
+        if proposed is None or proposed != persisted:
+            raise WorkspaceProviderError(
+                "native refence has no matching persisted result"
+            )
+        stored = self._manifests_by_id.get(persisted.id)
+        if stored is None or stored.fencing_token not in {
+            persisted.fencing_token - 1,
+            persisted.fencing_token,
+        }:
+            raise WorkspaceProviderError("native refence original workspace changed")
+        _require_manifest_identity(
+            replace(stored, fencing_token=persisted.fencing_token), persisted
+        )
+        self._manifests_by_id[persisted.id] = replace(persisted)
+
     def materialize(
         self,
         *,
@@ -199,8 +302,14 @@ class GitWorktreeWorkspaceManager:
             if stored.lifecycle is WorkspaceLifecycle.FROZEN:
                 return self.inspect_manifest(stored)
             if stored.lifecycle is not manifest.lifecycle:
-                raise WorkspaceProviderError("workspace manifest lifecycle changed")
-            manifest = stored
+                if not (
+                    stored.lifecycle is WorkspaceLifecycle.READY
+                    and manifest.lifecycle is WorkspaceLifecycle.ACTIVE
+                    and manifest.version == stored.version + 1
+                ):
+                    raise WorkspaceProviderError("workspace manifest lifecycle changed")
+            else:
+                manifest = stored
         if manifest.lifecycle not in {
             WorkspaceLifecycle.ACTIVE,
             WorkspaceLifecycle.FROZEN,
@@ -406,16 +515,9 @@ class GitWorktreeWorkspaceManager:
                 or inspection.source_manifest_id != source_manifest.id
             ):
                 raise WorkspaceProviderError("handoff operation identity changed")
-            if self._handoff_target_identity_by_operation.get(operation_id) != (
-                target.workspace_id,
-                target.task_id,
-                target.target_execution_id,
-                target.target_worker_id,
-                target.adapter_module_ref,
-                target.adapter_config_version,
-                target.workspace_module_ref,
-                target.workspace_config_version,
-            ):
+            if self._handoff_target_identity_by_operation.get(
+                operation_id
+            ) != _handoff_target_identity(target):
                 raise WorkspaceProviderError("handoff target identity changed")
             if (
                 existing.workspace_id != target.workspace_id
@@ -471,14 +573,7 @@ class GitWorktreeWorkspaceManager:
         )
         self._target_manifest_id_by_handoff_operation[operation_id] = target_manifest.id
         self._handoff_target_identity_by_operation[operation_id] = (
-            target.workspace_id,
-            target.task_id,
-            target.target_execution_id,
-            target.target_worker_id,
-            target.adapter_module_ref,
-            target.adapter_config_version,
-            target.workspace_module_ref,
-            target.workspace_config_version,
+            _handoff_target_identity(target)
         )
         self._handoff_inspection_by_operation[operation_id] = HandoffWorkspaceInspection(
             transition_id=transition_id,
@@ -804,6 +899,22 @@ class GitWorktreeWorkspaceManager:
         except subprocess.CalledProcessError as exc:
             detail = (exc.stderr or exc.stdout or "git command failed").strip()
             raise WorkspaceProviderError(detail) from exc
+
+
+def _handoff_target_identity(target: HandoffWorkspaceTargetSpec) -> tuple[object, ...]:
+    identity = (
+        target.workspace_id,
+        target.task_id,
+        target.target_execution_id,
+        target.target_worker_id,
+        target.adapter_module_ref,
+        target.adapter_config_version,
+        target.workspace_module_ref,
+        target.workspace_config_version,
+    )
+    if target.schema_version == 2:
+        return (*identity, 2, target.target_profile_ref, target.target_binding_version)
+    return identity
 
 
 def _require_manifest_identity(

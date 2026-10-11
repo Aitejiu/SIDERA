@@ -4,6 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
+from sidera_control_plane.domain.agent_bindings import NotAdmittedProof
 from sidera_control_plane.domain.errors import (
     InvalidTransition,
     StaleFencingToken,
@@ -190,6 +191,26 @@ class Execution:
         self.assigned_worker_id = worker_id
         self.active_lease_id = lease_id
         self.last_fencing_token = fencing_token
+        self.version += 1
+
+    def requeue_not_admitted(self, proof: NotAdmittedProof, *, now: datetime) -> None:
+        if now.tzinfo is None:
+            raise ValidationError("requeue time must be timezone-aware")
+        if (
+            not isinstance(proof, NotAdmittedProof)
+            or not proof.link.not_admitted
+            or proof.link.workspace_id != self.workspace_id
+            or proof.link.execution_id != self.id
+            or self.status is not ExecutionStatus.LEASED
+            or self.started_at is not None
+            or self.stop_requested
+        ):
+            raise InvalidTransition("only a proven not-admitted execution can requeue")
+        self.assert_fence(lease_id=proof.lease_id, fencing_token=proof.fencing_token)
+        self.status = ExecutionStatus.QUEUED
+        self.active_lease_id = None
+        self.assigned_worker_id = None
+        self.not_before = now
         self.version += 1
 
     def start(self, *, lease_id: UUID, fencing_token: int, now: datetime) -> None:
@@ -423,6 +444,14 @@ class ExecutionSession:
         if self.status is not ExecutionSessionStatus.ACTIVE:
             raise InvalidTransition("session is not active")
         if sequence != self.last_sequence + 1:
+            raise ValidationError("session sequence must increase by exactly one")
+        self.last_sequence = sequence
+        self.last_activity_at = now
+        self.version += 1
+
+    def record_historical_observation(self, *, sequence: int, now: datetime) -> None:
+        """Advance authorized original history without reopening the Session."""
+        if type(sequence) is not int or sequence != self.last_sequence + 1:
             raise ValidationError("session sequence must increase by exactly one")
         self.last_sequence = sequence
         self.last_activity_at = now

@@ -12,6 +12,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from sidera_control_plane.application.agent_worker_adapter import require_gateway_owner
 from sidera_control_plane.application.notification_delivery import (
     NotificationDeliveryService,
 )
@@ -186,6 +187,7 @@ class NotificationWorker:
         batch_size: int = 50,
         clock: Clock | None = None,
         baseline_required: bool = True,
+        auto_baseline: bool = False,
         baseline_complete: Callable[[UUID], bool] | None = None,
         enabled: bool = True,
         expire_leases: ExpiredLeaseMaintenance | None = None,
@@ -204,6 +206,7 @@ class NotificationWorker:
         self._batch_size = batch_size
         self._clock = clock or (lambda: datetime.now(UTC))
         self._baseline_required = baseline_required
+        self._auto_baseline = auto_baseline
         self._baseline_complete = baseline_complete or (lambda _workspace_id: True)
         self._enabled = enabled
         self._expire_leases = expire_leases or (lambda _workspace_id, _now, _limit: 0)
@@ -232,8 +235,38 @@ class NotificationWorker:
             if self._baseline_required:
                 try:
                     if not self._baseline_complete(workspace_id):
-                        summary = self._failed(summary, "notification_baseline_required")
-                        continue
+                        if not self._auto_baseline:
+                            summary = self._failed(
+                                summary, "notification_baseline_required"
+                            )
+                            continue
+                        baseline = self._reconciler.baseline_workspace(
+                            workspace_id, owner=self._owner_id
+                        )
+                        if (
+                            not baseline.acquired
+                            or baseline.diagnostic_code is not None
+                        ):
+                            summary = self._failed(
+                                summary,
+                                baseline.diagnostic_code
+                                or "notification_baseline_required",
+                            )
+                            continue
+                        if not self._baseline_complete(workspace_id):
+                            summary = self._failed(
+                                summary, "notification_baseline_required"
+                            )
+                            continue
+                        summary = replace(
+                            summary,
+                            facts_created=summary.facts_created
+                            + baseline.facts_created,
+                            threads_changed=summary.threads_changed
+                            + baseline.threads_changed,
+                            intents_created=summary.intents_created
+                            + baseline.intents_created,
+                        )
                 except Exception:  # noqa: BLE001 - isolate Workspace readiness
                     summary = self._failed(
                         summary, "notification_baseline_check_failed"
@@ -347,12 +380,23 @@ class NotificationWorkerRuntime:
     database: Database
 
 
-def build_notification_worker(settings: Settings) -> NotificationWorkerRuntime:
+def build_notification_worker(
+    settings: Settings,
+    *,
+    owner_check: Callable[[], bool] | None = None,
+    auto_baseline: bool = False,
+) -> NotificationWorkerRuntime:
     database = Database(settings.database_url)
-    uow_factory: Callable[[], SqlAlchemyUnitOfWork] = lambda: SqlAlchemyUnitOfWork(
-        database,
-        projection_change_retention_seconds=settings.projection_change_retention_seconds,
-    )
+
+    def uow_factory() -> SqlAlchemyUnitOfWork:
+        require_gateway_owner(owner_check)
+        return SqlAlchemyUnitOfWork(
+            database,
+            projection_change_retention_seconds=settings.projection_change_retention_seconds,
+            before_commit=None
+            if owner_check is None
+            else lambda: require_gateway_owner(owner_check),
+        )
     owner_id = f"notification-worker:{settings.local_actor_id}"
     v1_reconciler = NotificationReconciler(
         uow_factory,
@@ -421,6 +465,7 @@ def build_notification_worker(settings: Settings) -> NotificationWorkerRuntime:
             owner_id=owner_id,
             batch_size=settings.notification_reconcile_batch_size,
             baseline_required=settings.notification_baseline_required,
+            auto_baseline=auto_baseline,
             baseline_complete=baseline_complete,
             enabled=settings.notification_enabled,
             due_sweep_seconds=settings.notification_due_sweep_seconds,

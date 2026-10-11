@@ -220,6 +220,37 @@ describe("ProposalView", () => {
     expect(onConfirm).not.toHaveBeenCalled();
   });
 
+  it("keeps stale-review recovery available beside the missing-owner reason", async () => {
+    const user = userEvent.setup();
+    const anchor = {
+      requestVersion: 4,
+      proposalRevision: 1,
+      proposalContentHash: PROPOSAL_HASH,
+      profileId: PROFILE_ID,
+      profileVersion: 2,
+    };
+    const onRevisit = vi.fn();
+    const onConfirm = vi.fn();
+    renderProposal({
+      requestVersion: 5,
+      reviewedBinding: anchor,
+      disabledReason: "Prepare 尚未分配负责人",
+      onRevisit,
+      onConfirm,
+    });
+
+    expect(screen.getByText("Prepare 尚未分配负责人")).toBeVisible();
+    expect(screen.getByText("方案版本已变化，请重新查看后再确认。")).toBeVisible();
+    const revisit = screen.getByRole("button", { name: "重新查看最新方案" });
+    expect(revisit).toBeVisible();
+    const confirm = screen.getByRole("button", { name: "确认并创建任务" });
+    expect(confirm).toBeDisabled();
+    await user.click(revisit);
+    await user.click(confirm);
+    expect(onRevisit).toHaveBeenCalledOnce();
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
   it("passes the exact reviewed proposal binding to confirmation", async () => {
     const user = userEvent.setup();
     const onConfirm = vi.fn();
@@ -234,5 +265,33 @@ describe("ProposalView", () => {
       profileId: PROFILE_ID,
       profileVersion: 2,
     });
+  });
+
+  it("keeps a persisted native review anchor across a remount and local owner edits", async () => {
+    const user = userEvent.setup();
+    const anchor = {
+      requestVersion: 4,
+      proposalRevision: 1,
+      proposalContentHash: PROPOSAL_HASH,
+      profileId: PROFILE_ID,
+      profileVersion: 2,
+    };
+    const onConfirm = vi.fn();
+    const view = renderProposal({ reviewedBinding: anchor, responsibilityContent: <div>Owner rows</div>, onConfirm });
+    expect(screen.getByText("Owner rows")).toBeVisible();
+
+    view.unmount();
+    renderProposal({
+      requestVersion: 5,
+      reviewedBinding: anchor,
+      responsibilityContent: <div>Owner rows after local edit</div>,
+      onConfirm,
+    });
+
+    expect(screen.getByText("Owner rows after local edit")).toBeVisible();
+    expect(screen.getByText("方案版本已变化，请重新查看后再确认。")).toBeVisible();
+    expect(screen.getByRole("button", { name: "确认并创建任务" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "确认并创建任务" }));
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 });

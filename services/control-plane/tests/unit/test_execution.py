@@ -275,3 +275,28 @@ def test_session_requires_adapter_session_id() -> None:
             adapter_session_id=" ",
             now=NOW,
         )
+
+
+def test_historical_observation_keeps_closed_session_closed_and_exact_sequence():
+    session = ExecutionSession.start(
+        session_id=uuid4(),
+        workspace_id=uuid4(),
+        execution_id=uuid4(),
+        worker_id=uuid4(),
+        adapter_session_id="agent-run:original",
+        now=NOW,
+    )
+    session.record_activity(sequence=1, now=NOW)
+    session.close(lost=False, now=NOW)
+    with pytest.raises(InvalidTransition):
+        session.record_activity(sequence=2, now=NOW)
+    session.record_historical_observation(sequence=2, now=NOW)
+    assert session.status is ExecutionSessionStatus.CLOSED
+    assert session.last_sequence == 2
+    version = session.version
+    for sequence in (2, 4, True):
+        with pytest.raises(ValidationError):
+            session.record_historical_observation(sequence=sequence, now=NOW)
+        assert session.last_sequence == 2
+        assert session.version == version
+        assert session.status is ExecutionSessionStatus.CLOSED

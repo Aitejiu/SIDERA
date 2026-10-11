@@ -249,7 +249,10 @@ export function matchesProjectionQuery(
     case "subtask_workspace":
       return queryType === "subtask-workspace" && matchesResource();
     case "worker_item_workspace":
-      return queryType === "worker-item-workspace" && matchesResource();
+      return ((queryType === "worker-item-workspace"
+        || queryType === "native-worker-context") && matchesResource())
+        || (queryType === "agent-assignment"
+          && queryKey[2] === "worker_item" && matchesResource(3));
     case "worker_item_activity":
       return queryType === "worker-item-activity" && matchesResource();
     case "collaboration_governance":
@@ -335,36 +338,65 @@ export function createInvalidationQueue(queryClient: QueryClient, workspaceId: s
   const pendingChanges = new Map<string, ProjectionChange>();
   let frameHandle: number | null = null;
   let lastEnqueuedCursor = 0;
+  let closed = false;
+  let inFlight = false;
+
+  const schedule = () => {
+    if (!closed && !inFlight && pendingChanges.size > 0 && frameHandle === null) {
+      frameHandle = requestAnimationFrameSafe(flush);
+    }
+  };
 
   const flush = () => {
     frameHandle = null;
+    if (closed || inFlight || pendingChanges.size === 0) {
+      return;
+    }
     const changes = [...pendingChanges.values()];
     pendingChanges.clear();
+    inFlight = true;
+    const fetchingQueries = queryClient.getQueryCache().findAll({
+      type: "active",
+      fetchStatus: "fetching",
+    }).filter((query) => !query.isDisabled() && !query.isStatic());
+    // A joined read may predate the event, so retain one fresh follow-up.
     for (const change of changes) {
-      queryClient.invalidateQueries({
-        predicate: (query) => matchesProjectionQuery(
-          query.queryKey,
-          workspaceId,
-          change,
-          query.state.data,
-        ),
-      });
+      if (fetchingQueries.some((query) => matchesProjectionQuery(
+        query.queryKey,
+        workspaceId,
+        change,
+        query.state.data,
+      ))) {
+        const key = `${change.projection_type}:${change.resource_id ?? "workspace"}`;
+        pendingChanges.set(key, change);
+      }
     }
+    const finish = () => {
+      inFlight = false;
+      schedule();
+    };
+    void Promise.resolve(queryClient.invalidateQueries({
+      predicate: (query) => changes.some((change) => matchesProjectionQuery(
+        query.queryKey,
+        workspaceId,
+        change,
+        query.state.data,
+      )),
+    }, { cancelRefetch: false })).then(finish, finish);
   };
 
   return {
     enqueue(change: ProjectionChange) {
-      if (change.cursor <= lastEnqueuedCursor) {
+      if (closed || change.cursor <= lastEnqueuedCursor) {
         return;
       }
       lastEnqueuedCursor = change.cursor;
       const key = `${change.projection_type}:${change.resource_id ?? "workspace"}`;
       pendingChanges.set(key, change);
-      if (frameHandle === null) {
-        frameHandle = requestAnimationFrameSafe(flush);
-      }
+      schedule();
     },
     close() {
+      closed = true;
       if (frameHandle !== null) {
         cancelAnimationFrameSafe(frameHandle);
       }

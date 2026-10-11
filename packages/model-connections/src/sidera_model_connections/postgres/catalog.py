@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -164,6 +166,32 @@ class PostgresConnectionCatalog:
             if row is None:
                 raise ConfigurationError("credential_not_found")
             return _to_credential(row)
+
+    def list_credentials(self, workspace_id: UUID) -> tuple[CredentialMetadata, ...]:
+        statement = (
+            select(CredentialRow)
+            .where(CredentialRow.workspace_id == workspace_id)
+            .order_by(CredentialRow.created_at, CredentialRow.id)
+        )
+        with self._session_factory() as session:
+            return tuple(
+                _to_credential(row) for row in session.scalars(statement).all()
+            )
+
+    @contextmanager
+    def credential_read_lease(self, ref: CredentialRef) -> Iterator[CredentialMetadata]:
+        with self._session_factory() as session, session.begin():
+            row = session.scalar(
+                select(CredentialRow)
+                .where(
+                    CredentialRow.workspace_id == ref.workspace_id,
+                    CredentialRow.id == ref.credential_id,
+                )
+                .with_for_update(read=True)
+            )
+            if row is None:
+                raise ConfigurationError("credential_not_found")
+            yield _to_credential(row)
 
     def list_connections(self, workspace_id: UUID) -> tuple[ModelConnectionRevision, ...]:
         statement = (

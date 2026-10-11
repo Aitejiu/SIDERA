@@ -17,6 +17,8 @@ export function NotificationThreadHistory({
   onMarkRead,
   onArchive,
   onRequeue,
+  commandsEnabled = true,
+  requeueEligible = () => true,
 }: {
   workspaceId: string;
   detail: NotificationThreadDetail;
@@ -25,6 +27,8 @@ export function NotificationThreadHistory({
   onMarkRead: () => void;
   onArchive: () => void;
   onRequeue: (deliveryId: string, reason: string) => void;
+  commandsEnabled?: boolean;
+  requeueEligible?: (deliveryId: string) => boolean;
 }) {
   const { thread } = detail;
   const [diagnosticsDeliveryId, setDiagnosticsDeliveryId] = useState<string | null>(null);
@@ -69,7 +73,7 @@ export function NotificationThreadHistory({
             <button
               className="quiet-button"
               type="button"
-              disabled={pendingCommand !== null}
+              disabled={!commandsEnabled || pendingCommand !== null}
               onClick={onMarkRead}
             >
               <MailOpen size={14} aria-hidden="true" />
@@ -80,7 +84,7 @@ export function NotificationThreadHistory({
             <button
               className="quiet-button"
               type="button"
-              disabled={pendingCommand !== null}
+              disabled={!commandsEnabled || pendingCommand !== null}
               onClick={onArchive}
             >
               <Archive size={14} aria-hidden="true" />
@@ -145,6 +149,7 @@ export function NotificationThreadHistory({
                         className="quiet-button"
                         type="button"
                         aria-expanded={requeueDeliveryId === delivery.delivery_id}
+                        disabled={!commandsEnabled || pendingCommand !== null || !requeueEligible(delivery.delivery_id)}
                         onClick={() => {
                           setRequeueDeliveryId((current) => current === delivery.delivery_id ? null : delivery.delivery_id);
                           setReason("");
@@ -161,7 +166,7 @@ export function NotificationThreadHistory({
                       onSubmit={(event) => {
                         event.preventDefault();
                         const trimmedReason = reason.trim();
-                        if (trimmedReason.length > 0) {
+                        if (commandsEnabled && pendingCommand === null && requeueEligible(delivery.delivery_id) && trimmedReason.length > 0) {
                           onRequeue(delivery.delivery_id, trimmedReason);
                         }
                       }}
@@ -176,7 +181,7 @@ export function NotificationThreadHistory({
                         rows={2}
                         required
                       />
-                      <button className="quiet-button quiet-button--primary" type="submit" disabled={pendingCommand !== null || reason.trim().length === 0}>
+                      <button className="quiet-button quiet-button--primary" type="submit" disabled={!commandsEnabled || pendingCommand !== null || !requeueEligible(delivery.delivery_id) || reason.trim().length === 0}>
                         确认重新投递
                       </button>
                     </form>

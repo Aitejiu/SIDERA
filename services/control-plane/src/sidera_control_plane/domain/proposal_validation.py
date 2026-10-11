@@ -125,22 +125,36 @@ def validate_proposal(
             f"proposal schema version {expected_schema_version} is required",
         )
     if profile_snapshot.proposal_schema_version != typed_payload.schema_version:
-        _fail("proposal_schema_invalid", "proposal schema is not selected by the profile")
+        _fail(
+            "proposal_schema_invalid", "proposal schema is not selected by the profile"
+        )
     if brief_revision < 1:
         _fail("proposal_schema_invalid", "brief revision must be positive")
     if typed_payload.kind is not PlanningRequestKind.CREATE:
-        _fail("proposal_revision_operation_forbidden", "R5.1 accepts create proposals only")
+        _fail(
+            "proposal_revision_operation_forbidden",
+            "R5.1 accepts create proposals only",
+        )
     if (
         not is_v4
         and not is_v5
         and not is_v6
         and typed_payload.base_descriptor is not None
     ):
-        _fail("proposal_revision_operation_forbidden", "base descriptor is reserved for revision proposals")
+        _fail(
+            "proposal_revision_operation_forbidden",
+            "base descriptor is reserved for revision proposals",
+        )
     if typed_payload.impact_policy.revision_operation is not None:
-        _fail("proposal_revision_operation_forbidden", "revision operation is not supported")
+        _fail(
+            "proposal_revision_operation_forbidden",
+            "revision operation is not supported",
+        )
     if typed_payload.impact_policy.manual_gate:
-        _fail("proposal_manual_gate_unsupported", "manual approval gates are not supported in R5.1")
+        _fail(
+            "proposal_manual_gate_unsupported",
+            "manual approval gates are not supported in R5.1",
+        )
 
     validation_payload = (
         typed_payload.to_legacy() if is_v4 or is_v5 or is_v6 else typed_payload
@@ -194,10 +208,9 @@ def _validate_input_group_producers(
         eligible_keys: set[str] = set()
         for candidate in group.candidates:
             intent = intents_by_worker[candidate.worker_item_key]
-            if (
-                required_artifacts <= set(intent.expected_artifact_refs)
-                and required_evidence <= set(intent.required_evidence_refs)
-            ):
+            if required_artifacts <= set(
+                intent.expected_artifact_refs
+            ) and required_evidence <= set(intent.required_evidence_refs):
                 eligible_keys.add(candidate.worker_item_key)
 
         required_count = (
@@ -257,7 +270,11 @@ def _typed_payload(
             return PlanningProposalPayloadV6.from_mapping(payload)
         except ValidationError as exc:
             _fail("proposal_schema_invalid", str(exc))
-    if schema_version == 4 or schema_version == 3 or kind == PlanningRequestKind.REVISION.value:
+    if (
+        schema_version == 4
+        or schema_version == 3
+        or kind == PlanningRequestKind.REVISION.value
+    ):
         try:
             if schema_version == 4:
                 return PlanningRevisionProposalPayloadV4.from_mapping(payload)
@@ -271,7 +288,10 @@ def _typed_payload(
     if _contains_concrete_identity(
         payload, {"root_task_id", "task_id", "worker_item_id", "pinned_worker_id"}
     ):
-        _fail("proposal_worker_binding_forbidden", "proposal cannot contain concrete task or worker identities")
+        _fail(
+            "proposal_worker_binding_forbidden",
+            "proposal cannot contain concrete task or worker identities",
+        )
     try:
         return PlanningProposalPayload.from_mapping(payload)
     except ValidationError as exc:
@@ -298,10 +318,20 @@ def _validate_revision_proposal(
             "proposal_schema_invalid",
             f"revision proposal schema v{payload.schema_version} is not selected by the profile",
         )
-    capabilities = capability_snapshot or profile_snapshot.planner_capabilities
-    if not isinstance(capabilities, PlannerAdapterCapabilityProfile):
-        _fail("proposal_schema_invalid", "planner capability snapshot is invalid")
-    if payload.schema_version not in capabilities.proposal_schema_versions:
+    if profile_snapshot.execution_mode == "native_profile":
+        if (
+            capability_snapshot is not None
+            or profile_snapshot.planner_capabilities is not None
+            or profile_snapshot.planner_agent_ref is None
+        ):
+            _fail("proposal_schema_invalid", "native planner pins are invalid")
+        supported_versions = (3, 4, 5, 6)
+    else:
+        capabilities = capability_snapshot or profile_snapshot.planner_capabilities
+        if not isinstance(capabilities, PlannerAdapterCapabilityProfile):
+            _fail("proposal_schema_invalid", "planner capability snapshot is invalid")
+        supported_versions = capabilities.proposal_schema_versions
+    if payload.schema_version not in supported_versions:
         _fail(
             "proposal_schema_invalid",
             f"revision proposal schema v{payload.schema_version} is not supported by the adapter",
@@ -435,7 +465,9 @@ def _validate_unique_keys(payload: PlanningProposalPayload) -> None:
     if not payload.subtasks:
         _fail("proposal_schema_invalid", "proposal must contain at least one subtask")
     if not payload.worker_items:
-        _fail("proposal_schema_invalid", "proposal must contain at least one worker item")
+        _fail(
+            "proposal_schema_invalid", "proposal must contain at least one worker item"
+        )
 
     subtask_keys = {item.key for item in payload.subtasks}
     workers_by_subtask: dict[str, int] = {key: 0 for key in subtask_keys}
@@ -447,7 +479,9 @@ def _validate_unique_keys(payload: PlanningProposalPayload) -> None:
                 (item.key, item.subtask_key),
             )
         workers_by_subtask[item.subtask_key] += 1
-    missing_workers = tuple(key for key, count in workers_by_subtask.items() if count == 0)
+    missing_workers = tuple(
+        key for key, count in workers_by_subtask.items() if count == 0
+    )
     if missing_workers:
         _fail(
             "proposal_reference_invalid",
@@ -467,7 +501,11 @@ def _validate_references(
     worker_item_subtasks = {item.key: item.subtask_key for item in payload.worker_items}
     for item in payload.subtasks:
         if item.milestone_key is not None and item.milestone_key not in milestone_keys:
-            _fail("proposal_reference_invalid", "subtask milestone reference is unknown", (item.key, item.milestone_key))
+            _fail(
+                "proposal_reference_invalid",
+                "subtask milestone reference is unknown",
+                (item.key, item.milestone_key),
+            )
         for ref in item.acceptance_refs:
             _validate_evidence_ref(ref, item.key)
     for ref in payload.root_task.acceptance_refs:
@@ -475,7 +513,11 @@ def _validate_references(
     for milestone in payload.subtask_milestones:
         for key in milestone.subtask_keys:
             if key not in subtask_keys:
-                _fail("proposal_reference_invalid", "milestone references an unknown subtask", (milestone.key, key))
+                _fail(
+                    "proposal_reference_invalid",
+                    "milestone references an unknown subtask",
+                    (milestone.key, key),
+                )
         for ref in milestone.acceptance_refs:
             _validate_evidence_ref(ref, milestone.key)
     for dependency in payload.subtask_dependencies:
@@ -494,9 +536,11 @@ def _validate_references(
             worker_keys,
             "worker item dependency",
         )
-        if enforce_worker_item_scope and worker_item_subtasks[
-            dependency.upstream_worker_item_key
-        ] != worker_item_subtasks[dependency.downstream_worker_item_key]:
+        if (
+            enforce_worker_item_scope
+            and worker_item_subtasks[dependency.upstream_worker_item_key]
+            != worker_item_subtasks[dependency.downstream_worker_item_key]
+        ):
             _fail(
                 "cross_subtask_worker_dependency",
                 "WorkerItem dependency edges must stay within one Subtask",
@@ -506,12 +550,20 @@ def _validate_references(
                 ),
             )
         if dependency.kind not in {"hard", "informational"}:
-            _fail("proposal_schema_invalid", "worker dependency kind is unsupported", (dependency.kind,))
+            _fail(
+                "proposal_schema_invalid",
+                "worker dependency kind is unsupported",
+                (dependency.kind,),
+            )
         for ref in dependency.required_artifact_refs:
             _validate_artifact_ref(ref, dependency.downstream_worker_item_key)
     for intent in payload.execution_intents:
         if intent.worker_item_key not in worker_keys:
-            _fail("proposal_intent_mismatch", "execution intent references an unknown worker item", (intent.worker_item_key,))
+            _fail(
+                "proposal_intent_mismatch",
+                "execution intent references an unknown worker item",
+                (intent.worker_item_key,),
+            )
         for ref in (*intent.expected_artifact_refs,):
             _validate_artifact_ref(ref, intent.worker_item_key)
         for ref in intent.required_evidence_refs:
@@ -523,9 +575,11 @@ def _validate_references(
                 worker_keys,
                 "activation dependency",
             )
-            if enforce_worker_item_scope and worker_item_subtasks[
-                dependency.upstream_worker_item_key
-            ] != worker_item_subtasks[dependency.downstream_worker_item_key]:
+            if (
+                enforce_worker_item_scope
+                and worker_item_subtasks[dependency.upstream_worker_item_key]
+                != worker_item_subtasks[dependency.downstream_worker_item_key]
+            ):
                 _fail(
                     "cross_subtask_worker_dependency",
                     "WorkerItem activation dependency edges must stay within one Subtask",
@@ -535,7 +589,11 @@ def _validate_references(
                     ),
                 )
             if dependency.kind not in {"hard", "informational"}:
-                _fail("proposal_schema_invalid", "activation dependency kind is unsupported", (dependency.kind,))
+                _fail(
+                    "proposal_schema_invalid",
+                    "activation dependency kind is unsupported",
+                    (dependency.kind,),
+                )
             for ref in dependency.required_artifact_refs:
                 _validate_artifact_ref(ref, dependency.downstream_worker_item_key)
 
@@ -595,9 +653,7 @@ def _validate_input_group_cycles(
     grouped_workers: dict[str, list[str]] = {}
     for item in payload.worker_items:
         grouped_workers.setdefault(item.subtask_key, []).append(item.key)
-    workers_by_subtask = {
-        key: tuple(values) for key, values in grouped_workers.items()
-    }
+    workers_by_subtask = {key: tuple(values) for key, values in grouped_workers.items()}
 
     hard_edges: set[tuple[str, str]] = set()
     for dependency in payload.worker_item_dependencies:
@@ -649,14 +705,30 @@ def _validate_capabilities(
     forbidden_adapters = set(profile_snapshot.adapter_forbidden)
     for item in payload.worker_items:
         if not set(item.capability_requirements).issubset(allowed):
-            _fail("proposal_capability_forbidden", "worker item requests a capability outside the profile", (item.key,))
+            _fail(
+                "proposal_capability_forbidden",
+                "worker item requests a capability outside the profile",
+                (item.key,),
+            )
         if item.pinned_worker_id is not None:
-            _fail("proposal_worker_binding_forbidden", "concrete worker binding is not allowed", (item.key,))
+            _fail(
+                "proposal_worker_binding_forbidden",
+                "concrete worker binding is not allowed",
+                (item.key,),
+            )
     for intent in payload.execution_intents:
         if not set(intent.capability_requirements).issubset(allowed):
-            _fail("proposal_capability_forbidden", "execution intent requests a capability outside the profile", (intent.worker_item_key,))
+            _fail(
+                "proposal_capability_forbidden",
+                "execution intent requests a capability outside the profile",
+                (intent.worker_item_key,),
+            )
         if set(intent.adapter_preferences).intersection(forbidden_adapters):
-            _fail("proposal_capability_forbidden", "execution intent requests a forbidden adapter", (intent.worker_item_key,))
+            _fail(
+                "proposal_capability_forbidden",
+                "execution intent requests a forbidden adapter",
+                (intent.worker_item_key,),
+            )
 
 
 def _validate_budget(
@@ -670,20 +742,42 @@ def _validate_budget(
     if summary.estimated_cost_microunits > budget.max_cost_microunits:
         _fail("proposal_budget_exceeded", "estimated cost exceeds the profile budget")
     if summary.estimated_runtime_seconds > budget.max_runtime_seconds:
-        _fail("proposal_budget_exceeded", "estimated runtime exceeds the profile budget")
+        _fail(
+            "proposal_budget_exceeded", "estimated runtime exceeds the profile budget"
+        )
     if summary.estimated_concurrency > budget.max_concurrency:
-        _fail("proposal_budget_exceeded", "estimated concurrency exceeds the profile budget")
+        _fail(
+            "proposal_budget_exceeded",
+            "estimated concurrency exceeds the profile budget",
+        )
     if 1 + len(payload.subtasks) + len(payload.worker_items) > budget.max_nodes:
-        _fail("proposal_budget_exceeded", "proposal node count exceeds the profile budget")
+        _fail(
+            "proposal_budget_exceeded", "proposal node count exceeds the profile budget"
+        )
     for item in payload.worker_items:
-        if item.concurrency_limit is not None and item.concurrency_limit > budget.max_concurrency:
-            _fail("proposal_budget_exceeded", "worker item concurrency exceeds the profile budget", (item.key,))
+        if (
+            item.concurrency_limit is not None
+            and item.concurrency_limit > budget.max_concurrency
+        ):
+            _fail(
+                "proposal_budget_exceeded",
+                "worker item concurrency exceeds the profile budget",
+                (item.key,),
+            )
     for intent in payload.execution_intents:
         if intent.max_attempts > profile_snapshot.execution_max_attempts:
-            _fail("proposal_budget_exceeded", "execution attempts exceed the profile policy", (intent.worker_item_key,))
+            _fail(
+                "proposal_budget_exceeded",
+                "execution attempts exceed the profile policy",
+                (intent.worker_item_key,),
+            )
         for seconds in (intent.deadline_seconds, intent.not_before_seconds):
             if seconds is not None and seconds > budget.max_runtime_seconds:
-                _fail("proposal_budget_exceeded", "execution timing exceeds the profile budget", (intent.worker_item_key,))
+                _fail(
+                    "proposal_budget_exceeded",
+                    "execution timing exceeds the profile budget",
+                    (intent.worker_item_key,),
+                )
 
 
 def _validate_intents(payload: PlanningProposalPayload) -> None:
@@ -691,38 +785,67 @@ def _validate_intents(payload: PlanningProposalPayload) -> None:
     intent_keys = {item.worker_item_key for item in payload.execution_intents}
     worker_keys = set(workers)
     if intent_keys != worker_keys:
-        _fail("proposal_intent_mismatch", "every WorkerItem must have exactly one execution intent")
+        _fail(
+            "proposal_intent_mismatch",
+            "every WorkerItem must have exactly one execution intent",
+        )
     for intent in payload.execution_intents:
         worker = workers[intent.worker_item_key]
         if set(intent.capability_requirements) != set(worker.capability_requirements):
-            _fail("proposal_intent_mismatch", "intent capabilities do not match the WorkerItem", (intent.worker_item_key,))
+            _fail(
+                "proposal_intent_mismatch",
+                "intent capabilities do not match the WorkerItem",
+                (intent.worker_item_key,),
+            )
 
 
 def _validate_artifact_ref(value: str, key: str) -> None:
     prefix, separator, artifact_type = value.partition(":")
-    if prefix != "artifact_type" or not separator or artifact_type not in {item.value for item in ArtifactType}:
-        _fail("proposal_reference_invalid", "artifact reference must use artifact_type:<ArtifactType>", (key,))
+    if (
+        prefix != "artifact_type"
+        or not separator
+        or artifact_type not in {item.value for item in ArtifactType}
+    ):
+        _fail(
+            "proposal_reference_invalid",
+            "artifact reference must use artifact_type:<ArtifactType>",
+            (key,),
+        )
 
 
 def _validate_evidence_ref(value: str, key: str) -> None:
     prefix, separator, criterion = value.partition(":")
     if prefix != "acceptance" or not separator or not criterion.strip():
-        _fail("proposal_reference_invalid", "evidence reference must use acceptance:<criterion-ref>", (key,))
+        _fail(
+            "proposal_reference_invalid",
+            "evidence reference must use acceptance:<criterion-ref>",
+            (key,),
+        )
 
 
 def _edge_reference(upstream: str, downstream: str, keys: set[str], label: str) -> None:
     if upstream == downstream:
         _fail("proposal_cycle", f"{label} cannot point to itself", (upstream,))
     if upstream not in keys or downstream not in keys:
-        _fail("proposal_reference_invalid", f"{label} references an unknown node", (upstream, downstream))
+        _fail(
+            "proposal_reference_invalid",
+            f"{label} references an unknown node",
+            (upstream, downstream),
+        )
 
 
-def _assert_acyclic(keys: tuple[str, ...], edges: tuple[tuple[str, str], ...], label: str) -> None:
+def _assert_acyclic(
+    keys: tuple[str, ...], edges: tuple[tuple[str, str], ...], label: str
+) -> None:
     indegree = {key: 0 for key in keys}
     adjacency: dict[str, list[str]] = {key: [] for key in keys}
     for upstream, downstream in edges:
         if upstream not in indegree or downstream not in indegree:
-            _fail("proposal_reference_invalid", f"{label} references an unknown node", (upstream, downstream))
+            _fail(
+                "proposal_reference_invalid",
+                f"{label} references an unknown node",
+                (upstream, downstream),
+            )
         adjacency[upstream].append(downstream)
         indegree[downstream] += 1
     queue = [key for key in keys if indegree[key] == 0]
@@ -735,7 +858,11 @@ def _assert_acyclic(keys: tuple[str, ...], edges: tuple[tuple[str, str], ...], l
             if indegree[downstream] == 0:
                 queue.append(downstream)
     if visited != len(keys):
-        _fail("proposal_cycle", f"{label} contains a cycle", tuple(key for key, count in indegree.items() if count > 0))
+        _fail(
+            "proposal_cycle",
+            f"{label} contains a cycle",
+            tuple(key for key, count in indegree.items() if count > 0),
+        )
 
 
 def _unique(keys: tuple[str, ...], label: str) -> None:
@@ -747,11 +874,7 @@ def _unique(keys: tuple[str, ...], label: str) -> None:
 def _contains_concrete_identity(value: object, keys: set[str]) -> bool:
     if isinstance(value, Mapping):
         return any(
-            (
-                isinstance(key, str)
-                and key in keys
-                and item is not None
-            )
+            (isinstance(key, str) and key in keys and item is not None)
             or _contains_concrete_identity(item, keys)
             for key, item in value.items()
         )

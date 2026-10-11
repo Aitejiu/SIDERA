@@ -10,18 +10,21 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
-database_url = os.environ.get("SIDERA_DATABASE_URL")
-if database_url is None:
-    raise RuntimeError("SIDERA_DATABASE_URL is required for migrations")
-# ConfigParser treats percent signs as interpolation markers. Database URLs
-# commonly contain percent-encoded query parameters, so escape them before
-# storing the value in Alembic's config object.
-config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
+provided_connection = config.attributes.get("connection")
+database_url = None
+if provided_connection is None:
+    database_url = os.environ.get("SIDERA_DATABASE_URL")
+    if database_url is None:
+        raise RuntimeError("SIDERA_DATABASE_URL is required for migrations")
+    # Preserve legacy CLI URL interpolation without reading it for an injected connection.
+    config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
+    if database_url is None:
+        raise RuntimeError("An explicit URL is required for offline migrations")
     context.configure(
         url=database_url,
         target_metadata=target_metadata,
@@ -33,7 +36,16 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _run_on_connection(connection) -> None:
+    context.configure(connection=connection, target_metadata=target_metadata)
+    with context.begin_transaction():
+        context.run_migrations()
+
+
 def run_migrations_online() -> None:
+    if provided_connection is not None:
+        _run_on_connection(provided_connection)
+        return
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
@@ -41,10 +53,7 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
-
-        with context.begin_transaction():
-            context.run_migrations()
+        _run_on_connection(connection)
 
 
 if context.is_offline_mode():

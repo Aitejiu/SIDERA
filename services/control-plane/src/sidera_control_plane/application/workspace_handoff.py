@@ -4,20 +4,38 @@ from collections.abc import Callable, Mapping
 from datetime import datetime
 from uuid import UUID
 
+from sidera_control_plane.application.handoff_gate import (
+    HandoffGateOperation,
+    require_handoff_operation,
+)
 from sidera_control_plane.application.ports import (
     ControlPlaneUnitOfWork,
     WorkspaceProvider,
 )
 from sidera_control_plane.domain.errors import DomainError
-from sidera_control_plane.domain.gateway import handoff_step_operation_id
+from sidera_control_plane.domain.execution import (
+    ExecutionSessionStatus,
+    ExecutionStatus,
+)
+from sidera_control_plane.domain.gateway import (
+    GatewayOperationStatus,
+    handoff_step_operation_id,
+)
 from sidera_control_plane.domain.handoff_evidence import (
+    HandoffCheckpointEvidence,
     HandoffInspectionOutcome,
+    HandoffStopEvidence,
     HandoffWorkspaceInspection,
     HandoffWorkspaceTargetSpec,
     HandoffWorkspaceTransfer,
     HandoffWorkspaceTransferStatus,
 )
 from sidera_control_plane.domain.handoffs import HandoffPhase, HandoffTransition
+from sidera_control_plane.domain.lease import LeaseStatus
+from sidera_control_plane.domain.modules import (
+    WORKSPACE_PROVIDER_MODULE_TYPE,
+    ModuleLifecycle,
+)
 from sidera_control_plane.domain.workspace import (
     ExecutionWorkspaceManifest,
     WorkspaceLifecycle,
@@ -73,6 +91,13 @@ class WorkspaceHandoffService:
         )
         self._validate_source(transition, source_manifest)
         self._validate_exact_stop(transition, source_manifest)
+        if transition.handoff_schema_version == 2 and self._uow_factory is not None:
+            with self._uow_factory() as uow:
+                current = uow.handoff_transitions.get(
+                    transition.id, transition.workspace_id, for_update=True
+                )
+                self._validate_native_cleanup(uow, current)
+                self._validate_native_freeze_claim(current, transition, now)
 
         existing_operation = transition.source_workspace_freeze_operation_id
         if existing_operation not in (None, operation_id):
@@ -104,7 +129,7 @@ class WorkspaceHandoffService:
                 "workspace freeze was reserved but provider state is not frozen"
             )
 
-        self._reserve_freeze(transition, operation_id)
+        self._reserve_freeze(transition, operation_id, now=now)
         if source_manifest.lifecycle is WorkspaceLifecycle.FROZEN:
             observed = self._inspect_source(source_manifest)
             if observed.lifecycle is not WorkspaceLifecycle.FROZEN:
@@ -164,11 +189,55 @@ class WorkspaceHandoffService:
         }:
             raise WorkspaceHandoffError("source workspace is not handoffable")
 
+    @staticmethod
     def _validate_exact_stop(
-        self,
         transition: HandoffTransition,
         source_manifest: ExecutionWorkspaceManifest,
     ) -> None:
+        if transition.handoff_schema_version == 2:
+            payload = transition.native_payload
+            if (
+                payload is None
+                or transition.source_checkpoint_facts is None
+                or transition.source_stop_facts is None
+            ):
+                raise WorkspaceHandoffError(
+                    "native freeze requires original closure proof"
+                )
+            checkpoint = HandoffCheckpointEvidence.from_native_mapping(
+                transition.source_checkpoint_facts
+            )
+            stop = HandoffStopEvidence.from_native_mapping(transition.source_stop_facts)
+            stop.assert_matches(checkpoint)
+            if (
+                checkpoint.transition_id,
+                checkpoint.workspace_id,
+                checkpoint.source_execution_id,
+                checkpoint.source_session_id,
+                checkpoint.source_run_id,
+                checkpoint.source_authority_id,
+                checkpoint.source_binding_version,
+                checkpoint.source_profile_ref,
+                checkpoint.context_package_id,
+                checkpoint.context_package_hash,
+                checkpoint.accepted_sequence,
+                stop.accepted_sequence,
+            ) != (
+                transition.id,
+                transition.workspace_id,
+                transition.source_execution_id,
+                transition.source_session_id,
+                payload.source_run_id,
+                payload.source_authority_id,
+                payload.source_binding_version,
+                payload.source_profile_ref,
+                payload.source_context_package_id,
+                payload.source_context_package_hash,
+                transition.source_checkpoint_sequence,
+                transition.source_stop_sequence,
+            ):
+                raise WorkspaceHandoffError("native source closure pins changed")
+            return
         if transition.source_checkpoint_sequence is None:
             raise WorkspaceHandoffError("workspace freeze requires a source checkpoint")
         if transition.source_stop_sequence != transition.source_checkpoint_sequence:
@@ -216,7 +285,9 @@ class WorkspaceHandoffService:
             raise WorkspaceHandoffError("provider returned an invalid workspace inspection")
         return result
 
-    def _reserve_freeze(self, transition: HandoffTransition, operation_id: UUID) -> None:
+    def _reserve_freeze(
+        self, transition: HandoffTransition, operation_id: UUID, *, now: datetime
+    ) -> None:
         if self._uow_factory is None:
             transition.reserve_workspace_freeze_operation(operation_id=operation_id)
             return
@@ -228,6 +299,9 @@ class WorkspaceHandoffService:
             )
             if current is None:
                 raise WorkspaceHandoffError("handoff transition not found")
+            if current.handoff_schema_version == 2:
+                self._validate_native_cleanup(uow, current)
+                self._validate_native_freeze_claim(current, transition, now)
             previous_version = current.version
             current.reserve_workspace_freeze_operation(operation_id=operation_id)
             if current.version != previous_version:
@@ -276,6 +350,10 @@ class WorkspaceHandoffService:
             )
             if stored_manifest is None or stored_manifest.id != manifest.id:
                 raise WorkspaceHandoffError("source workspace manifest not found")
+            if current.handoff_schema_version == 2:
+                self._validate_native_cleanup(uow, current)
+                self._validate_native_freeze_claim(current, transition, now)
+                self._validate_exact_stop(current, manifest)
             if not _same_manifest(stored_manifest, manifest):
                 uow.workspaces.save(manifest, stored_manifest.version)
             if current.source_workspace_freeze_facts is None:
@@ -288,6 +366,83 @@ class WorkspaceHandoffService:
             elif dict(current.source_workspace_freeze_facts) != facts:
                 raise WorkspaceHandoffError("workspace freeze facts conflict")
             _sync_freeze_state(transition, current)
+
+    @staticmethod
+    def _validate_native_freeze_claim(current, transition, now):
+        if current.phase is not HandoffPhase.FREEZE_SOURCE_WORKSPACE or (
+            current.phase is not transition.phase
+            or current.logical_attempt != transition.logical_attempt
+            or current.lease_owner != transition.lease_owner
+            or current.lease_expires_at is None
+            or current.lease_expires_at <= now
+        ):
+            raise WorkspaceHandoffError("native freeze claim changed")
+
+    @staticmethod
+    def _validate_native_cleanup(uow, transition):
+        payload = transition.native_payload
+        manifest = uow.workspaces.get(
+            transition.source_workspace_manifest_id,
+            transition.workspace_id,
+            for_update=True,
+        )
+        WorkspaceHandoffService._validate_exact_stop(transition, manifest)
+        stop = HandoffStopEvidence.from_native_mapping(transition.source_stop_facts)
+        execution = uow.executions.get(
+            transition.source_execution_id, transition.workspace_id, for_update=True
+        )
+        session = uow.sessions.get_any(
+            transition.source_session_id, transition.workspace_id, for_update=True
+        )
+        authority = uow.execution_authorities.get(
+            payload.source_authority_id, workspace_id=transition.workspace_id
+        )
+        binding = uow.bindings.get_for_execution(
+            transition.source_execution_id, transition.workspace_id, for_update=True
+        )
+        operation = uow.gateway_operations.get_by_operation_id(
+            stop.operation_id, transition.workspace_id, for_update=True
+        )
+        lease = (
+            None
+            if authority is None
+            else uow.leases.get(
+                authority.lease_id, transition.workspace_id, for_update=True
+            )
+        )
+        if (
+            execution is None
+            or session is None
+            or authority is None
+            or binding is None
+            or manifest is None
+            or lease is None
+            or operation is None
+            or (
+                execution.status is not ExecutionStatus.CANCELED
+                or execution.active_lease_id is not None
+                or session.status is not ExecutionSessionStatus.CLOSED
+                or session.execution_id != execution.id
+                or session.adapter_session_id != f"agent-run:{payload.source_run_id}"
+                or session.worker_id != payload.source_worker_id
+                or authority.execution_id != execution.id
+                or authority.workspace_ref != manifest.id
+                or manifest.fencing_token != authority.fencing_token
+                or execution.last_fencing_token != authority.fencing_token
+                or binding.fencing_token != authority.fencing_token
+                or binding.lease_id != lease.id
+                or binding.worker_id != session.worker_id
+                or lease.status is not LeaseStatus.RELEASED
+                or lease.fencing_token != authority.fencing_token
+                or lease.worker_id != session.worker_id
+                or operation.status is not GatewayOperationStatus.SUCCEEDED
+                or operation.execution_id != execution.id
+                or operation.session_id != session.id
+                or operation.lease_id != lease.id
+                or operation.fencing_token != authority.fencing_token
+            )
+        ):
+            raise WorkspaceHandoffError("native source cleanup is not confirmed")
 
     def transfer(
         self,
@@ -363,7 +518,9 @@ class WorkspaceHandoffService:
             created_at=now,
             updated_at=now,
         )
-        self._persist_requested(requested, transition.workspace_id)
+        self._persist_requested(
+            requested, transition.workspace_id, transition=transition, target=target
+        )
         try:
             target_manifest = self._provider.transfer_handoff(
                 source_manifest,
@@ -389,6 +546,8 @@ class WorkspaceHandoffService:
                     result,
                     target_manifest=None,
                     workspace_id=transition.workspace_id,
+                    transition=transition,
+                    target=target,
                 )
             except Exception as persist_exc:
                 raise WorkspaceHandoffUnknown(
@@ -412,6 +571,8 @@ class WorkspaceHandoffService:
                     result,
                     target_manifest=None,
                     workspace_id=transition.workspace_id,
+                    transition=transition,
+                    target=target,
                 )
             except Exception as persist_exc:
                 raise WorkspaceHandoffUnknown(
@@ -431,6 +592,8 @@ class WorkspaceHandoffService:
                 result,
                 target_manifest=target_manifest,
                 workspace_id=transition.workspace_id,
+                transition=transition,
+                target=target,
             )
         except Exception as exc:
             persisted = self._load_transfer(operation_id, transition.workspace_id)
@@ -447,6 +610,8 @@ class WorkspaceHandoffService:
                     unknown,
                     target_manifest=None,
                     workspace_id=transition.workspace_id,
+                    transition=transition,
+                    target=target,
                 )
             except Exception as persist_exc:
                 refreshed = self._load_transfer(operation_id, transition.workspace_id)
@@ -521,6 +686,24 @@ class WorkspaceHandoffService:
             raise WorkspaceHandoffError("target execution must be new")
         if target.target_worker_id != transition.target_worker_id:
             raise WorkspaceHandoffError("target worker does not match transition")
+        if transition.handoff_schema_version == 2:
+            if (
+                transition.native_payload is None
+                or target.schema_version != 2
+                or target.target_execution_id != transition.target_execution_id
+                or (
+                    target.target_profile_ref
+                    != transition.native_payload.target_profile_ref
+                    or target.target_binding_version
+                    != transition.target_binding_version
+                )
+            ):
+                raise WorkspaceHandoffError(
+                    "native target appointment does not match transition"
+                )
+            if self._uow_factory is not None:
+                with self._uow_factory() as uow:
+                    self._validate_native_transfer_scope(uow, transition, target)
         if target.anticipated_fencing_token != source_manifest.fencing_token + 1:
             raise WorkspaceHandoffError("target fencing token must increment exactly")
         self._validate_repositories(source_manifest, target.repositories)
@@ -638,6 +821,8 @@ class WorkspaceHandoffService:
                     result,
                     target_manifest=target_manifest,
                     workspace_id=transition.workspace_id,
+                    transition=transition,
+                    target=target,
                 )
                 return result
         result = _transfer_outcome(
@@ -650,6 +835,8 @@ class WorkspaceHandoffService:
             result,
             target_manifest=None,
             workspace_id=transition.workspace_id,
+            transition=transition,
+            target=target,
         )
         return result
 
@@ -674,13 +861,20 @@ class WorkspaceHandoffService:
         return transfer
 
     def _persist_requested(
-        self, transfer: HandoffWorkspaceTransfer, workspace_id: UUID
+        self,
+        transfer: HandoffWorkspaceTransfer,
+        workspace_id: UUID,
+        *,
+        transition: HandoffTransition | None = None,
+        target: HandoffWorkspaceTargetSpec | None = None,
     ) -> None:
         if self._uow_factory is None:
             self._transfers[transfer.operation_id] = transfer
             self._transfer_workspace_by_operation[transfer.operation_id] = workspace_id
             return
         with self._uow_factory() as uow:
+            if transition is not None and transition.handoff_schema_version == 2:
+                self._validate_native_transfer_scope(uow, transition, target)
             existing = uow.handoff_workspace_transfers.get_by_operation(
                 transfer.operation_id,
                 workspace_id,
@@ -704,6 +898,8 @@ class WorkspaceHandoffService:
         *,
         target_manifest: ExecutionWorkspaceManifest | None,
         workspace_id: UUID,
+        transition: HandoffTransition | None = None,
+        target: HandoffWorkspaceTargetSpec | None = None,
     ) -> None:
         if self._uow_factory is None:
             self._transfers[transfer.operation_id] = transfer
@@ -712,6 +908,8 @@ class WorkspaceHandoffService:
                 self._target_manifests[target_manifest.id] = target_manifest
             return
         with self._uow_factory() as uow:
+            if transition is not None and transition.handoff_schema_version == 2:
+                self._validate_native_transfer_scope(uow, transition, target)
             existing = uow.handoff_workspace_transfers.get_by_operation(
                 transfer.operation_id,
                 workspace_id,
@@ -744,6 +942,81 @@ class WorkspaceHandoffService:
             self._transfer_workspace_by_operation[transfer.operation_id] = workspace_id
             if target_manifest is not None:
                 self._target_manifests[target_manifest.id] = target_manifest
+
+    def _validate_native_transfer_scope(self, uow, transition, target):
+        current = uow.handoff_transitions.get(
+            transition.id, transition.workspace_id, for_update=True
+        )
+        if (
+            current is None
+            or target is None
+            or current.handoff_schema_version != 2
+            or current.native_payload is None
+            or (
+                current.phase is not HandoffPhase.TRANSFER_WORKSPACE
+                or current.logical_attempt != transition.logical_attempt
+                or current.lease_owner != transition.lease_owner
+                or current.target_execution_id != target.target_execution_id
+                or current.target_binding_version != target.target_binding_version
+                or current.native_payload.target_profile_ref
+                != target.target_profile_ref
+            )
+        ):
+            raise WorkspaceHandoffError("native transfer claim or appointment changed")
+        require_handoff_operation(
+            uow,
+            worker_item_id=current.worker_item_id,
+            workspace_id=current.workspace_id,
+            operation=HandoffGateOperation.COORDINATOR_TRANSFER_WORKSPACE,
+            transition_id=current.id,
+            target_execution_id=current.target_execution_id,
+        )
+        self._validate_native_cleanup(uow, current)
+        binding = uow.agent_bindings.get(
+            current.workspace_id, "worker_item", current.worker_item_id, for_update=True
+        )
+        execution = uow.executions.get(
+            current.target_execution_id, current.workspace_id, for_update=True
+        )
+        provider = uow.bindings.get_for_execution(
+            current.source_execution_id, current.workspace_id, for_update=True
+        )
+        module = (
+            None
+            if provider is None
+            else uow.modules.get_instance(
+                provider.workspace_module_id, current.workspace_id
+            )
+        )
+        definition = (
+            None
+            if module is None
+            else uow.modules.get_definition(module.definition_id, current.workspace_id)
+        )
+        if (
+            binding is None
+            or execution is None
+            or provider is None
+            or module is None
+            or definition is None
+            or (
+                binding.version != target.target_binding_version
+                or binding.profile_ref != target.target_profile_ref
+                or not binding.runnable
+                or execution.handoff_transition_id != current.id
+                or execution.worker_item_id != current.worker_item_id
+                or execution.status is not ExecutionStatus.QUEUED
+                or execution.active_lease_id is not None
+                or provider.workspace_module_id != target.workspace_module_ref
+                or provider.workspace_config_version != target.workspace_config_version
+                or module.config_version != target.workspace_config_version
+                or module.lifecycle is not ModuleLifecycle.ACTIVE
+                or definition.module_type != WORKSPACE_PROVIDER_MODULE_TYPE
+            )
+        ):
+            raise WorkspaceHandoffError(
+                "native transfer target or workspace provider changed"
+            )
 
     def _manifest_by_id(
         self,

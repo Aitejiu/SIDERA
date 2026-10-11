@@ -30,6 +30,7 @@ from sidera_control_plane.domain.worker_item_projections import (
     WorkerItemFact,
     WorkerItemPlacementFact,
     WorkerItemProjectionService,
+    WorkerProgressFact,
     WorkerWorkspaceProjection,
 )
 
@@ -54,6 +55,7 @@ class WorkerWorkspaceQuerySnapshot:
     active_handoff: ActiveHandoffProjection | None = None
     collaboration_facts: CollaborationProjectionFacts | None = None
     root_task_status: str | None = None
+    progress_reports: tuple[WorkerProgressFact, ...] = ()
 
 
 class WorkerWorkspaceQueryStore(Protocol):
@@ -132,6 +134,7 @@ class WorkerWorkspaceQueryService:
             active_handoff=snapshot.active_handoff,
             collaboration=collaboration,
             root_task_status=snapshot.root_task_status,
+            progress_reports=snapshot.progress_reports,
         )
 
     @staticmethod

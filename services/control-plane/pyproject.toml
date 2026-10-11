@@ -9,6 +9,7 @@ dependencies = [
     "psycopg[binary]>=3.2,<4",
     "pydantic-settings>=2.10,<3",
     "sqlalchemy>=2.0,<3",
+    "sidera-agents",
     "sidera-runtime-guard",
     "uvicorn>=0.41,<1",
 ]
@@ -39,7 +40,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/sidera_control_plane"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"alembic.ini" = "sidera_control_plane/alembic.ini"
+migrations = "sidera_control_plane/migrations"
+
 [tool.uv.sources]
+sidera-agents = { path = "../../packages/agents", editable = true }
 sidera-runtime-guard = { path = "../../packages/runtime-guard", editable = true }
 
 [tool.pytest.ini_options]

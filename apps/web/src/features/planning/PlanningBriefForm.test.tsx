@@ -39,6 +39,23 @@ const profile = {
   created_at: "2026-08-23T08:00:00Z",
 };
 
+const nativeProfile = {
+  ...profile,
+  id: "10000000-0000-0000-0000-000000000005",
+  profile_key: "native-planner",
+  display_name: "原生规划配置",
+  execution_mode: "native_profile",
+  planner_agent_ref: {
+    workspace_id: WORKSPACE_ID,
+    profile_id: "60000000-0000-0000-0000-000000000001",
+    revision: 1,
+  },
+  planner_provider: null,
+  planner_module_instance_id: null,
+  planner_module_config_version: null,
+  capabilities: null,
+};
+
 function renderForm() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -67,6 +84,69 @@ describe("PlanningBriefForm", () => {
   beforeEach(() => {
     server.resetHandlers();
     installProfileHandler();
+  });
+
+  it("retains the legacy base selection when a native policy is listed first", async () => {
+    const user = userEvent.setup();
+    const revisionProfile = {
+      ...profile,
+      id: "10000000-0000-0000-0000-000000000002",
+      display_name: "修订规划器",
+      capabilities: { ...profile.capabilities, proposal_schema_versions: [2, 3] },
+    };
+    let submitted: { command_type?: string; payload?: { profile_id?: string } } | undefined;
+    server.use(
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/planning-profiles`, () =>
+        HttpResponse.json({ items: [nativeProfile, revisionProfile, profile], next_cursor: null }),
+      ),
+      http.post("/api/v1/commands", async ({ request }) => {
+        submitted = await request.json() as typeof submitted;
+        return HttpResponse.json({
+          aggregate_id: REQUEST_ID,
+          aggregate_version: 1,
+          command_id: "50000000-0000-0000-0000-000000000005",
+          event_ids: [],
+          data: { planning_request_id: REQUEST_ID },
+        }, { status: 201 });
+      }),
+    );
+    renderForm();
+
+    await screen.findByRole("option", { name: "默认规划器" });
+    expect(screen.getByRole("combobox", { name: "规划配置" })).toHaveValue(PROFILE_ID);
+    expect(screen.queryByRole("option", { name: "原生规划配置" })).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText("需求目标"), "保持基础规划配置");
+    await user.type(screen.getByLabelText("验收条件"), "只提交可用的旧规划配置");
+    await user.click(screen.getByRole("button", { name: "提交需求" }));
+
+    await screen.findByText("规划请求已创建");
+    expect(submitted?.command_type).toBe("SubmitPlanningRequest");
+    expect(submitted?.payload?.profile_id).toBe(PROFILE_ID);
+  });
+
+  it("uses the unavailable state without legacy submission for native-only policies", async () => {
+    const user = userEvent.setup();
+    let submitted = 0;
+    server.use(
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/planning-profiles`, () =>
+        HttpResponse.json({ items: [nativeProfile], next_cursor: null }),
+      ),
+      http.post("/api/v1/commands", () => {
+        submitted += 1;
+        return HttpResponse.json({}, { status: 201 });
+      }),
+    );
+    renderForm();
+
+    const select = await screen.findByRole("combobox", { name: "规划配置" });
+    expect(select).toBeDisabled();
+    expect(screen.queryByRole("option", { name: "原生规划配置" })).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText("需求目标"), "保留原生配置");
+    await user.type(screen.getByLabelText("验收条件"), "不得使用旧提交命令");
+    await user.click(screen.getByRole("button", { name: "提交需求" }));
+
+    expect(screen.getByText("当前工作区没有可用的规划配置")).toBeVisible();
+    expect(submitted).toBe(0);
   });
 
   it("defaults new tasks to the base planning profile when a revision profile is listed first", async () => {

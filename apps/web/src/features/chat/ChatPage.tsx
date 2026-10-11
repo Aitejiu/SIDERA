@@ -5,11 +5,15 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { AgentApiProblem, readDefaults, readProfile } from "@/features/agents/api";
+import type { ProfileView } from "@/features/agents/types";
+import { LocalSessionButton } from "@/features/local-session/LocalSessionDialog";
 import {
   createThread,
   getHealth,
@@ -29,7 +33,7 @@ import { ChatThreadList } from "./ChatThreadList";
 import { ChatTranscript, getTurnInput } from "./ChatTranscript";
 import { parseToolResult } from "./ToolResultCard";
 import { subscribeTurnEvents } from "./turnStream";
-import type { JsonValue, MainAgentItem, MainAgentTurn } from "./types";
+import type { ChatProfileRef, JsonValue, MainAgentItem, MainAgentTurn } from "./types";
 
 const DEFAULT_WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 const NEW_THREAD_SCOPE = "__new__";
@@ -39,7 +43,7 @@ const THREAD_BUSY_RETRY_DELAYS_MS = [250, 500, 1000, 2000, 4000, 8000] as const;
 
 type ScopedTurnMap = Record<string, Record<string, MainAgentTurn>>;
 type ScopedInputMap = Record<string, Record<string, string>>;
-type PendingOperationState = "unknown" | "conflict";
+type PendingOperationState = "unknown" | "conflict" | "busy";
 type PendingOperation = { operationId: string; state: PendingOperationState };
 type ScopedOperationMap = Record<string, PendingOperation>;
 
@@ -90,10 +94,24 @@ export function ChatPage() {
     queryFn: ({ signal }) => getThread(threadId ?? "", signal),
     enabled: threadId !== undefined,
   });
+  const native = healthQuery.data?.service === "sidera-product";
+  const newNative = native && threadId === undefined;
+  const authErrors = [healthQuery.error, threadsQuery.error, threadQuery.error];
+  const sessionRequired = authErrors.some(error => error instanceof MainAgentApiProblem && error.status === 401 && error.code === "local_session_required");
+  const authDenied = authErrors.some(error => error instanceof MainAgentApiProblem && [401, 403].includes(error.status));
+  const sessionAuthorized = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: mainAgentHealthQueryKey(workspaceId) });
+    void queryClient.invalidateQueries({ queryKey: mainAgentThreadsQueryKey(workspaceId) });
+    if (threadId !== undefined) void queryClient.invalidateQueries({ queryKey: mainAgentThreadQueryKey(workspaceId, threadId) });
+  }, [queryClient, workspaceId, threadId]);
 
   const createMutation = useMutation({
-    mutationFn: () => createThread({ contextRefs: [], title: "新对话" }),
-    onSuccess: (thread) => {
+    mutationFn: (profileRef?: ChatProfileRef) => createThread({ contextRefs: [], title: "新对话", ...(profileRef ? { profileRef } : {}) }),
+    onSuccess: (thread, profileRef) => {
+      if (profileRef && !isNativeEmptyThread(thread, profileRef)) {
+        setErrorMessage("新对话创建结果未确认");
+        return;
+      }
       queryClient.setQueryData(mainAgentThreadQueryKey(workspaceId, thread.id), thread);
       void queryClient.invalidateQueries({ queryKey: mainAgentThreadsQueryKey(workspaceId) });
       navigate(`/workspaces/${workspaceId}/chat/${encodeURIComponent(thread.id)}`);
@@ -110,6 +128,10 @@ export function ChatPage() {
     () => [...turns].reverse().find((turn) => ACTIVE_STATUSES.has(turn.status)),
     [turns],
   );
+  const activeTurnId = activeTurn?.id;
+  const streamAvailable = activeTurn?.streamAvailable ?? false;
+  const activeTurnRef = useRef<MainAgentTurn | undefined>(undefined);
+  useEffect(() => { activeTurnRef.current = activeTurn; }, [activeTurn]);
   const toolResourceRefs = useMemo(
     () => turns.flatMap((turn) => turn.items
       .map((item) => item.type === "toolCall" ? parseToolResult(item)?.resourceRef ?? null : null)),
@@ -129,6 +151,14 @@ export function ChatPage() {
       ...current,
       [turn.threadId]: { ...current[turn.threadId], [turn.id]: turn },
     }));
+    if (turn.operationState === "accepted" || turn.operationState === "delivered") {
+      setPendingOperationsByScope((current) => {
+        if (current[turn.threadId]?.operationId !== turn.operationId) return current;
+        const next = { ...current };
+        delete next[turn.threadId];
+        return next;
+      });
+    }
     if (!ACTIVE_STATUSES.has(turn.status)) {
       void queryClient.invalidateQueries({
         queryKey: mainAgentThreadQueryKey(workspaceId, turn.threadId),
@@ -137,103 +167,120 @@ export function ChatPage() {
   }, [queryClient, workspaceId]);
 
   useEffect(() => {
-    if (threadId === undefined || activeTurn === undefined) {
-      return;
+    if (threadId === undefined || activeTurnId === undefined) return;
+    const controller = new AbortController();
+    let stopped = false;
+    let inFlight = false;
+    let timer: number | undefined;
+    const subscription: { current?: ReturnType<typeof subscribeTurnEvents> } = {};
+    const stop = () => {
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      controller.abort();
+      subscription.current?.close();
+    };
+    const schedule = () => {
+      if (stopped) return;
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = window.setTimeout(() => { timer = undefined; void refresh(); }, 2000);
+    };
+    const refresh = async () => {
+      if (stopped || inFlight) return;
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = undefined;
+      inFlight = true;
+      try {
+        const turn = await getTurn(threadId, activeTurnId, controller.signal);
+        if (stopped) return;
+        applyTurn(turn);
+        if (!ACTIVE_STATUSES.has(turn.status)) {
+          setPollingTurn(null);
+          stop();
+        }
+      } catch (error) {
+        if (stopped) return;
+        if (error instanceof MainAgentApiProblem && (error.status === 401 || error.status === 403)) {
+          setErrorMessage("本地会话不可用，请重新授权。");
+          setPollingTurn(null);
+          stop();
+        }
+      } finally {
+        inFlight = false;
+        if (!stopped) schedule();
+      }
+    };
+    const fallback = (status = 409) => {
+      if (stopped) return;
+      if (status === 401 || status === 403) {
+        setErrorMessage("本地会话不可用，请重新授权。");
+        stop();
+        return;
+      }
+      setPollingTurn({ threadId, turnId: activeTurnId });
+      void refresh();
+    };
+    if (!streamAvailable || typeof globalThis.EventSource !== "function") {
+      void refresh();
+      return stop;
     }
-    if (!activeTurn.streamAvailable) {
-      return;
-    }
-    if (typeof globalThis.EventSource !== "function") {
-      return;
-    }
-    const subscription = subscribeTurnEvents(threadId, activeTurn.id, {
+    subscription.current = subscribeTurnEvents(threadId, activeTurnId, {
       onEvent: (event) => {
+        if (stopped) return;
         if (event.event === "item") {
           const item = readItem(event.data.item);
           if (item !== null) {
             setTransientByScope((current) => {
-              const previous = current[threadId]?.[activeTurn.id] ?? activeTurn;
+              const previous = current[threadId]?.[activeTurnId] ?? activeTurnRef.current;
+              if (previous === undefined || previous.id !== activeTurnId || previous.threadId !== threadId) return current;
               const items = previous.items.some((candidate) => candidate.id === item.id)
                 ? previous.items.map((candidate) => candidate.id === item.id ? item : candidate)
                 : [...previous.items, item];
               return {
                 ...current,
-                [threadId]: { ...current[threadId], [activeTurn.id]: { ...previous, items } },
+                [threadId]: { ...current[threadId], [activeTurnId]: { ...previous, items } },
               };
             });
+            if (item.type === "toolCall") void refresh();
           }
         }
         if (TERMINAL_EVENT_NAMES.has(event.event)) {
-          void refreshTurn(threadId, activeTurn.id, applyTurn);
+          void refresh();
         }
       },
-      onResync: () => setPollingTurn({ threadId, turnId: activeTurn.id }),
-      onPollingRequired: () => setPollingTurn({ threadId, turnId: activeTurn.id }),
+      onResync: () => fallback(),
+      onPollingRequired: fallback,
     });
-    return () => subscription.close();
-  }, [activeTurn, applyTurn, threadId]);
-
-  const pollingTarget = useMemo(() => {
-    if (threadId === undefined) return null;
-    if (pollingTurn?.threadId === threadId) return pollingTurn;
-    if (activeTurn !== undefined && !activeTurn.streamAvailable) {
-      return { threadId, turnId: activeTurn.id };
-    }
-    return null;
-  }, [activeTurn, pollingTurn, threadId]);
-
-  useEffect(() => {
-    if (pollingTarget === null) {
-      return;
-    }
-    let cancelled = false;
-    let timer: number | undefined;
-    const poll = async () => {
-      try {
-        const turn = await getTurn(pollingTarget.threadId, pollingTarget.turnId);
-        if (cancelled) return;
-        applyTurn(turn);
-        if (ACTIVE_STATUSES.has(turn.status)) {
-          timer = window.setTimeout(() => void poll(), 1000);
-        } else {
-          if (pollingTurn?.threadId === pollingTarget.threadId
-            && pollingTurn.turnId === pollingTarget.turnId) {
-            setPollingTurn(null);
-          }
-        }
-      } catch {
-        if (!cancelled) {
-          timer = window.setTimeout(() => void poll(), 1500);
-        }
-      }
-    };
-    void poll();
-    return () => {
-      cancelled = true;
-      if (timer !== undefined) window.clearTimeout(timer);
-    };
-  }, [applyTurn, pollingTarget, pollingTurn]);
+    if (stopped) subscription.current.close();
+    else schedule();
+    return stop;
+  }, [activeTurnId, applyTurn, streamAvailable, threadId]);
 
   const selectThread = (nextThreadId: string) => {
     navigate(`/workspaces/${workspaceId}/chat/${encodeURIComponent(nextThreadId)}`);
   };
 
-  const send = async (input: string, options: { freshOperation?: boolean } = {}) => {
-    const normalizedInput = input.trim();
-    if (activeTurn !== undefined || normalizedInput === "" || sendPending) return;
+  const send = async (input: string, options: { freshOperation?: boolean; operationId?: string; profileRef?: ChatProfileRef } = {}) => {
+    const normalizedInput = options.operationId === undefined ? input.trim() : input;
+    if (activeTurn !== undefined || normalizedInput.trim() === "" || sendPending) return;
     setErrorMessage(null);
-    const operationId = options.freshOperation
+    const operationId = options.operationId ?? (options.freshOperation
       ? createOperationId()
-      : pendingOperation?.operationId ?? createOperationId();
+      : pendingOperation?.operationId ?? createOperationId());
 
     if (threadId === undefined) {
       if (pendingContextRef === null || contextSendPending) return;
+      if (newNative && options.profileRef === undefined) return;
       setContextSendPending(true);
       try {
         const created = await createThread({
           contextRefs: [pendingContextRef],
           title: "上下文讨论",
+          ...(options.profileRef ? { profileRef: options.profileRef } : {}),
         });
+        if (newNative && options.profileRef !== undefined && !isNativeEmptyThread(created, options.profileRef)) {
+          setErrorMessage("新对话创建结果未确认");
+          return;
+        }
         queryClient.setQueryData(mainAgentThreadQueryKey(workspaceId, created.id), created);
         void queryClient.invalidateQueries({ queryKey: mainAgentThreadsQueryKey(workspaceId) });
         setDrafts((current) => ({ ...current, [created.id]: normalizedInput }));
@@ -249,9 +296,13 @@ export function ChatPage() {
             [created.id]: { ...current[created.id], [turn.id]: normalizedInput },
           }));
           applyTurn(turn);
-          clearPendingOperation(created.id, setPendingOperationsByScope);
-          setDrafts((current) => ({ ...current, [created.id]: "" }));
-          if (!turn.streamAvailable) {
+          if (turn.operationState === "busy" || isUncertainTurn(turn)) {
+            setPendingOperationsByScope((current) => ({ ...current, [created.id]: { operationId: turn.operationId ?? operationId, state: turn.operationState === "busy" ? "busy" : "unknown" } }));
+          } else {
+            clearPendingOperation(created.id, setPendingOperationsByScope);
+            setDrafts((current) => ({ ...current, [created.id]: "" }));
+          }
+          if (ACTIVE_STATUSES.has(turn.status) && !turn.streamAvailable) {
             setPollingTurn({ threadId: created.id, turnId: turn.id });
           }
         } catch (error) {
@@ -283,9 +334,13 @@ export function ChatPage() {
         [threadId]: { ...current[threadId], [turn.id]: normalizedInput },
       }));
       applyTurn(turn);
-      clearPendingOperation(threadId, setPendingOperationsByScope);
-      setDrafts((current) => ({ ...current, [scope]: "" }));
-      if (!turn.streamAvailable) {
+      if (turn.operationState === "busy" || isUncertainTurn(turn)) {
+        setPendingOperationsByScope((current) => ({ ...current, [threadId]: { operationId: turn.operationId ?? operationId, state: turn.operationState === "busy" ? "busy" : "unknown" } }));
+      } else {
+        clearPendingOperation(threadId, setPendingOperationsByScope);
+        setDrafts((current) => ({ ...current, [scope]: "" }));
+      }
+      if (ACTIVE_STATUSES.has(turn.status) && !turn.streamAvailable) {
         setPollingTurn({ threadId, turnId: turn.id });
       }
     } catch (error) {
@@ -304,16 +359,22 @@ export function ChatPage() {
   const retry = async (turnId: string) => {
     if (threadId === undefined || activeTurn !== undefined) return;
     const sourceTurn = turns.find((turn) => turn.id === turnId);
+    if (sourceTurn === undefined || isUncertainTurn(sourceTurn)) return;
     const input = turnInputs[turnId] ?? (sourceTurn === undefined ? null : getTurnInput(sourceTurn));
     if (input === null || input === undefined) {
       setErrorMessage("这轮对话没有可重试的原始输入。");
       return;
     }
-    await send(input, { freshOperation: true });
+    if (sourceTurn.operationState === "busy") {
+      if (sourceTurn.operationId === undefined) return;
+      await send(input, { operationId: sourceTurn.operationId });
+    } else {
+      await send(input, { freshOperation: true });
+    }
   };
 
   const interrupt = async () => {
-    if (threadId === undefined || activeTurn === undefined) return;
+    if (threadId === undefined || activeTurn === undefined || activeTurn.interruptAvailable !== true) return;
     setErrorMessage(null);
     try {
       const turn = await interruptTurn(threadId, activeTurn.id);
@@ -334,8 +395,10 @@ export function ChatPage() {
         <div>
           <span className="eyebrow">MAIN AGENT / CHAT</span>
           <h1 id="chat-page-title">{pageTitle}</h1>
+          {selectedThread?.profileRef ? <span className="agent-identity">Profile R{selectedThread.profileRef.revision}</span> : null}
         </div>
         <div className="chat-page__status">
+          {sessionRequired ? <LocalSessionButton workspaceId={workspaceId} onAuthorized={sessionAuthorized} /> : null}
           {unavailable ? <CircleAlert size={15} aria-hidden="true" /> : <CircleCheck size={15} aria-hidden="true" />}
           <span>{unavailable ? "Gateway offline" : "Gateway ready"}</span>
         </div>
@@ -348,7 +411,8 @@ export function ChatPage() {
           isLoading={threadsQuery.isPending}
           isError={threadsQuery.isError}
           onSelect={selectThread}
-          onCreate={() => createMutation.mutate()}
+          onCreate={() => { if (native) navigate(`/workspaces/${workspaceId}/chat`); else createMutation.mutate(undefined); }}
+          createDisabled={newNative || authDenied || createMutation.isPending}
           onRetry={() => void threadsQuery.refetch()}
         />
 
@@ -357,9 +421,11 @@ export function ChatPage() {
             <div className="chat-recovery-notice" role="status" aria-label="发送结果恢复状态">
               <RefreshCw size={16} aria-hidden="true" />
               <div>
-                <strong>{pendingOperation.state === "conflict" ? "原发送仍待确认" : "结果待确认"}</strong>
+                <strong>{pendingOperation.state === "busy" ? "请求未受理" : pendingOperation.state === "conflict" ? "原发送仍待确认" : "结果待确认"}</strong>
                 <span>
-                  {pendingOperation.state === "conflict"
+                  {pendingOperation.state === "busy"
+                    ? "原始输入已保留。"
+                    : pendingOperation.state === "conflict"
                     ? "修改后的内容没有自动创建新回合；先结束这次恢复，再发起新的发送。"
                     : "未自动重发；再次发送会复用原 operationId，避免重复执行。"}
                 </span>
@@ -400,7 +466,7 @@ export function ChatPage() {
               <strong>Main Agent 暂不可用</strong>
               <span>任务控制面仍可继续查看。</span>
             </div>
-          ) : threadId === undefined && pendingContextRef !== null ? (
+          ) : newNative ? <NativeProfileSelection workspaceId={workspaceId} selectedId={searchParams.get("profile_id")} selectedRevision={searchParams.get("profile_revision")} creating={createMutation.isPending || contextSendPending} errorMessage={errorMessage} onCreate={ref => createMutation.mutate(ref)} contextRef={pendingContextRef} draft={draft} onDraft={value => { setDrafts(current => ({ ...current, [scope]: value })); setErrorMessage(null); }} onSend={ref => void send(draft, { profileRef: ref })} /> : threadId === undefined && pendingContextRef !== null ? (
             <div className="chat-main__draft">
               <div className="chat-main__draft-card">
                 <span className="eyebrow">CONTEXT DRAFT</span>
@@ -410,6 +476,8 @@ export function ChatPage() {
               <ChatComposer
                 value={draft}
                 active={false}
+                interruptAvailable={false}
+                interruptReasonCode={null}
                 disabled={contextSendPending}
                 errorMessage={errorMessage}
                 onChange={(value) => {
@@ -424,7 +492,7 @@ export function ChatPage() {
             <div className="chat-main__empty">
               <span className="eyebrow">NO THREAD SELECTED</span>
               <h2>选择一个对话</h2>
-              <button className="quiet-button" type="button" onClick={() => createMutation.mutate()}>
+              <button className="quiet-button" type="button" onClick={() => createMutation.mutate(undefined)}>
                 新建对话
               </button>
             </div>
@@ -447,6 +515,8 @@ export function ChatPage() {
               <ChatComposer
                 value={draft}
                 active={activeTurn !== undefined}
+                interruptAvailable={activeTurn?.interruptAvailable === true}
+                interruptReasonCode={activeTurn?.interruptReasonCode ?? "cancel_unconfirmed"}
                 disabled={unavailable || threadQuery.isError || createMutation.isPending || contextSendPending || sendPending}
                 errorMessage={errorMessage}
                 onChange={(value) => {
@@ -468,6 +538,68 @@ export function ChatPage() {
       </div>
     </section>
   );
+}
+
+function isNativeEmptyThread(thread: unknown, profileRef: ChatProfileRef): boolean {
+  if (typeof thread !== "object" || thread === null
+    || !("id" in thread) || typeof thread.id !== "string" || thread.id.trim() === ""
+    || !("turns" in thread) || !Array.isArray(thread.turns) || thread.turns.length !== 0
+    || ("runId" in thread && thread.runId !== null && thread.runId !== undefined)
+    || !("profileRef" in thread)) return false;
+  const ref = thread.profileRef;
+  return typeof ref === "object" && ref !== null
+    && "workspace_id" in ref && ref.workspace_id === profileRef.workspace_id
+    && "profile_id" in ref && ref.profile_id === profileRef.profile_id
+    && "revision" in ref && ref.revision === profileRef.revision;
+}
+
+function NativeProfileSelection({ workspaceId, selectedId, selectedRevision, ...actions }: {
+  workspaceId: string; selectedId: string | null; selectedRevision: string | null;
+  creating: boolean; errorMessage: string | null; onCreate: (ref: ChatProfileRef) => void;
+  contextRef: string | null; draft: string; onDraft: (value: string) => void; onSend: (ref: ChatProfileRef) => void;
+}) {
+  const [intent] = useState(() => crypto.randomUUID());
+  const profile = useQuery({
+    queryKey: ["main-agent", workspaceId, "new-profile", intent, selectedId, selectedRevision],
+    retry: false, refetchOnWindowFocus: false, refetchOnReconnect: false,
+    queryFn: async () => {
+      let id: string, revision: number | undefined;
+      if (selectedId !== null || selectedRevision !== null) {
+        const parsed = Number(selectedRevision);
+        if (selectedId === null || selectedRevision === null || !/^[1-9][0-9]*$/.test(selectedRevision) || !Number.isSafeInteger(parsed)) throw new AgentApiProblem(422, "invalid_profile_selection");
+        id = selectedId; revision = parsed;
+      } else {
+        const defaults = await readDefaults(workspaceId);
+        if (defaults.workspace_id !== workspaceId) throw new AgentApiProblem(403, "permission_denied");
+        if (defaults.main_profile_id === null) throw new AgentApiProblem(409, "main_default_missing");
+        id = defaults.main_profile_id;
+      }
+      const current = await readProfile(workspaceId, id, revision);
+      const ref = current.profile.ref;
+      if (ref.workspace_id !== workspaceId || ref.profile_id !== id || !Number.isSafeInteger(ref.revision) || ref.revision < 1 || (revision !== undefined && ref.revision !== revision) || current.status.profile_id !== id || current.status.enabled !== true) throw new AgentApiProblem(409, "profile_unavailable");
+      return current;
+    },
+  });
+  if (profile.isPending) return <p role="status">正在读取新对话 Profile</p>;
+  if (profile.isError) return <p role="alert">{profile.error instanceof AgentApiProblem && profile.error.code === "main_default_missing" ? "Main 默认 Profile 未设置" : "新对话 Profile 不可用"}</p>;
+  return <ReviewedNativeProfile key={`${intent}:${selectedId ?? "default"}:${selectedRevision ?? "head"}`} initial={profile.data} explicit={selectedId !== null} {...actions} />;
+}
+
+function ReviewedNativeProfile({ initial, explicit, creating, errorMessage, onCreate, contextRef, draft, onDraft, onSend }: {
+  initial: ProfileView; explicit: boolean; creating: boolean; errorMessage: string | null;
+  onCreate: (ref: ChatProfileRef) => void; contextRef: string | null; draft: string;
+  onDraft: (value: string) => void; onSend: (ref: ChatProfileRef) => void;
+}) {
+  const [profile] = useState(initial), [attempted, setAttempted] = useState(false);
+  const submitted = useRef(false);
+  const ref = profile.profile.ref;
+  return <div className="chat-main__empty">
+    <p>{explicit ? "已选 Profile" : "Main 默认 Profile"} · {profile.profile.draft.name} · R{ref.revision}</p>
+    <span className="mono-label">{ref.profile_id}</span>
+    {contextRef === null ? <button className="quiet-button" disabled={creating || attempted} onClick={() => { if (submitted.current) return; submitted.current = true; setAttempted(true); onCreate(ref); }}>使用该 Profile 新建对话</button>
+      : <><code>{contextRef}</code><ChatComposer value={draft} active={false} interruptAvailable={false} interruptReasonCode={null} disabled={creating || attempted} errorMessage={errorMessage} onChange={onDraft} onSend={() => { if (submitted.current || !draft.trim()) return; submitted.current = true; setAttempted(true); onSend(ref); }} onInterrupt={() => {}} /></>}
+    {contextRef === null && errorMessage ? <p role="alert">{errorMessage}</p> : null}
+  </div>;
 }
 
 async function startTurnWithBusyRetry(
@@ -549,16 +681,9 @@ function wait(delayMs: number): Promise<void> {
   });
 }
 
-async function refreshTurn(
-  threadId: string,
-  turnId: string,
-  applyTurn: (turn: MainAgentTurn) => void,
-): Promise<void> {
-  try {
-    applyTurn(await getTurn(threadId, turnId));
-  } catch {
-    // The next query refresh or the user retry owns recovery after a terminal stream error.
-  }
+function isUncertainTurn(turn: MainAgentTurn): boolean {
+  return turn.operationState === "claimed" || turn.operationState === "prepared"
+    || turn.operationState === "dispatching" || turn.operationState === "unknown";
 }
 
 function mergeTurns(

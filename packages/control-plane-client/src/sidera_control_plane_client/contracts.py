@@ -74,6 +74,12 @@ class CommandStatus(BaseModel):
     status: Literal["pending", "applied", "rejected"]
     result: CommandResponse | None = None
     error_code: str | None = None
+    command_type: str | None = None
+    target_type: str | None = None
+    target_id: UUID | None = None
+    expected_version: int | None = None
+    payload_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    payload: dict[str, JsonValue] | None = None
 
 
 class NotificationDeliveryEnvelope(BaseModel):

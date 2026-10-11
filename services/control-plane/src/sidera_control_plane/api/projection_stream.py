@@ -1,10 +1,10 @@
 import asyncio
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Query
+from fastapi import APIRouter, Depends, Header, Query, Request
 from starlette.responses import StreamingResponse
 
 from sidera_control_plane.api.dependencies import get_database, get_settings
@@ -22,6 +22,7 @@ SUPPORTED_SCHEMA_VERSION = 1
 @router.get("/{workspace_id}/projection-changes")
 def projection_changes(
     workspace_id: UUID,
+    request: Request,
     database: Annotated[Database, Depends(get_database)],
     settings: Annotated[Settings, Depends(get_settings)],
     after: Annotated[int, Query(ge=0)] = 0,
@@ -37,6 +38,7 @@ def projection_changes(
             workspace_id,
             start_cursor=start_cursor,
             schema_version=schema_version,
+            shutdown_check=request.app.state.projection_stream_shutdown_check,
         ),
         media_type="text/event-stream",
         headers={
@@ -65,24 +67,34 @@ async def _event_stream(
     *,
     start_cursor: int,
     schema_version: int,
+    shutdown_check: Callable[[], bool] | None = None,
 ) -> AsyncGenerator[str, None]:
+    if shutdown_check is not None and shutdown_check():
+        return
     cursor = start_cursor
     last_heartbeat = asyncio.get_running_loop().time()
     # Flush the response through local development proxies before polling.
     yield ": connected\n\n"
     while True:
+        if shutdown_check is not None and shutdown_check():
+            return
+        resync_reason = None
+        changes = ()
         with database.session() as session:
             repository = ProjectionChangeRepository(
                 session,
                 retention_seconds=settings.projection_change_retention_seconds,
             )
             if schema_version != SUPPORTED_SCHEMA_VERSION:
-                yield _resync_event("unsupported_schema")
-                return
-            if repository.cursor_expired(workspace_id, cursor):
-                yield _resync_event("cursor_expired")
-                return
-            changes = repository.list_after(workspace_id, cursor=cursor, limit=100)
+                resync_reason = "unsupported_schema"
+            elif repository.cursor_expired(workspace_id, cursor):
+                resync_reason = "cursor_expired"
+            else:
+                changes = repository.list_after(workspace_id, cursor=cursor, limit=100)
+
+        if resync_reason is not None:
+            yield _resync_event(resync_reason)
+            return
 
         if changes:
             for change in changes:

@@ -2,7 +2,7 @@ import argparse
 import json
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,12 +10,18 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from sidera_control_plane.acceptance_guard import load_acceptance_guard
-from sidera_control_plane.adapters.git_results import GitResultStore
+from sidera_control_plane.adapters.git_results import GitResultStore, RepositoryResolver
 from sidera_control_plane.adapters.git_workspace import (
     GitWorktreeWorkspaceManager,
     opaque_repository_ref,
 )
 from sidera_control_plane.adapters.knowledge_http import KnowledgeHttpAdapter
+from sidera_control_plane.application.agent_reconciliation import AgentRunReconciler
+from sidera_control_plane.application.agent_sources import TaskContextSourceReader
+from sidera_control_plane.application.agent_worker_adapter import (
+    NativeWorkerServices,
+    require_gateway_owner,
+)
 from sidera_control_plane.application.artifact_content import ArtifactContentService
 from sidera_control_plane.application.code_result_capture import (
     CodeResultCaptureService,
@@ -23,10 +29,14 @@ from sidera_control_plane.application.code_result_capture import (
 from sidera_control_plane.application.context_materialization import (
     ContextMaterializer,
 )
+from sidera_control_plane.application.execution_authority import (
+    ExecutionAuthorityReader,
+)
 from sidera_control_plane.application.knowledge_candidate_submission import (
     FileCandidateProposalSpool,
     KnowledgeCandidateSubmissionService,
 )
+from sidera_control_plane.application.ports import WorkspaceProvider
 from sidera_control_plane.application.worker_gateway import (
     ConfiguredExecutionSpecFactory,
     GatewayAssignmentRunner,
@@ -55,7 +65,13 @@ class GatewayRuntime:
     worker_gateway: WorkerGateway
     database: Database
     catalog: KnowledgeHttpAdapter
+    workspace_provider: WorkspaceProvider | None = None
+    owner_check: Callable[[], bool] | None = None
+    before_commit: Callable[[], None] | None = None
+    native_reconciler: AgentRunReconciler | None = None
+    native_workspace_id: UUID | None = None
     _closed: bool = False
+    native_source_reader: TaskContextSourceReader | None = None
 
     def close(self) -> None:
         """Release the shared runtime resources exactly once."""
@@ -75,6 +91,9 @@ class GatewayOwnerPort(Protocol):
 
     input_runtime: Any
     handoff_runtime: Any
+    gateway_runtime: GatewayRuntime
+
+    def require_owner(self) -> None: ...
 
 
 def _resolve_active_session_sync_workspace(settings: Settings) -> UUID | None:
@@ -87,7 +106,16 @@ def _resolve_active_session_sync_workspace(settings: Settings) -> UUID | None:
     return getattr(settings, "gateway_sync_workspace_id", None)
 
 
-def build_gateway(settings: Settings) -> GatewayRuntime:
+def build_gateway(
+    settings: Settings,
+    *,
+    native_services: NativeWorkerServices | None = None,
+    owner_check: Callable[[], bool] | None = None,
+    use_acceptance_guard: bool = True,
+    assignment_claim_check: Callable[[], bool] | None = None,
+    repository_resolver: RepositoryResolver | None = None,
+    repository_refs: Callable[[], Sequence[str]] | None = None,
+) -> GatewayRuntime:
     database = Database(settings.database_url)
     catalog = KnowledgeHttpAdapter(
         base_url=settings.knowledge_base_url,
@@ -96,10 +124,14 @@ def build_gateway(settings: Settings) -> GatewayRuntime:
         materialization_timeout_seconds=settings.knowledge_materialization_timeout_seconds,
     )
     try:
-        acceptance_guard = load_acceptance_guard()
+        acceptance_guard = load_acceptance_guard() if use_acceptance_guard else None
+        before_commit = (
+            None if owner_check is None else lambda: require_gateway_owner(owner_check)
+        )
         uow_factory = lambda: SqlAlchemyUnitOfWork(
             database,
             projection_change_retention_seconds=settings.projection_change_retention_seconds,
+            before_commit=before_commit,
         )
         workspace_manager = GitWorktreeWorkspaceManager(
             settings.workspace_root,
@@ -123,7 +155,20 @@ def build_gateway(settings: Settings) -> GatewayRuntime:
             artifact_content_store,
         )
         code_result_capture_service = None
-        if settings.result_repository_path is not None and (
+        if repository_resolver is not None and (
+            settings.result_inputs_enabled or settings.result_integration_enabled
+        ):
+            code_result_capture_service = CodeResultCaptureService(
+                uow_factory,
+                GitResultStore(
+                    repository_resolver,
+                    git_executable=settings.git_executable,
+                    repository_refs=repository_refs,
+                ),
+                artifact_content_store=artifact_content_store,
+                clock=lambda: datetime.now(UTC),
+            )
+        elif settings.result_repository_path is not None and (
             settings.result_inputs_enabled or settings.result_integration_enabled
         ):
             result_repository = settings.result_repository_path.expanduser().resolve(
@@ -148,11 +193,27 @@ def build_gateway(settings: Settings) -> GatewayRuntime:
         active_session_sync_workspace_id = _resolve_active_session_sync_workspace(
             settings
         )
+        native_source_reader = (
+            TaskContextSourceReader(
+                uow_factory,
+                authorizer=ExecutionAuthorityReader(
+                    uow_factory,
+                    principal=lambda: native_services.principal_id,
+                    authorizer=native_services.authorizer,
+                ),
+                catalog=catalog,
+                result_input_content=artifact_content_service,
+            )
+            if native_services is not None
+            else None
+        )
         worker_gateway = WorkerGateway(
             uow_factory,
             adapter_factories=adapter_factories,
             workspace_factories=workspace_factories,
             spec_factory=ConfiguredExecutionSpecFactory(),
+            native_services=native_services,
+            native_source_reader=native_source_reader,
             artifact_content_store=artifact_content_store,
             context_materializer=ContextMaterializer(
                 catalog,
@@ -176,6 +237,17 @@ def build_gateway(settings: Settings) -> GatewayRuntime:
             ),
             acceptance_guard=acceptance_guard,
             clock=lambda: datetime.now(UTC),
+            owner_check=owner_check,
+        )
+        native_reconciler = (
+            None
+            if native_services is None
+            else AgentRunReconciler(
+                uow_factory,
+                gateway=worker_gateway,
+                services=native_services,
+                owner_check=owner_check,
+            )
         )
         runner = GatewayAssignmentRunner(
             SqlAlchemyOutboxStore(
@@ -196,6 +268,8 @@ def build_gateway(settings: Settings) -> GatewayRuntime:
                 settings.assignment_lease_seconds / 3, 0.1
             ),
             start_concurrency=settings.gateway_owner_start_concurrency,
+            owner_check=owner_check,
+            assignment_claim_check=assignment_claim_check,
         )
     except BaseException:
         catalog.close()
@@ -206,6 +280,12 @@ def build_gateway(settings: Settings) -> GatewayRuntime:
         worker_gateway=worker_gateway,
         database=database,
         catalog=catalog,
+        workspace_provider=workspace_manager,
+        owner_check=owner_check,
+        before_commit=before_commit,
+        native_reconciler=native_reconciler,
+        native_workspace_id=active_session_sync_workspace_id,
+        native_source_reader=native_source_reader,
     )
 
 
@@ -255,12 +335,14 @@ def _build_gateway_owner(settings: Settings) -> GatewayOwnerPort:
 
 
 def _run_owner_once(owner: GatewayOwnerPort, settings: Settings) -> None:
+    owner.require_owner()
     gateway = getattr(owner, "gateway", None)
     if gateway is None:
         gateway = _service(owner, "gateway")
     claimed, processed, failed = gateway.run_once(settings.gateway_batch_size)
     _print_summary(claimed, processed, failed)
 
+    owner.require_owner()
     input_runtime = owner.input_runtime
     input_result = input_runtime.dispatcher.run_once(settings.gateway_batch_size)
     from sidera_control_plane.input_dispatcher_worker import (
@@ -269,11 +351,33 @@ def _run_owner_once(owner: GatewayOwnerPort, settings: Settings) -> None:
 
     print(input_summary(input_result))
 
+    owner.require_owner()
     handoff_runtime = owner.handoff_runtime
     handoff_result = handoff_runtime.coordinator.run_once(settings.handoff_batch_size)
     from sidera_control_plane.handoff_worker import summary_json as handoff_summary
 
     print(handoff_summary(handoff_result))
+    owner.require_owner()
+    runtime = owner.gateway_runtime
+    if (
+        runtime.native_reconciler is not None
+        and runtime.native_workspace_id is not None
+    ):
+        result = runtime.native_reconciler.run_once(
+            runtime.native_workspace_id, min(settings.gateway_batch_size, 200)
+        )
+        owner.require_owner()
+        print(
+            json.dumps(
+                {
+                    "component": "native-reconciler",
+                    "examined": result.examined,
+                    "observed": result.observed,
+                    "recovery_required": result.recovery_required,
+                },
+                sort_keys=True,
+            )
+        )
 
 
 def _service(runtime: object, name: str) -> Any:

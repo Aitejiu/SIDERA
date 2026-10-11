@@ -2,12 +2,13 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
 
+from sidera_control_plane.domain.agent_bindings import RetiredAdmissionPin
 from sidera_control_plane.domain.context_packages import (
     ContextConsumerType,
     ContextMaterialization,
@@ -264,6 +265,32 @@ class ExecutionWorkspaceManifest:
 
     def mark_active(self) -> None:
         self._transition(WorkspaceLifecycle.READY, WorkspaceLifecycle.ACTIVE)
+
+    def refence_not_admitted(self, *, pin: RetiredAdmissionPin, binding) -> None:
+        snapshot = json.loads(json.dumps(asdict(self), default=str))
+        if (
+            not isinstance(pin, RetiredAdmissionPin)
+            or pin.workspace_snapshot != snapshot
+            or self.lifecycle is not WorkspaceLifecycle.READY
+            or pin.link.workspace_id != self.workspace_id
+            or pin.link.execution_id != self.execution_id
+            or pin.fencing_token != self.fencing_token
+            or binding is None
+            or binding.workspace_id != self.workspace_id
+            or binding.execution_id != self.execution_id
+            or binding.fencing_token != self.fencing_token + 1
+            or binding.lease_id == pin.lease_id
+            or pin.execution_binding_snapshot is None
+            or str(binding.workspace_module_id)
+            != pin.execution_binding_snapshot.get("workspace_module_id")
+            or binding.workspace_config_version
+            != pin.execution_binding_snapshot.get("workspace_config_version")
+        ):
+            raise ValidationError(
+                "workspace refence requires its exact archived BUSY assignment"
+            )
+        self.fencing_token = binding.fencing_token
+        self.version += 1
 
     def freeze(self, *, now: datetime) -> None:
         if self.lifecycle is not WorkspaceLifecycle.ACTIVE:

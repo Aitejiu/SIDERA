@@ -37,11 +37,16 @@ def test_input_dispatcher_uses_injected_gateway_runtime(monkeypatch) -> None:
 
     assert result.gateway_runtime is runtime
     assert captured["gateway"] is runtime.worker_gateway
+    assert captured["uow_factory"]()._before_commit is runtime.before_commit
 
 
-def test_handoff_worker_uses_injected_gateway_runtime(monkeypatch) -> None:
+@pytest.mark.parametrize("shared", [False, True])
+def test_handoff_worker_uses_injected_gateway_runtime(monkeypatch, shared) -> None:
     runtime = _runtime()
     captured: dict[str, object] = {}
+    provider = object()
+    if shared:
+        runtime.workspace_provider = provider  # type: ignore[assignment]
 
     class _UnitOfWorkFactory:
         def __call__(self):
@@ -52,16 +57,17 @@ def test_handoff_worker_uses_injected_gateway_runtime(monkeypatch) -> None:
             captured.update(kwargs)
 
     monkeypatch.setattr(handoff_worker, "HandoffCoordinator", _Coordinator)
-    monkeypatch.setattr(
-        handoff_worker,
-        "GitWorktreeWorkspaceManager",
-        lambda *args, **kwargs: object(),
-    )
+
+    def manager(*args, **kwargs):
+        assert not shared, "a supplied workspace provider must not be replaced"
+        return provider
+
+    monkeypatch.setattr(handoff_worker, "GitWorktreeWorkspaceManager", manager)
     monkeypatch.setattr(handoff_worker, "Scheduler", lambda **kwargs: object())
     monkeypatch.setattr(
         handoff_worker,
         "WorkspaceHandoffService",
-        lambda *args, **kwargs: object(),
+        lambda supplied, **kwargs: SimpleNamespace(provider=supplied),
     )
     monkeypatch.setattr(handoff_worker, "HandoffTargetService", lambda *args: object())
     monkeypatch.setattr(
@@ -89,16 +95,30 @@ def test_handoff_worker_uses_injected_gateway_runtime(monkeypatch) -> None:
         handoff_backoff_max_seconds=300,
     )
 
-    result = handoff_worker.build_handoff_worker(
-        settings, gateway_runtime=runtime
-    )
+    result = handoff_worker.build_handoff_worker(settings, gateway_runtime=runtime)
 
     assert result.database is runtime.database
     assert result.catalog is runtime.catalog
     assert captured["gateway"] is runtime.worker_gateway
+    assert captured["workspace_handoff"].provider is provider
+    assert captured["uow_factory"]()._before_commit is runtime.before_commit
 
 
-def test_gateway_owner_builds_consumers_from_one_runtime(monkeypatch) -> None:
+def test_native_handoff_factory_requires_owned_workspace_provider() -> None:
+    with pytest.raises(
+        ValueError, match="^native_handoff_workspace_provider_required$"
+    ):
+        handoff_worker.build_handoff_worker(
+            SimpleNamespace(),
+            gateway_runtime=_runtime(),
+            native_services=object(),  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("use_acceptance_guard", (True, False))
+def test_gateway_owner_builds_consumers_from_one_runtime(
+    monkeypatch, use_acceptance_guard
+) -> None:
     runtime = _runtime()
     calls: list[tuple[str, object]] = []
 
@@ -113,35 +133,47 @@ def test_gateway_owner_builds_consumers_from_one_runtime(monkeypatch) -> None:
         def acquire(self) -> bool:
             return True
 
+        def check(self) -> bool:
+            return True
+
         def close(self) -> None:
             return None
 
     monkeypatch.setattr(gateway_owner, "Database", lambda _url: _Database())
     monkeypatch.setattr(gateway_owner, "GatewayOwnerLock", _Lock)
-    monkeypatch.setattr(gateway_owner, "build_gateway", lambda _settings: runtime)
+
+    def build(_settings, *, owner_check, use_acceptance_guard=True, assignment_claim_check=None):
+        assert owner_check()
+        assert use_acceptance_guard is expected_guard
+        assert assignment_claim_check is None
+        runtime.owner_check = owner_check
+        return runtime
+
+    monkeypatch.setattr(gateway_owner, "build_gateway", build)
     monkeypatch.setattr(
         gateway_owner,
         "build_input_dispatcher",
-        lambda _settings, *, gateway_runtime: calls.append(
-            ("input", gateway_runtime)
-        )
-        or SimpleNamespace(),
+        lambda _settings, *, gateway_runtime: (
+            calls.append(("input", gateway_runtime)) or SimpleNamespace()
+        ),
     )
     monkeypatch.setattr(
         gateway_owner,
         "build_handoff_worker",
-        lambda _settings, *, gateway_runtime: calls.append(
-            ("handoff", gateway_runtime)
-        )
-        or SimpleNamespace(),
+        lambda _settings, *, gateway_runtime: (
+            calls.append(("handoff", gateway_runtime)) or SimpleNamespace()
+        ),
     )
 
+    expected_guard = use_acceptance_guard
     owner = gateway_owner.build_gateway_owner(
-        SimpleNamespace(database_url="postgresql+psycopg://test")
+        SimpleNamespace(database_url="postgresql+psycopg://test"),
+        **({"use_acceptance_guard": False} if not use_acceptance_guard else {}),
     )
 
     assert calls == [("input", runtime), ("handoff", runtime)]
     assert owner.gateway_runtime is runtime
+    assert runtime.owner_check == owner.owner_lock.check
 
 
 def test_gateway_owner_acquires_database_lock_before_consumable_runtime(
@@ -162,6 +194,9 @@ def test_gateway_owner_acquires_database_lock_before_consumable_runtime(
             events.append("lock-acquired")
             return True
 
+        def check(self) -> bool:
+            return True
+
         def close(self) -> None:
             events.append("lock-closed")
 
@@ -172,22 +207,34 @@ def test_gateway_owner_acquires_database_lock_before_consumable_runtime(
     runtime = _Runtime()
     monkeypatch.setattr(gateway_owner, "Database", lambda _url: _Database())
     monkeypatch.setattr(gateway_owner, "GatewayOwnerLock", _Lock)
+
+    def build(
+        _settings,
+        *,
+        owner_check,
+        use_acceptance_guard=True,
+        assignment_claim_check=None,
+    ):
+        assert assignment_claim_check is None
+        events.append("runtime-built")
+        return runtime
+
     monkeypatch.setattr(
         gateway_owner,
         "build_gateway",
-        lambda _settings: events.append("runtime-built") or runtime,
+        build,
     )
     monkeypatch.setattr(
         gateway_owner,
         "build_input_dispatcher",
-        lambda _settings, *, gateway_runtime: events.append("input-built")
-        or object(),
+        lambda _settings, *, gateway_runtime: events.append("input-built") or object(),
     )
     monkeypatch.setattr(
         gateway_owner,
         "build_handoff_worker",
-        lambda _settings, *, gateway_runtime: events.append("handoff-built")
-        or object(),
+        lambda _settings, *, gateway_runtime: (
+            events.append("handoff-built") or object()
+        ),
     )
 
     owner = gateway_owner.build_gateway_owner(

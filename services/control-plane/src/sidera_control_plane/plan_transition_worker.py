@@ -4,11 +4,12 @@ import argparse
 import json
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
+from sidera_control_plane.application.agent_worker_adapter import require_gateway_owner
 from sidera_control_plane.application.plan_transition_coordinator import (
     PlanTransitionCoordinator,
     PlanTransitionRunResult,
@@ -31,16 +32,23 @@ class PlanTransitionWorkerRuntime:
 
 def build_plan_transition_worker(
     settings: Settings,
+    *, owner_check: Callable[[], bool] | None = None,
 ) -> PlanTransitionWorkerRuntime:
     database = Database(settings.database_url)
+
+    def uow_factory() -> SqlAlchemyUnitOfWork:
+        require_gateway_owner(owner_check)
+        return SqlAlchemyUnitOfWork(
+            database,
+            projection_change_retention_seconds=settings.projection_change_retention_seconds,
+            before_commit=None
+            if owner_check is None
+            else lambda: require_gateway_owner(owner_check),
+        )
+
     try:
         coordinator = PlanTransitionCoordinator(
-            uow_factory=lambda: SqlAlchemyUnitOfWork(
-                database,
-                projection_change_retention_seconds=(
-                    settings.projection_change_retention_seconds
-                ),
-            ),
+            uow_factory=uow_factory,
             owner_id=f"plan-transition-coordinator:{settings.local_actor_id}",
             lease_ttl_seconds=settings.plan_transition_lease_ttl_seconds,
             backoff_max_seconds=settings.plan_transition_backoff_max_seconds,

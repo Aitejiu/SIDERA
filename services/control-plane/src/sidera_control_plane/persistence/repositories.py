@@ -400,6 +400,7 @@ def _stored_command(row: CommandModel) -> StoredCommand:
         status=row.status,
         result=dict(row.result or {}),
         rejection_reason=row.rejection_reason,
+        expected_version=row.expected_version,
     )
 
 

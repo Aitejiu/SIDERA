@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { server } from "@/test/server";
 import { workerResultInputsFixture } from "@/test/resultInputFixtures";
+import type { ResultInputAction } from "../result-inputs/api";
 
 import { WorkerGovernancePanel, type WorkerGovernancePanelProps } from "./WorkerGovernancePanel";
 import type { WorkerCollaborationSummary } from "./types";
@@ -61,6 +62,73 @@ const commandResponse = {
   command_id: COMMAND_ID,
   event_ids: ["70000000-0000-0000-0000-000000000001"],
 };
+
+function pauseDescriptor(): ResultInputAction {
+  return {
+    action: "pause", command_type: "PauseCollaborationRelease", target_type: "worker_item", target_id: WORKER_ITEM_ID,
+    expected_version: 7, expected_fingerprint: null, expected_plan_generation: 2,
+    expected_input_selection_id: null, expected_input_selection_hash: null,
+  };
+}
+
+describe("WorkerGovernancePanel external native owner", () => {
+  beforeEach(() => server.resetHandlers());
+
+  it("delegates the reason and action once without invoking the legacy API branch", async () => {
+    let legacyWrites = 0;
+    server.use(http.post("/api/v1/commands", () => { legacyWrites += 1; return HttpResponse.json(commandResponse); }));
+    const calls: Array<{ action: string; reason: string }> = [];
+    const nativeActions = {
+      reviewAction: () => pauseDescriptor(), busy: false, canSubmit: true, error: null,
+      onGovernanceAction: async (action: string, reason: string) => { calls.push({ action, reason }); return true; },
+    };
+    render(<WorkerGovernancePanel {...makeProps(makeCollaboration({ available_actions: ["pause"] }), { canIntervene: false })} nativeActions={nativeActions} />);
+    const user = userEvent.setup(); await user.click(screen.getByRole("button", { name: "暂停自动放行" }));
+    const dialog = screen.getByRole("dialog"); await user.type(within(dialog).getByRole("textbox", { name: "暂停原因" }), "  Review first  ");
+    await user.click(within(dialog).getByRole("button", { name: "确认暂停自动放行" }));
+    expect(calls).toEqual([{ action: "pause", reason: "Review first" }]); expect(legacyWrites).toBe(0);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it.each(["proposal", "version", "selection", "generation"])("refuses a changed %s after opening a native governance dialog", async change => {
+    let legacyWrites = 0; let nativeWrites = 0;
+    server.use(http.post("/api/v1/commands", () => { legacyWrites += 1; return HttpResponse.json(commandResponse); }));
+    const descriptor = { ...workerResultInputsFixture().available_actions[0]!, target_id: PROPOSAL_ID, expected_version: 8, expected_fingerprint: "a".repeat(64), expected_plan_generation: 2 };
+    const proposal = {
+      proposal_id: PROPOSAL_ID, resource_version: 8, status: "pending" as const, target_request_version: 17,
+      summary: "Fixed review", reason_code: "ready", created_at: "2026-10-07T00:00:00Z",
+      input_selection_id: descriptor.expected_input_selection_id, input_selection_hash: descriptor.expected_input_selection_hash,
+    };
+    let currentDescriptor = descriptor;
+    const nativeActions = {
+      reviewAction: () => currentDescriptor, busy: false, canSubmit: true, error: null,
+      onGovernanceAction: async () => { nativeWrites += 1; return true; },
+    };
+    const props = makeProps(makeCollaboration({ available_actions: ["approve"], active_proposal: proposal }));
+    const panel = render(<WorkerGovernancePanel {...props} nativeActions={nativeActions} />);
+    const user = userEvent.setup(); await user.click(screen.getByRole("button", { name: "批准 Proposal" }));
+    currentDescriptor = { ...descriptor };
+    if (change === "proposal") currentDescriptor.target_id = HOLD_ID;
+    if (change === "version") currentDescriptor.expected_version = 9;
+    if (change === "selection") { currentDescriptor.expected_input_selection_hash = "b".repeat(64); currentDescriptor.expected_fingerprint = "b".repeat(64); }
+    if (change === "generation") currentDescriptor.expected_plan_generation = 3;
+    panel.rerender(<WorkerGovernancePanel {...props} collaboration={makeCollaboration({
+      available_actions: ["approve"], active_proposal: { ...proposal, resource_version: 9 },
+    })} nativeActions={nativeActions} />);
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText(`Proposal ${PROPOSAL_ID} · V8`)).toBeVisible();
+    await user.click(within(dialog).getByRole("button", { name: "批准这次放行" }));
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("操作依据已变化");
+    expect(nativeWrites).toBe(0); expect(legacyWrites).toBe(0);
+  });
+
+  it("consumes native read-only state before a principal is available", () => {
+    render(<WorkerGovernancePanel {...makeProps(makeCollaboration({ available_actions: ["pause"] }))} nativeActions={{
+      reviewAction: () => pauseDescriptor(), busy: false, canSubmit: false, error: null, onGovernanceAction: async () => false,
+    }} />);
+    expect(screen.getByRole("button", { name: "暂停自动放行" })).toBeDisabled();
+  });
+});
 
 describe("WorkerGovernancePanel", () => {
   beforeEach(() => {

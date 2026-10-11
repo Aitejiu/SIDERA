@@ -146,6 +146,21 @@ def projection_targets_for_event(
 
     payload = event.payload
     if (
+        event.aggregate_type == "worker_progress_report"
+        and event.event_type == "WorkerProgressReported"
+    ):
+        targets = _targets(
+            ("worker_item_workspace", "worker_item_activity"),
+            worker_item_id or _payload_uuid(payload, "worker_item_id"),
+            root_task_id or _payload_uuid(payload, "root_task_id"),
+        )
+        return tuple(
+            ProjectionInvalidationTarget(
+                target.projection_type, target.resource_id, "progress_reported"
+            )
+            for target in targets
+        )
+    if (
         event.aggregate_type in {"handoff_proposal", "handoff_transition"}
         or event.event_type in HANDOFF_EVENT_TYPES
     ):

@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, CheckCircle2, Download, FileArchive, RefreshCw } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Download, FileArchive, RefreshCw, Search } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 
+import { LocalSessionButton } from "@/features/local-session/LocalSessionDialog";
 import { ApiProblem, createCommandIdentity } from "@/shared/api/client";
 
 import {
@@ -16,6 +17,7 @@ import {
 } from "./api";
 import { AcceptanceForm } from "./AcceptanceForm";
 import { ResultHistory } from "./ResultHistory";
+import { useNativeResultAcceptance } from "./useNativeResultAcceptance";
 
 export function TaskResultPanel({
   workspaceId,
@@ -33,13 +35,24 @@ export function TaskResultPanel({
     refetchInterval: (query) => resultRefreshInterval(query.state.data),
     refetchIntervalInBackground: false,
   });
+  const refreshResults = useCallback(async () => {
+    await queryClient.invalidateQueries({ queryKey: taskResultsQueryKey(workspaceId, rootTaskId) });
+  }, [queryClient, workspaceId, rootTaskId]);
+  const nativeAcceptance = useNativeResultAcceptance({
+    workspaceId,
+    rootTaskId,
+    view: resultQuery.isError ? undefined : resultQuery.data,
+    onRefresh: refreshResults,
+  });
+  const recovery = <NativeAcceptanceRecovery workspaceId={workspaceId} acceptance={nativeAcceptance} />;
 
   if (resultQuery.isPending) {
-    return <section className="task-result-panel" aria-label="成果验收"><div className="task-result-panel__state" role="status">正在读取成果</div></section>;
+    return <section className="task-result-panel" aria-label="成果验收">{recovery}<div className="task-result-panel__state" role="status">正在读取成果</div></section>;
   }
   if (resultQuery.isError || resultQuery.data === undefined) {
     return (
       <section className="task-result-panel" aria-label="成果验收">
+        {recovery}
         <div className="task-result-panel__state task-result-panel__state--error" role="alert">
           <strong>无法读取成果</strong>
           <p>控制面没有返回当前根任务的成果快照。</p>
@@ -67,6 +80,7 @@ export function TaskResultPanel({
 
   return (
     <section className="task-result-panel" aria-label="成果验收">
+      {recovery}
       <div className="task-result-panel__heading">
         <div>
           <span className="eyebrow">TASK RESULT</span>
@@ -90,12 +104,12 @@ export function TaskResultPanel({
           ) : null}
           <CriterionEvidence view={view} />
           {!historical && canAccept(view) ? (
-            <AcceptanceSection
+            nativeAcceptance.authority.kind === "legacy" ? <AcceptanceSection
               workspaceId={workspaceId}
               rootTaskId={rootTaskId}
               view={view}
               onAccepted={() => void queryClient.invalidateQueries({ queryKey: taskResultsQueryKey(workspaceId, rootTaskId) })}
-            />
+            /> : <NativeAcceptanceSection view={view} acceptance={nativeAcceptance} />
           ) : historical ? (
             <div className="task-result-panel__readonly" role="note">历史候选，只读</div>
           ) : null}
@@ -104,6 +118,51 @@ export function TaskResultPanel({
       )}
       <ResultHistory view={view} selectedCandidateId={selectedCandidate?.candidate_id ?? selectedId} onSelect={selectCandidate} />
     </section>
+  );
+}
+
+type NativeAcceptance = ReturnType<typeof useNativeResultAcceptance>;
+
+function NativeAcceptanceRecovery({ workspaceId, acceptance }: { workspaceId: string; acceptance: NativeAcceptance }) {
+  if (acceptance.authority.kind === "legacy") return null;
+  const originalStatus = acceptance.original === null ? null
+    : acceptance.status === "applied" ? acceptance.mappingAvailable
+      ? "验收已记录，等待成果收尾" : "原始验收已处理，验收映射尚未确认"
+      : acceptance.status === "rejected" ? "原始验收已被拒绝"
+        : "原始验收结果尚未确认";
+  if (acceptance.authorized && originalStatus === null && acceptance.error === null && acceptance.storageError === null) return null;
+  return (
+    <div className="task-result-panel__acceptance" aria-label="原始验收">
+      {!acceptance.authorized ? <>
+        <p role="status">本地会话未获授权</p>
+        <LocalSessionButton workspaceId={workspaceId} onAuthorized={acceptance.onSessionAuthorized} />
+      </> : null}
+      {originalStatus !== null ? <p role="status">{originalStatus}</p> : null}
+      {acceptance.original !== null ? (
+        <button className="quiet-button" type="button" disabled={!acceptance.authorized || acceptance.busy} onClick={() => void acceptance.lookupOriginal()}>
+          <Search size={14} aria-hidden="true" />查询原始验收
+        </button>
+      ) : null}
+      {acceptance.error !== null && acceptance.error !== originalStatus ? <div className="task-result-panel__error" role="alert"><AlertTriangle size={14} aria-hidden="true" />{acceptance.error}</div> : null}
+      {acceptance.storageError !== null ? <>
+        <div className="task-result-panel__error" role="alert">{acceptance.storageError}</div>
+        <button className="quiet-button" type="button" disabled={acceptance.busy} onClick={acceptance.retryStorage}>
+          <RefreshCw size={14} aria-hidden="true" />重试本地验收记录
+        </button>
+      </> : null}
+    </div>
+  );
+}
+
+function NativeAcceptanceSection({ view, acceptance }: { view: TaskResultOverview; acceptance: NativeAcceptance }) {
+  const action = view.available_actions.find(candidate => candidate.command_type === "CompleteTask");
+  if (action === undefined) return null;
+  return (
+    <div className="task-result-panel__acceptance">
+      <fieldset disabled={!acceptance.canAccept || acceptance.busy} aria-label="成果验收决定" style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}>
+        <AcceptanceForm view={view} action={action} onSubmit={acceptance.submit} pending={acceptance.busy} />
+      </fieldset>
+    </div>
   );
 }
 

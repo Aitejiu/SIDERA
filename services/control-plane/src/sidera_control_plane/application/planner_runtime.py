@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
@@ -46,7 +46,9 @@ class WorkspaceProviderCapabilitySnapshot:
     def __post_init__(self) -> None:
         if not self.provider.strip() or not self.isolation.strip():
             raise ValueError("workspace provider capability fields are required")
-        if not isinstance(self.writable, bool) or not isinstance(self.git_worktree, bool):
+        if not isinstance(self.writable, bool) or not isinstance(
+            self.git_worktree, bool
+        ):
             raise TypeError("workspace provider capability flags must be boolean")
 
 
@@ -136,7 +138,9 @@ class PlannerPolicyConstraints:
             raise ValueError("planner policy limits must be positive")
         if not self.budget_level.strip():
             raise ValueError("planner budget_level is required")
-        object.__setattr__(self, "allowed_capabilities", tuple(self.allowed_capabilities))
+        object.__setattr__(
+            self, "allowed_capabilities", tuple(self.allowed_capabilities)
+        )
         object.__setattr__(self, "adapter_preferences", tuple(self.adapter_preferences))
         object.__setattr__(self, "adapter_forbidden", tuple(self.adapter_forbidden))
         if not self.collaboration_policy_modes or any(
@@ -212,7 +216,9 @@ class PlannerInput:
         planning_context = self.planning_context
         if planning_context is None:
             if normalized_kind is PlanningRequestKind.REVISION:
-                raise ValueError("revision planner input requires a typed planning_context")
+                raise ValueError(
+                    "revision planner input requires a typed planning_context"
+                )
             planning_context = CreatePlanningContextV1(
                 context_materialization=self.context_materialization,
             )
@@ -225,7 +231,9 @@ class PlannerInput:
                 normalized_kind = PlanningRequestKind.REVISION
         elif isinstance(planning_context, CreatePlanningContextV1):
             if normalized_kind is PlanningRequestKind.REVISION:
-                raise ValueError("create planning context cannot be used for a revision")
+                raise ValueError(
+                    "create planning context cannot be used for a revision"
+                )
             materialization = planning_context.context_materialization
             if (
                 self.context_materialization is not None
@@ -268,10 +276,27 @@ class PlannerRunControl:
     started_at: datetime
     deadline_at: datetime | None
     cancel_requested: bool = False
+    cancel_check: Callable[[], bool] | None = None
+    owner_id: str | None = None
+    lease_id: UUID | None = None
+    fencing_token: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.cancel_requested, bool):
             raise TypeError("cancel_requested must be boolean")
+        if self.cancel_check is not None and not callable(self.cancel_check):
+            raise TypeError("cancel_check must be callable")
+        if any(
+            value is not None
+            for value in (self.owner_id, self.lease_id, self.fencing_token)
+        ) and (
+            not isinstance(self.owner_id, str)
+            or not self.owner_id.strip()
+            or type(self.lease_id) is not UUID
+            or type(self.fencing_token) is not int
+            or self.fencing_token < 1
+        ):
+            raise ValueError("complete typed planning ownership is required")
 
 
 class PlannerInputAssembler:
@@ -291,11 +316,15 @@ class PlannerInputAssembler:
         kind: PlanningRequestKind | None = None,
         acceptance_resource_chain: Sequence[str] = (),
     ) -> PlannerInput:
-        normalized_refs = () if context_materialization is not None else tuple(context_refs)
+        normalized_refs = (
+            () if context_materialization is not None else tuple(context_refs)
+        )
         if context_materialization is None:
             brief_refs = set(brief.context_refs)
             if any(item.ref not in brief_refs for item in normalized_refs):
-                raise ValueError("planner context reference is not present in the brief")
+                raise ValueError(
+                    "planner context reference is not present in the brief"
+                )
         return PlannerInput(
             interface_version=profile_snapshot.planner_interface_version,
             proposal_schema_version=profile_snapshot.proposal_schema_version,
@@ -328,9 +357,7 @@ def _context_references(
 ) -> tuple[ContextReference, ...]:
     references: list[ContextReference] = [
         ContextReference(
-            ref=(
-                f"knowledge:{item.page_id}:{item.revision_id}:{item.section_key}"
-            ),
+            ref=(f"knowledge:{item.page_id}:{item.revision_id}:{item.section_key}"),
             safe_summary=f"reference data section: {item.section_key}",
         )
         for item in materialization.project_knowledge

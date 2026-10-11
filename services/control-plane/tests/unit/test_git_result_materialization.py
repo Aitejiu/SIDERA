@@ -56,6 +56,33 @@ def test_same_materialization_operation_replays_the_persisted_receipt(
     assert code_input_case.store.inspect_materialization(first.operation_id) == first
 
 
+def test_cold_materialization_enumerates_original_receipt_without_live_worktree(
+    code_input_case,
+):
+    from sidera_control_plane.adapters.git_results import GitResultStore
+
+    first = code_input_case.materialize_order(("A", "B", "C"))
+    (code_input_case.workspace_path / "values.txt").write_text("later unrelated work\n")
+    calls = []
+
+    def refs():
+        calls.append("refs")
+        return ("repo://fixture",)
+
+    def resolve(ref):
+        assert ref == "repo://fixture"
+        calls.append("resolve")
+        return code_input_case.repository
+
+    cold = GitResultStore(resolve, repository_refs=refs)
+    assert not calls
+    assert cold.inspect_materialization(first.operation_id) == first
+    assert calls == ["refs", "resolve"]
+    assert (
+        code_input_case.workspace_path / "values.txt"
+    ).read_text() == "later unrelated work\n"
+
+
 def test_replay_can_restore_the_same_receipt_into_a_clean_worktree(
     code_input_case, tmp_path
 ) -> None:

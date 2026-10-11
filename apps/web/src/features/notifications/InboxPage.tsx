@@ -1,10 +1,11 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, CheckCircle2, CircleDashed, Mail, PackageOpen, Radio } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { useWorkspaceStreamOptional } from "@/app/WorkspaceStreamProvider";
 import { AsyncState } from "@/shared/ui/AsyncState";
+import { readBusinessCommandAuthority } from "@/features/local-session/businessAuthority";
 
 import {
   buildArchiveNotificationThreadCommand,
@@ -21,6 +22,9 @@ import {
 } from "./api";
 import { NotificationThreadHistory } from "./NotificationThreadHistory";
 import { NotificationThreadRow } from "./NotificationThreadRow";
+import { NativeInboxRecovery } from "./NativeInboxRecovery";
+import { useNativeInboxCommand } from "./useNativeInboxCommand";
+import type { NativeInboxIntent } from "./nativeInboxCommand";
 
 const DEFAULT_WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 
@@ -33,6 +37,14 @@ export function InboxPage() {
   const [expandedThreadId, setExpandedThreadId] = useState<string | null>(null);
   const [commandLabel, setCommandLabel] = useState<string | null>(null);
   const [lastCommandLabel, setLastCommandLabel] = useState<string | null>(null);
+  const native = useNativeInboxCommand({ workspaceId,
+    onRefresh: async () => { await queryClient.invalidateQueries({ queryKey: ["notifications", workspaceId] }); } });
+  const legacyOwner = useRef<{ workspaceId: string; active: boolean; busy: boolean; abort: AbortController } | null>(null);
+  useLayoutEffect(() => {
+    const lease = { workspaceId, active: true, busy: false, abort: new AbortController() };
+    legacyOwner.current = lease;
+    return () => { lease.active = false; lease.abort.abort(); if (legacyOwner.current === lease) legacyOwner.current = null; };
+  }, [workspaceId]);
   const summaryQuery = useQuery({
     queryKey: notificationSummaryQueryKey(workspaceId),
     queryFn: ({ signal }) => getNotificationSummary(workspaceId, signal),
@@ -49,12 +61,16 @@ export function InboxPage() {
     getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     enabled: workspaceId.length > 0,
   });
+  const threads = useMemo(
+    () => threadsQuery.data?.pages.flatMap((page) => page.items) ?? [],
+    [threadsQuery.data?.pages],
+  );
   const threadQuery = useQuery({
     queryKey: expandedThreadId === null
       ? notificationThreadQueryKey(workspaceId, "none")
       : notificationThreadQueryKey(workspaceId, expandedThreadId),
     queryFn: ({ signal }) => getNotificationThread(workspaceId, expandedThreadId ?? "", { signal }),
-    enabled: expandedThreadId !== null,
+    enabled: expandedThreadId !== null && threads.some(thread => thread.id === expandedThreadId),
   });
   const commandMutation = useMutation({
     mutationFn: executeNotificationCommand,
@@ -71,10 +87,6 @@ export function InboxPage() {
       setCommandLabel(null);
     },
   });
-  const threads = useMemo(
-    () => threadsQuery.data?.pages.flatMap((page) => page.items) ?? [],
-    [threadsQuery.data?.pages],
-  );
   const summary = summaryQuery.data;
   const snapshotCursor = summary?.last_change_cursor
     ?? threadsQuery.data?.pages.at(-1)?.last_change_cursor;
@@ -88,10 +100,28 @@ export function InboxPage() {
   const stale = threadsQuery.isRefetchError
     || (threadsQuery.isError && threadsQuery.data !== undefined);
 
-  const runCommand = (label: string, command: Parameters<typeof executeNotificationCommand>[0]) => {
-    setCommandLabel(label);
-    setLastCommandLabel(label);
-    commandMutation.mutate(command);
+  const runCommand = async (label: string, build: () => Parameters<typeof executeNotificationCommand>[0]) => {
+    const lease = legacyOwner.current;
+    if (native.authority?.kind !== "legacy" || !lease || !lease.active || lease.busy) return;
+    lease.busy = true;
+    try {
+      const authority = await readBusinessCommandAuthority(lease.workspaceId, { signal: lease.abort.signal });
+      if (!lease.active || authority.kind !== "legacy") return;
+      setCommandLabel(label);
+      setLastCommandLabel(label);
+      await commandMutation.mutateAsync(build());
+    } catch { /* The legacy mutation owns its existing error surface. */ }
+    finally { lease.busy = false; }
+  };
+
+  const performNative = (kind: NativeInboxIntent["kind"], deliveryId?: string, reason?: string) => {
+    const detail = threadQuery.data;
+    if (!threadQuery.isSuccess || !detail) return;
+    const base = { threadId: detail.thread.id, threadVersion: detail.thread.version, latestFactId: detail.thread.latest_fact_id };
+    if (kind !== "requeue") { void native.perform({ ...base, kind }); return; }
+    const delivery = detail.deliveries.find(item => item.delivery_id === deliveryId);
+    if (!delivery || typeof delivery.route_version !== "number" || !Number.isSafeInteger(delivery.route_version) || delivery.route_version <= 0 || reason === undefined) return;
+    void native.perform({ ...base, kind, deliveryId: delivery.delivery_id, routeId: delivery.route_id, routeVersion: delivery.route_version, reason });
   };
 
   const openTarget = () => {
@@ -181,6 +211,7 @@ export function InboxPage() {
         </div>
       ) : null}
 
+      <NativeInboxRecovery workspaceId={workspaceId} actions={native} />
       <AsyncState
         isLoading={threadsQuery.isPending}
         isError={threadsQuery.isError && threadsQuery.data === undefined}
@@ -216,28 +247,32 @@ export function InboxPage() {
                     key={threadQuery.data.thread.id}
                     workspaceId={workspaceId}
                     detail={threadQuery.data}
-                    pendingCommand={commandMutation.isPending ? commandLabel : null}
+                    pendingCommand={commandMutation.isPending ? commandLabel : native.pendingLabel}
+                    commandsEnabled={native.authority?.kind === "legacy" || native.canPerform}
+                    requeueEligible={(deliveryId) => native.authority?.kind === "legacy"
+                      || threadQuery.data.deliveries.some(delivery => delivery.delivery_id === deliveryId
+                        && typeof delivery.route_version === "number" && Number.isSafeInteger(delivery.route_version) && delivery.route_version > 0)}
                     onOpenTarget={openTarget}
-                    onMarkRead={() => runCommand(
+                    onMarkRead={() => native.authority?.kind !== "legacy" ? performNative("mark_read") : void runCommand(
                       "标记已读",
-                      buildMarkNotificationThreadReadCommand({
+                      () => buildMarkNotificationThreadReadCommand({
                         workspaceId,
                         threadId: threadQuery.data.thread.id,
                         expectedVersion: threadQuery.data.thread.version,
                         expectedLatestFactId: threadQuery.data.thread.latest_fact_id,
                       }),
                     )}
-                    onArchive={() => runCommand(
+                    onArchive={() => native.authority?.kind !== "legacy" ? performNative("archive") : void runCommand(
                       "归档线程",
-                      buildArchiveNotificationThreadCommand({
+                      () => buildArchiveNotificationThreadCommand({
                         workspaceId,
                         threadId: threadQuery.data.thread.id,
                         expectedVersion: threadQuery.data.thread.version,
                       }),
                     )}
-                    onRequeue={(deliveryId, reason) => runCommand(
+                    onRequeue={(deliveryId, reason) => native.authority?.kind !== "legacy" ? performNative("requeue", deliveryId, reason) : void runCommand(
                       "重新投递",
-                      buildRequeueNotificationDeliveryCommand({
+                      () => buildRequeueNotificationDeliveryCommand({
                         workspaceId,
                         deliveryId,
                         expectedRouteVersion: 1,

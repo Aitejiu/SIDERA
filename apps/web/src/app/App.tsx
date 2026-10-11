@@ -1,4 +1,4 @@
-import { BookOpen, Boxes, Clock3, Layers, ListTodo, Mail, MessageCircle, ServerCog, Settings2 } from "lucide-react";
+import { BookOpen, Bot, Boxes, Clock3, Cpu, Layers, ListTodo, Mail, MessageCircle, ServerCog, Settings2 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useRef, type ReactNode } from "react";
 import { NavLink, Outlet, useLocation, useParams } from "react-router-dom";
@@ -66,6 +66,8 @@ function AppFrame({ workspaceId }: { workspaceId: string }) {
               badge={<NotificationNavBadge workspaceId={workspaceId} />}
             />
             <NavItem to={`/workspaces/${workspaceId}/chat`} label="聊天" icon={<MessageCircle size={17} />} />
+            <NavItem to={`/workspaces/${workspaceId}/agents`} label="智能体" icon={<Bot size={17} />} />
+            <NavItem to={`/workspaces/${workspaceId}/runtimes`} label="运行环境" icon={<Cpu size={17} />} />
             <NavItem to={`/workspaces/${workspaceId}/history`} label="历史" icon={<Clock3 size={17} />} />
             <NavItem to={`/workspaces/${workspaceId}/capabilities`} label="能力" icon={<Boxes size={17} />} />
             <NavItem to={`/workspaces/${workspaceId}/workers`} label="执行节点" icon={<ServerCog size={17} />} />

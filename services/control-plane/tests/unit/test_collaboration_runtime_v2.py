@@ -376,6 +376,142 @@ def test_assembler_builds_v2_evaluations_from_authoritative_source_facts() -> No
     assert "result_inputs" in projection.fingerprints
 
 
+@pytest.mark.parametrize(
+    ("purpose", "derivation_kind"),
+    (
+        ("verification", None),
+        ("execution", "verification"),
+        ("verification", "verification"),
+    ),
+)
+def test_assembler_keeps_original_group_consumer_with_derived_verification(
+    purpose: str,
+    derivation_kind: str | None,
+) -> None:
+    facts = _assembler_v2_facts()
+    verification = replace(
+        facts.requests[1],
+        id=uuid4(),
+        purpose=purpose,
+        result_derivation_kind=derivation_kind,
+    )
+
+    projection = CollaborationProjectionAssembler().assemble(
+        replace(facts, requests=(*facts.requests, verification)),
+        fact_cursor=42,
+    )
+
+    assert isinstance(projection, RuntimeProjectionV2)
+    assert (
+        projection.result_input_evaluations[0].consumer_execution_request_id
+        == SUMMARY_REQUEST_ID
+    )
+    assert any(
+        item["id"] == str(verification.id) for item in projection.execution_requests
+    )
+
+
+@pytest.mark.parametrize(
+    ("purpose", "derivation_kind"),
+    (
+        ("verification", None),
+        ("execution", "verification"),
+        ("verification", "verification"),
+    ),
+)
+def test_assembler_rejects_verification_only_original_group_consumer(
+    purpose: str,
+    derivation_kind: str | None,
+) -> None:
+    facts = _assembler_v2_facts()
+    verification = replace(
+        facts.requests[1],
+        id=uuid4(),
+        purpose=purpose,
+        result_derivation_kind=derivation_kind,
+    )
+
+    with pytest.raises(ValidationError, match="one current execution request"):
+        CollaborationProjectionAssembler().assemble(
+            replace(facts, requests=(facts.requests[0], verification)),
+            fact_cursor=42,
+        )
+
+
+def test_assembler_rejects_two_ordinary_group_consumer_requests() -> None:
+    facts = _assembler_v2_facts()
+    duplicate = replace(facts.requests[1], id=uuid4())
+
+    with pytest.raises(ValidationError, match="one current execution request"):
+        CollaborationProjectionAssembler().assemble(
+            replace(facts, requests=(*facts.requests, duplicate)),
+            fact_cursor=42,
+        )
+
+
+def test_assembler_preserves_single_reintegration_priority_with_verification() -> None:
+    facts = _assembler_v2_facts()
+    reintegration = replace(facts.requests[1], id=uuid4(), purpose="reintegrate")
+    verification = replace(
+        facts.requests[1],
+        id=uuid4(),
+        purpose="verification",
+        result_derivation_kind="verification",
+    )
+
+    projection = CollaborationProjectionAssembler().assemble(
+        replace(facts, requests=(*facts.requests, reintegration, verification)),
+        fact_cursor=42,
+    )
+
+    assert isinstance(projection, RuntimeProjectionV2)
+    assert (
+        projection.result_input_evaluations[0].consumer_execution_request_id
+        == reintegration.id
+    )
+    assert any(
+        item["id"] == str(verification.id) for item in projection.execution_requests
+    )
+
+
+def test_assembler_rejects_two_reintegration_consumers_with_verification() -> None:
+    facts = _assembler_v2_facts()
+    reintegration = replace(facts.requests[1], id=uuid4(), purpose="reintegrate")
+    duplicate = replace(reintegration, id=uuid4())
+    verification = replace(
+        facts.requests[1],
+        id=uuid4(),
+        purpose="verification",
+        result_derivation_kind="verification",
+    )
+
+    with pytest.raises(ValidationError, match="one current reintegration request"):
+        CollaborationProjectionAssembler().assemble(
+            replace(
+                facts,
+                requests=(*facts.requests, reintegration, duplicate, verification),
+            ),
+            fact_cursor=42,
+        )
+
+
+def test_assembler_keeps_rework_and_handoff_out_of_original_group_consumer() -> None:
+    facts = _assembler_v2_facts()
+    rework = replace(facts.requests[1], id=uuid4(), purpose="rework")
+    handoff = replace(facts.requests[1], id=uuid4(), handoff_transition_id=uuid4())
+
+    projection = CollaborationProjectionAssembler().assemble(
+        replace(facts, requests=(*facts.requests, rework, handoff)),
+        fact_cursor=42,
+    )
+
+    assert isinstance(projection, RuntimeProjectionV2)
+    assert (
+        projection.result_input_evaluations[0].consumer_execution_request_id
+        == SUMMARY_REQUEST_ID
+    )
+
+
 def test_reference_runtime_releases_from_active_source_when_history_shares_placement() -> None:
     facts = _assembler_v2_facts()
     current_source = facts.requests[0]

@@ -5,13 +5,98 @@ import {
   closeTab,
   hydrateTabs,
   initialTabs,
+  loadTabs,
   openTab,
   reduceTabs,
   registerDirectRoute,
   serializeTabs,
+  saveTabs,
+  storageKey,
   type WorkspaceTab,
 } from "./workspaceTabsState";
 import { semanticTabForLocation } from "./WorkspaceTabs";
+
+describe("agent and runtime tab metadata", () => {
+  it.each([
+    ["/agents", "agents", "agents"],
+    ["/agents/profile-a?view=settings", "agent:profile-a", "agent"],
+    ["/runtimes", "runtimes", "runtimes"],
+    ["/runtimes/runtime-a", "runtime:runtime-a", "runtime"],
+  ])("registers the committed %s route without changing Task ownership", (path, id, kind) => {
+    const [pathname, query] = path.split("?");
+    const tab = semanticTabForLocation("ws-1", { pathname: `/workspaces/ws-1${pathname}`, search: query ? `?${query}` : "" });
+    expect(tab).toMatchObject({ id, kind, closeable: true, href: `/workspaces/ws-1${path}` });
+    expect(tab && reduceTabs(initialTabs("ws-1"), openTab(tab)).tabs[0]).toEqual(initialTabs("ws-1").tabs[0]);
+  });
+
+  it("loads valid v5 ownership and return targets into v6 storage without restoring a draft", () => {
+    let old = stateWithTaskSubtaskAndWorker();
+    old = reduceTabs(old, openTab(chatTab("original-chat")));
+    old = reduceTabs(old, openTab(knowledgePageTab("original-page")));
+    const raw = JSON.stringify({ schemaVersion: 5, tabs: old.tabs, activeTabId: old.activeTabId });
+    window.sessionStorage.removeItem(storageKey("ws-1"));
+    window.sessionStorage.setItem("sidera.workspace-tabs.v5:ws-1", raw);
+    const loaded = loadTabs("ws-1");
+    expect(loaded).toEqual(old);
+    saveTabs(loaded);
+    const saved = JSON.parse(window.sessionStorage.getItem("sidera.workspace-tabs.v6:ws-1") ?? "null");
+    expect(saved).toEqual({ schemaVersion: 6, tabs: old.tabs, activeTabId: old.activeTabId });
+    expect(window.sessionStorage.getItem("sidera.workspace-tabs.v5:ws-1")).toBe(raw);
+    window.sessionStorage.clear();
+  });
+
+  it("retains only safe original operation/ref recovery alongside an agent return target", () => {
+    const tab: WorkspaceTab = {
+      id: "agent:profile-a", kind: "agent", title: "Reusable reviewer", href: "/workspaces/ws-1/agents/profile-a?view=settings", closeable: true,
+      configurationRecovery: { operationId: "original/save 1", target_ref: { workspace_id: "ws-1", profile_id: "profile-a", revision: 2 } },
+    };
+    const state = reduceTabs(reduceTabs(initialTabs("ws-1"), openTab(rootTaskTab("task-1"))), openTab(tab));
+    const saved = serializeTabs(state);
+    expect(hydrateTabs("ws-1", saved)).toEqual(state);
+    expect(JSON.parse(saved).tabs[2].returnTabId).toBe("root-task:task-1");
+    expect(saved).not.toMatch(/instructions|environment|secret|draft/);
+  });
+
+  it("round-trips an original create operation without inventing its unknown target Ref", () => {
+    const tab: WorkspaceTab = {
+      id: "agent:new", kind: "agent", title: "New Profile", href: "/workspaces/ws-1/agents/new", closeable: true,
+      configurationRecovery: { operationId: "original/create 1" },
+    };
+    const state = reduceTabs(initialTabs("ws-1"), openTab(tab));
+    expect(hydrateTabs("ws-1", serializeTabs(state))).toEqual(state);
+    expect(serializeTabs(state)).not.toContain("target_ref");
+  });
+
+  it.each(["null-ref", "primitive-ref", "array-ref", "bad-revision", "extra-ref", "no-ref-extra", "no-ref-token", "no-ref-empty-operation"])("rejects malformed original recovery %s", variant => {
+    const recovery: Record<string, unknown> = { operationId: "original/create 1" };
+    const ref = { workspace_id: "ws-1", profile_id: "profile-a", revision: 1 };
+    if (variant === "null-ref") recovery.target_ref = null;
+    if (variant === "primitive-ref") recovery.target_ref = "profile-a";
+    if (variant === "array-ref") recovery.target_ref = [ref];
+    if (variant === "bad-revision") recovery.target_ref = { ...ref, revision: 0 };
+    if (variant === "extra-ref") recovery.target_ref = { ...ref, draft: "PRIVATE" };
+    if (variant === "no-ref-extra") recovery.draft = "PRIVATE";
+    if (variant === "no-ref-token") recovery.token = "PRIVATE";
+    if (variant === "no-ref-empty-operation") recovery.operationId = "";
+    const tab = { id: "agent:new", kind: "agent", title: "New Profile", href: "/workspaces/ws-1/agents/new", closeable: true, configurationRecovery: recovery };
+    const raw = JSON.stringify({ schemaVersion: 6, tabs: [initialTabs("ws-1").tabs[0], tab], activeTabId: tab.id });
+    expect(hydrateTabs("ws-1", raw)).toEqual(initialTabs("ws-1"));
+  });
+
+  it.each(["foreign-ref", "empty-operation", "extra-secret", "draft", "empty-id", "duplicate", "foreign-href"])("denies unsafe %s metadata rather than restoring an editor", (variant) => {
+    const tab = { id: "agent:profile-a", kind: "agent", title: "Reviewer", href: "/workspaces/ws-1/agents/profile-a", closeable: true,
+      configurationRecovery: { operationId: "original", target_ref: { workspace_id: "ws-1", profile_id: "profile-a", revision: 1 } } };
+    const payload = { schemaVersion: 6, tabs: [initialTabs("ws-1").tabs[0], tab], activeTabId: tab.id };
+    if (variant === "foreign-ref") tab.configurationRecovery.target_ref.workspace_id = "foreign";
+    if (variant === "empty-operation") tab.configurationRecovery.operationId = "";
+    if (variant === "extra-secret") Object.assign(tab.configurationRecovery, { token: "PRIVATE" });
+    if (variant === "draft") Object.assign(tab, { draft: { instructions: "PRIVATE" } });
+    if (variant === "empty-id") { tab.id = "agent:"; payload.activeTabId = tab.id; }
+    if (variant === "duplicate") payload.tabs.push(tab);
+    if (variant === "foreign-href") tab.href = "/workspaces/foreign/agents/profile-a";
+    expect(hydrateTabs("ws-1", JSON.stringify(payload))).toEqual(initialTabs("ws-1"));
+  });
+});
 
 describe("workspace tab descriptions", () => {
   it("persists the resolved ownership path with the tab", () => {

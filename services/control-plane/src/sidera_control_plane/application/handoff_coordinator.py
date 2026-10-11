@@ -8,6 +8,7 @@ from enum import StrEnum
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from sidera_control_plane.application.agent_worker_adapter import NativeDeferredResult
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.handoff_context import (
     HandoffContextError,
@@ -28,6 +29,7 @@ from sidera_control_plane.application.result_source_fence import (
 )
 from sidera_control_plane.application.scheduler import Scheduler
 from sidera_control_plane.application.worker_gateway import (
+    GatewayExecutionResult,
     GatewayMessageError,
     GatewayRecoveryRequired,
 )
@@ -36,6 +38,7 @@ from sidera_control_plane.application.workspace_handoff import (
     WorkspaceHandoffService,
     WorkspaceHandoffUnknown,
 )
+from sidera_control_plane.domain.agent_bindings import AgentExecutionLink
 from sidera_control_plane.domain.commands import CommandEnvelope, CommandResult
 from sidera_control_plane.domain.context_packages import (
     ContextConsumerType,
@@ -68,6 +71,7 @@ from sidera_control_plane.domain.handoffs import (
     HandoffProposal,
     HandoffTransition,
     HandoffTransitionStatus,
+    HandoffWriterState,
 )
 from sidera_control_plane.domain.inputs import ExecutionInputStatus
 from sidera_control_plane.domain.lease import LeaseStatus
@@ -124,7 +128,7 @@ class HandoffCoordinatorGateway(Protocol):
         workspace_id: UUID,
         transition_id: UUID,
         expected_transition_version: int,
-    ) -> HandoffTargetStartResult:
+    ) -> HandoffTargetStartResult | GatewayExecutionResult | NativeDeferredResult:
         raise NotImplementedError
 
     def enable_handoff_target_writer(
@@ -161,6 +165,7 @@ class HandoffStepResult:
     event_type: str | None = None
     payload: Mapping[str, object] = field(default_factory=dict)
     target_workspace_manifest_id: UUID | None = None
+    pending_reason: str | None = None
 
     @classmethod
     def advance(
@@ -180,8 +185,8 @@ class HandoffStepResult:
         )
 
     @classmethod
-    def wait(cls) -> HandoffStepResult:
-        return cls(kind=_StepKind.WAIT)
+    def wait(cls, *, pending_reason: str | None = None) -> HandoffStepResult:
+        return cls(kind=_StepKind.WAIT, pending_reason=pending_reason)
 
     @classmethod
     def converge(
@@ -233,6 +238,7 @@ class HandoffCoordinator:
         owner_id: str = "handoff-coordinator",
         lease_ttl_seconds: int = 30,
         backoff_max_seconds: int = 60,
+        native_handoff=None,
     ) -> None:
         if not owner_id.strip():
             raise ValueError("handoff coordinator owner_id is required")
@@ -249,6 +255,7 @@ class HandoffCoordinator:
         self._owner_id = owner_id.strip()
         self._lease_ttl_seconds = lease_ttl_seconds
         self._backoff_max_seconds = backoff_max_seconds
+        self._native_handoff = native_handoff
 
     def run_once(self, limit: int = 20) -> HandoffRunResult:
         if limit < 1:
@@ -268,6 +275,111 @@ class HandoffCoordinator:
             counters[outcome] += 1
         return HandoffRunResult(claimed=len(claimed), **counters)
 
+    def drain_original_source_stop(self, expected: AgentExecutionLink) -> bool:
+        if self._native_handoff is None or expected.run_id is None:
+            return False
+        now = self._clock()
+        with self._uow_factory() as uow:
+            execution = uow.executions.get(
+                expected.execution_id, expected.workspace_id, for_update=True
+            )
+            link = uow.execution_authorities.get_link(
+                expected.workspace_id, expected.execution_id, for_update=True
+            )
+            if (
+                execution is None
+                or execution.worker_item_id is None
+                or link != expected
+            ):
+                return False
+            current = uow.handoff_transitions.get_active_for_worker_item(
+                execution.worker_item_id, execution.workspace_id, for_update=True
+            )
+            if (
+                current is None
+                or current.handoff_schema_version != 2
+                or current.status is not HandoffTransitionStatus.RUNNING
+                or current.phase is not HandoffPhase.STOP_SOURCE
+                or current.native_payload is None
+            ):
+                return False
+            payload = current.native_payload
+            if (
+                current.workspace_id,
+                current.worker_item_id,
+                current.source_execution_id,
+                current.source_session_id,
+                payload.workspace_id,
+                payload.worker_item_id,
+                payload.source_execution_id,
+                payload.source_run_id,
+                payload.source_authority_id,
+                payload.source_binding_version,
+                payload.source_profile_ref,
+            ) != (
+                link.workspace_id,
+                execution.worker_item_id,
+                execution.id,
+                uuid5(NAMESPACE_URL, f"sidera.native.session:{link.run_id}"),
+                link.workspace_id,
+                execution.worker_item_id,
+                execution.id,
+                link.run_id,
+                link.authority_id,
+                link.binding_version,
+                link.profile_ref,
+            ):
+                return False
+            authority = uow.execution_authorities.get(
+                link.authority_id, workspace_id=link.workspace_id
+            )
+            if authority is None or authority.revoked:
+                return False
+            lease = uow.leases.get(
+                authority.lease_id, link.workspace_id, for_update=True
+            )
+            if (
+                lease is None
+                or lease.execution_id != execution.id
+                or lease.fencing_token != authority.fencing_token
+                or execution.last_fencing_token != authority.fencing_token
+            ):
+                return False
+            if lease.status is LeaseStatus.ACTIVE:
+                if lease.expires_at <= now or execution.active_lease_id != lease.id:
+                    return False
+            elif (
+                lease.status is not LeaseStatus.RELEASED
+                or current.source_stop_facts is None
+            ):
+                return False
+            if current.lease_expires_at is not None and current.lease_expires_at > now:
+                return False
+            previous_version = current.version
+            claimed_expiry = now + timedelta(seconds=self._lease_ttl_seconds)
+            claimed_attempt = current.logical_attempt
+            current.lease_owner = self._owner_id
+            current.lease_expires_at = claimed_expiry
+            current.next_attempt_at = None
+            current.version += 1
+            uow.handoff_transitions.save(current, previous_version)
+            claimed = current
+        try:
+            return self._native_handoff.stop(claimed, query_only=True) is not None
+        finally:
+            with self._uow_factory() as uow:
+                current = uow.handoff_transitions.get(
+                    claimed.id, claimed.workspace_id, for_update=True
+                )
+                if current is not None and (
+                    current.lease_owner == self._owner_id
+                    and current.lease_expires_at == claimed_expiry
+                    and current.logical_attempt == claimed_attempt
+                ):
+                    previous_version = current.version
+                    current.release_claim()
+                    uow.handoff_transitions.save(current, previous_version)
+
     def _claim(self, *, now: datetime, limit: int) -> tuple[HandoffTransition, ...]:
         with self._uow_factory() as uow:
             return uow.handoff_transitions.claim_next(
@@ -285,7 +397,7 @@ class HandoffCoordinator:
                 return "waiting"
             step = self._dispatch_phase(transition)
             if step.kind is _StepKind.WAIT:
-                self._defer(transition)
+                self._defer(transition, pending_reason=step.pending_reason)
                 return "waiting"
             if step.kind is _StepKind.CONVERGE:
                 self._converge(transition)
@@ -321,13 +433,26 @@ class HandoffCoordinator:
             InvalidTransition,
             HandoffCoordinatorError,
         ) as exc:
+            code = _error_code(exc, "handoff_phase_blocked")
+            terminal = (
+                isinstance(exc, GatewayMessageError)
+                and code == "native_handoff_target_terminal"
+                and claimed.handoff_schema_version == 2
+                and claimed.phase in {
+                    HandoffPhase.START_TARGET_SESSION,
+                    HandoffPhase.ACKNOWLEDGE_CONTEXT,
+                }
+            )
             self._record_failure(
                 claimed,
-                code=_error_code(exc, "handoff_phase_blocked"),
-                status=HandoffTransitionStatus.BLOCKED,
+                code=code,
+                status=(
+                    HandoffTransitionStatus.FAILED
+                    if terminal else HandoffTransitionStatus.BLOCKED
+                ),
                 operation_id=None,
             )
-            return "blocked"
+            return "failed" if terminal else "blocked"
         except Exception:
             logger.exception(
                 "handoff_coordinator_phase_failed",
@@ -389,6 +514,9 @@ class HandoffCoordinator:
         return handler(transition)
 
     def _checkpoint_source(self, transition: HandoffTransition) -> HandoffStepResult:
+        if transition.handoff_schema_version == 2:
+            self._require_native_handoff().checkpoint(transition)
+            return self._advance_result(transition)
         gateway = self._require_gateway()
         evidence = gateway.capture_handoff_source(
             workspace_id=transition.workspace_id,
@@ -403,6 +531,10 @@ class HandoffCoordinator:
         return self._advance_result(transition)
 
     def _stop_source(self, transition: HandoffTransition) -> HandoffStepResult:
+        if transition.handoff_schema_version == 2:
+            if self._require_native_handoff().stop(transition) is None:
+                return HandoffStepResult.wait(pending_reason="source_stop_unconfirmed")
+            return self._advance_result(transition)
         gateway = self._require_gateway()
         evidence = gateway.stop_handoff_source(
             workspace_id=transition.workspace_id,
@@ -430,6 +562,69 @@ class HandoffCoordinator:
     def _create_target_execution(
         self, transition: HandoffTransition
     ) -> HandoffStepResult:
+        if transition.handoff_schema_version == 2:
+            payload = transition.native_payload
+            if payload is None:
+                raise HandoffCoordinatorError("native handoff payload is missing")
+            if payload.target_assignee.kind == "human":
+                return HandoffStepResult.converge()
+            native = self._require_native_handoff()
+            expected = native.prepare_assignment(transition)
+            with self._uow_factory() as uow:
+                self._lock_effective_result_mapping(
+                    uow, transition, require_target=False
+                )
+                current = self._locked_transition(uow, transition)
+                current_payload = current.native_payload
+                if current_payload is None:
+                    raise HandoffCoordinatorError("native handoff payload is missing")
+                self._assert_claim(current, self._clock())
+                self._require_workspace_handoff()._validate_native_cleanup(uow, current)
+                native.assign_in_uow(uow, current, expected)
+                execution = uow.executions.get(
+                    current.source_execution_id, current.workspace_id
+                )
+                if execution is None:
+                    raise HandoffCoordinatorError(
+                        "handoff source Execution was not found"
+                    )
+                request = uow.execution_requests.get_effective_by_execution_lineage(
+                    execution.lineage_id, current.workspace_id
+                )
+                proposal = uow.handoff_proposals.get(
+                    current.proposal_id, current.workspace_id
+                )
+                manifest = uow.workspaces.get(
+                    current.source_workspace_manifest_id, current.workspace_id
+                )
+                if request is None or proposal is None or manifest is None:
+                    raise HandoffCoordinatorError("handoff source facts are incomplete")
+                self._require_target_service().create_target(
+                    transition=current,
+                    proposal=proposal,
+                    source_request=request,
+                    source_execution=execution,
+                    source_manifest=manifest,
+                    now=self._clock(),
+                    uow=uow,
+                )
+                self._append_milestone(
+                    uow,
+                    current,
+                    event_type="AgentBindingChanged",
+                    payload={
+                        "target_binding_version": current.target_binding_version,
+                        "target_assignee": {
+                            "kind": current_payload.target_assignee.kind,
+                            "id": str(current_payload.target_assignee.id),
+                        },
+                    },
+                )
+                transition.target_execution_id = current.target_execution_id
+                transition.target_binding_version = current.target_binding_version
+                transition.target_context_version = current.target_context_version
+                transition.version = current.version
+            return self._advance_result(transition)
         service = self._require_target_service()
         proposal, source_request, source_execution, source_manifest = (
             self._source_context(transition)
@@ -485,7 +680,11 @@ class HandoffCoordinator:
     def _transfer_workspace(self, transition: HandoffTransition) -> HandoffStepResult:
         service = self._require_workspace_handoff()
         source_manifest = self._source_manifest(transition)
-        target = _target_spec(transition, source_manifest)
+        target = (
+            self._require_native_handoff().workspace_target(transition, source_manifest)
+            if transition.handoff_schema_version == 2
+            else _target_spec(transition, source_manifest)
+        )
         transfer = service.transfer(
             transition=transition,
             source_manifest=source_manifest,
@@ -507,17 +706,60 @@ class HandoffCoordinator:
     def _start_target_session(self, transition: HandoffTransition) -> HandoffStepResult:
         scheduler = self._require_scheduler()
         gateway = self._require_gateway()
-        scheduler.assign_handoff_target(
-            workspace_id=transition.workspace_id,
-            transition_id=transition.id,
-            expected_transition_version=transition.version,
-            now=self._clock(),
-        )
+        terminal_native_target = False
+        if transition.handoff_schema_version == 2:
+            with self._uow_factory() as uow:
+                target = (
+                    uow.executions.get(
+                        transition.target_execution_id, transition.workspace_id
+                    )
+                    if transition.target_execution_id is not None else None
+                )
+            terminal_native_target = target is not None and target.status in {
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELED,
+            }
+        if not terminal_native_target:
+            assignment = scheduler.assign_handoff_target(
+                workspace_id=transition.workspace_id,
+                transition_id=transition.id,
+                expected_transition_version=transition.version,
+                now=self._clock(),
+            )
+            if transition.handoff_schema_version == 2:
+                if assignment is None:
+                    return HandoffStepResult.wait(pending_reason="target_waiting_capacity")
+                with self._uow_factory() as uow:
+                    reserved = uow.handoff_transitions.get(
+                        transition.id, transition.workspace_id
+                    )
+                if (
+                    reserved is None
+                    or reserved.lease_owner != transition.lease_owner
+                    or reserved.phase is not transition.phase
+                ):
+                    raise HandoffCoordinatorError(
+                        "native handoff reservation claim changed"
+                    )
+                transition.version = reserved.version
+                transition.target_worker_id = reserved.target_worker_id
         result = gateway.start_handoff_target(
             workspace_id=transition.workspace_id,
             transition_id=transition.id,
             expected_transition_version=transition.version,
         )
+        if transition.handoff_schema_version == 2:
+            if isinstance(result, NativeDeferredResult):
+                return HandoffStepResult.wait(pending_reason="target_start_unconfirmed")
+            if result.execution_id != transition.target_execution_id:
+                raise GatewayRecoveryRequired("native target Session identity changed")
+            transition.target_session_id = result.session_id
+            return self._advance_result(transition)
+        if not isinstance(result, HandoffTargetStartResult):
+            raise GatewayRecoveryRequired(
+                "legacy target Session binding is unavailable"
+            )
         if (
             result.execution_id != transition.target_execution_id
             or result.context_binding.consumer_execution_id != result.execution_id
@@ -642,6 +884,51 @@ class HandoffCoordinator:
             )
 
     def _converge(self, transition: HandoffTransition) -> None:
+        payload = transition.native_payload
+        if transition.handoff_schema_version == 2 and payload is None:
+            raise HandoffCoordinatorError("native handoff payload is missing")
+        if (
+            transition.handoff_schema_version == 2
+            and payload is not None
+            and payload.target_assignee.kind == "human"
+        ):
+            native = self._require_native_handoff()
+            expected = native.prepare_assignment(transition)
+            now = self._clock()
+            with self._uow_factory() as uow:
+                self._lock_effective_result_mapping(
+                    uow, transition, require_target=False
+                )
+                current = self._locked_transition(uow, transition)
+                current_payload = current.native_payload
+                if current_payload is None:
+                    raise HandoffCoordinatorError("native handoff payload is missing")
+                self._assert_claim(current, now)
+                self._require_workspace_handoff()._validate_native_cleanup(uow, current)
+                facts = native.assign_in_uow(uow, current, expected)
+                self._append_milestone(
+                    uow,
+                    current,
+                    event_type="HandoffHumanAssigned",
+                    payload={
+                        "target_binding_version": current.target_binding_version,
+                        "target_assignee": {
+                            "kind": "human",
+                            "id": str(current_payload.target_assignee.id),
+                        },
+                        "automatic_target_phases": "not_applicable",
+                    },
+                )
+                previous = current.version
+                current.converge_manual_human(facts=facts, now=now)
+                uow.handoff_transitions.save(current, previous)
+                self._append_milestone(
+                    uow,
+                    current,
+                    event_type="HandoffConverged",
+                    payload={"writer_state": "writer_none"},
+                )
+            return
         now = self._clock()
         with self._uow_factory() as uow:
             self._lock_effective_result_mapping(
@@ -725,12 +1012,16 @@ class HandoffCoordinator:
                     "handoff target ExecutionRequest changed before convergence"
                 )
 
-    def _defer(self, transition: HandoffTransition) -> None:
+    def _defer(
+        self, transition: HandoffTransition, *, pending_reason: str | None = None
+    ) -> None:
         now = self._clock()
         with self._uow_factory() as uow:
             current = self._locked_transition(uow, transition)
             self._assert_claim(current, now)
             previous_version = current.version
+            if pending_reason is not None:
+                current.failure_code = pending_reason
             current.defer(now=now, next_attempt_at=now)
             uow.handoff_transitions.save(current, previous_version)
 
@@ -783,6 +1074,17 @@ class HandoffCoordinator:
                         }
                     ),
                 )
+                if (
+                    status is HandoffTransitionStatus.FAILED
+                    and code == "native_handoff_target_terminal"
+                    and current.handoff_schema_version == 2
+                    and current.phase in {
+                        HandoffPhase.START_TARGET_SESSION,
+                        HandoffPhase.ACKNOWLEDGE_CONTEXT,
+                    }
+                ):
+                    current.writer_state = HandoffWriterState.WRITER_NONE
+                    current.next_attempt_at = None
                 uow.handoff_transitions.save(current, previous_version)
                 self._append_milestone(
                     uow,
@@ -832,6 +1134,26 @@ class HandoffCoordinator:
         for key, value in payload.items():
             if key in {"failure_code", "blocked_operation_id"}:
                 event_payload[key] = _bounded_event_value(value)
+        if (
+            transition.handoff_schema_version == 2
+            and transition.native_payload is not None
+        ):
+            native = transition.native_payload
+            event_payload.update(
+                target_assignee={
+                    "kind": native.target_assignee.kind,
+                    "id": str(native.target_assignee.id),
+                },
+                target_profile_ref=None
+                if native.target_profile_ref is None
+                else native.target_profile_ref.model_dump(mode="json"),
+                target_binding_version=transition.target_binding_version,
+            )
+            if native.target_assignee.kind == "human" and event_type in {
+                "HandoffHumanAssigned",
+                "HandoffConverged",
+            }:
+                event_payload["automatic_target_phases"] = "not_applicable"
         command_id = uuid5(
             NAMESPACE_URL,
             f"sidera:handoff-command:{transition.id}:{event_type}:v{transition.version}",
@@ -989,11 +1311,15 @@ class HandoffCoordinator:
             transition.workspace_id,
             for_update=True,
         )
-        if acknowledgement is None or (
-            acknowledgement.package_hash != package.package_hash
-            or acknowledgement.context_version != package.context_version
-            or acknowledgement.adapter_module_id != binding.adapter_module_id
-            or acknowledgement.adapter_config_version != binding.adapter_config_version
+        if transition.handoff_schema_version != 2 and (
+            acknowledgement is None
+            or (
+                acknowledgement.package_hash != package.package_hash
+                or acknowledgement.context_version != package.context_version
+                or acknowledgement.adapter_module_id != binding.adapter_module_id
+                or acknowledgement.adapter_config_version
+                != binding.adapter_config_version
+            )
         ):
             raise HandoffCoordinatorError(
                 "handoff target ContextPackage acknowledgement is stale"
@@ -1024,7 +1350,15 @@ class HandoffCoordinator:
         if set(derived_source_ids) != set(bundle.transferable_input_refs):
             raise HandoffCoordinatorError("handoff input plan is incomplete")
 
-        _validate_target_runtime_snapshot(transition, binding)
+        if transition.handoff_schema_version == 2:
+            from sidera_control_plane.application.profile_handoff import (
+                validate_native_handoff_confirmation,
+            )
+
+            self._require_workspace_handoff()._validate_native_cleanup(uow, transition)
+            validate_native_handoff_confirmation(uow, transition, now=now)
+        else:
+            _validate_target_runtime_snapshot(transition, binding)
 
     def _source_manifest(
         self, transition: HandoffTransition
@@ -1058,8 +1392,13 @@ class HandoffCoordinator:
                 transition.workspace_id,
                 for_update=True,
             )
+            request_lookup = (
+                uow.execution_requests.get_effective_by_execution_lineage
+                if transition.handoff_schema_version == 2
+                else uow.execution_requests.get_by_execution_lineage
+            )
             source_request = (
-                uow.execution_requests.get_by_execution_lineage(
+                request_lookup(
                     source_execution.lineage_id,
                     transition.workspace_id,
                     for_update=True,
@@ -1128,6 +1467,11 @@ class HandoffCoordinator:
         if self._gateway is None:
             raise HandoffCoordinatorError("handoff gateway is not configured")
         return self._gateway
+
+    def _require_native_handoff(self):
+        if self._native_handoff is None:
+            raise HandoffCoordinatorError("native handoff translator is not configured")
+        return self._native_handoff
 
     def _require_workspace_handoff(self) -> WorkspaceHandoffService:
         if self._workspace_handoff is None:

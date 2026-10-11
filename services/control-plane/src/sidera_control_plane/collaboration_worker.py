@@ -14,6 +14,7 @@ from uuid import uuid4
 from sidera_control_plane.adapters.reference_collaboration_runtime import (
     ReferenceCollaborationRuntime,
 )
+from sidera_control_plane.application.agent_worker_adapter import require_gateway_owner
 from sidera_control_plane.application.collaboration_decisions import (
     CollaborationDecisionService,
 )
@@ -299,14 +300,26 @@ class CollaborationWorker:
 class CollaborationWorkerRuntime:
     worker: CollaborationWorker
     database: Database
+    recovery_sweep: RecoverySweep | None = None
 
 
-def build_collaboration_worker(settings: Settings) -> CollaborationWorkerRuntime:
+def build_collaboration_worker(
+    settings: Settings,
+    *,
+    owner_check: Callable[[], bool] | None = None,
+    scan_all_workspaces: bool = False,
+) -> CollaborationWorkerRuntime:
     database = Database(settings.database_url)
-    uow_factory: Callable[[], SqlAlchemyUnitOfWork] = lambda: SqlAlchemyUnitOfWork(
-        database,
-        projection_change_retention_seconds=settings.projection_change_retention_seconds,
-    )
+
+    def uow_factory() -> SqlAlchemyUnitOfWork:
+        require_gateway_owner(owner_check)
+        return SqlAlchemyUnitOfWork(
+            database,
+            projection_change_retention_seconds=settings.projection_change_retention_seconds,
+            before_commit=None
+            if owner_check is None
+            else lambda: require_gateway_owner(owner_check),
+        )
     runtime_factory = RegistryCollaborationRuntimeFactory(
         {
             "reference": lambda _instance: ReferenceCollaborationRuntime(),
@@ -334,11 +347,17 @@ def build_collaboration_worker(settings: Settings) -> CollaborationWorkerRuntime
             runtime_resolver_factory=resolver_factory,
             decision_service=decision_service,
             governance_reconciler=governance_reconciler,
-            default_workspace_id=settings.collaboration_workspace_id,
+            default_workspace_id=None
+            if scan_all_workspaces
+            else settings.collaboration_workspace_id,
+            scan_all_workspaces=scan_all_workspaces,
             evaluation_gate=(
-                lambda _run: demo_governance_evaluation_armed(demo_manifest)
-                if demo_manifest is not None and demo_manifest.scenario == "governance"
-                else True
+                lambda _run: (
+                    demo_governance_evaluation_armed(demo_manifest)
+                    if demo_manifest is not None
+                    and demo_manifest.scenario == "governance"
+                    else True
+                )
             ),
             evaluation_lease_ttl=timedelta(
                 seconds=settings.collaboration_lease_ttl_seconds
@@ -392,6 +411,7 @@ def build_collaboration_worker(settings: Settings) -> CollaborationWorkerRuntime
                 recovery_sweep=recovery_sweep,
             ),
             database=database,
+            recovery_sweep=recovery_sweep,
         )
     except BaseException:
         database.dispose()

@@ -41,6 +41,7 @@ describe("TaskResultPanel", () => {
   beforeEach(() => {
     server.resetHandlers();
     server.use(
+      http.get("/main-agent/v1/health", () => HttpResponse.json({ status: "ok", service: "sidera-main-agent-gateway" })),
       http.get(
         `/api/v1/workspaces/${RESULT_WORKSPACE_ID}/tasks/${RESULT_ROOT_TASK_ID}/results`,
         () => HttpResponse.json(resultView()),

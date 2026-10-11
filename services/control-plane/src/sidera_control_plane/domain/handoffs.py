@@ -5,12 +5,15 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
 from uuid import UUID
 
+from sidera_agents.contracts import ProfileRef
+
+from sidera_control_plane.domain.agent_bindings import AssigneeRef
 from sidera_control_plane.domain.errors import InvalidTransition, ValidationError
 
 _MAX_TEXT_LENGTH = 16_384
@@ -410,10 +413,201 @@ class HandoffProposalPayload:
         return hashlib.sha256(self.canonical_bytes()).hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class NativeHandoffProposalPayload:
+    proposal_schema_version: int
+    workspace_id: UUID
+    root_task_id: UUID
+    subtask_id: UUID
+    worker_item_id: UUID
+    source_worker_item_version: int
+    source_execution_id: UUID
+    source_execution_version: int
+    source_session_id: UUID
+    source_session_version: int
+    source_session_last_sequence: int
+    source_worker_id: UUID
+    source_worker_version: int
+    source_workspace_manifest_id: UUID
+    source_workspace_manifest_version: int
+    source_context_package_id: UUID
+    source_context_package_hash: str
+    source_worker_context_version: int
+    observed_plan_snapshot_id: UUID
+    observed_plan_generation: int
+    observed_plan_head_version: int
+    source_run_id: UUID
+    source_authority_id: UUID
+    source_binding_version: int
+    source_profile_ref: ProfileRef
+    source_binding_target_type: str
+    source_binding_target_id: UUID
+    work_context_id: UUID
+    work_context_revision_id: UUID
+    work_context_hash: str
+    work_context_version: int
+    target_assignee: AssigneeRef
+    target_profile_ref: ProfileRef | None
+    handoff_reason: str
+    handoff_instruction: str
+    input_plan: Mapping[str, object]
+    impact_summary: Mapping[str, object]
+    transfer_mode: HandoffTransferMode = HandoffTransferMode.REUSE_EXACT
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.proposal_schema_version) is not int
+            or self.proposal_schema_version != 2
+        ):
+            raise ValidationError("native handoff proposal schema version must be 2")
+        for field in fields(self):
+            name = field.name
+            if name.endswith("_id"):
+                _uuid(getattr(self, name), f"native handoff {name}")
+            elif name.endswith("_version") and name != "proposal_schema_version":
+                _positive(getattr(self, name), f"native handoff {name}")
+        _positive(self.observed_plan_generation, "native observed plan generation")
+        _non_negative(self.source_session_last_sequence, "native source sequence")
+        _hash(self.source_context_package_hash, "native source package hash")
+        _hash(self.work_context_hash, "native WorkContext hash")
+        if not isinstance(self.source_profile_ref, ProfileRef) or (
+            self.source_profile_ref.workspace_id != self.workspace_id
+        ):
+            raise ValidationError("native source requires exact original Profile")
+        if self.source_binding_target_type not in {"worker_item", "subtask"} or (
+            self.source_binding_target_id
+            != (
+                self.worker_item_id
+                if self.source_binding_target_type == "worker_item"
+                else self.subtask_id
+            )
+        ):
+            raise ValidationError(
+                "native source binding scope does not match WorkerItem"
+            )
+        if not isinstance(self.target_assignee, AssigneeRef):
+            raise ValidationError("native target assignee is required")
+        if self.target_assignee.kind == "profile":
+            if not isinstance(self.target_profile_ref, ProfileRef) or (
+                self.target_profile_ref.workspace_id != self.workspace_id
+                or self.target_profile_ref.profile_id != self.target_assignee.id
+            ):
+                raise ValidationError(
+                    "native target requires an exact Profile revision"
+                )
+        elif self.target_profile_ref is not None:
+            raise ValidationError("human handoff cannot contain a runtime Profile")
+        for name in ("handoff_reason", "handoff_instruction"):
+            object.__setattr__(self, name, _text(getattr(self, name), name))
+        for name in ("input_plan", "impact_summary"):
+            object.__setattr__(self, name, _mapping(getattr(self, name), name))
+        if _enum(
+            self.transfer_mode, HandoffTransferMode, "native transfer mode"
+        ) is not (HandoffTransferMode.REUSE_EXACT):
+            raise ValidationError("native handoff requires exact workspace reuse")
+
+    @property
+    def target_worker_id(self) -> None:
+        return None
+
+    @property
+    def target_worker_version(self) -> None:
+        return None
+
+    @property
+    def target_capability_snapshot_hash(self) -> None:
+        return None
+
+    @property
+    def source_runtime_snapshot(self) -> Mapping[str, object]:
+        return _mapping(
+            {
+                "execution_mode": "native_profile",
+                "profile_ref": self.source_profile_ref.model_dump(mode="json"),
+                "binding_version": self.source_binding_version,
+            },
+            "native source identity",
+        )
+
+    @property
+    def target_runtime_snapshot(self) -> Mapping[str, object]:
+        return _mapping(
+            {
+                "assignee": {
+                    "kind": self.target_assignee.kind,
+                    "id": str(self.target_assignee.id),
+                },
+                "profile_ref": None
+                if self.target_profile_ref is None
+                else (self.target_profile_ref.model_dump(mode="json")),
+            },
+            "native target identity",
+        )
+
+    @property
+    def target_policy_reason(self) -> Mapping[str, object]:
+        return _mapping({"selection": "explicit_assignee"}, "native selection")
+
+    @property
+    def target_policy_facts(self) -> Mapping[str, object]:
+        return self.target_policy_reason
+
+    def canonical_payload(self) -> dict[str, object]:
+        values = {field.name: getattr(self, field.name) for field in fields(self)}
+        values.update(
+            source_profile_ref=self.source_profile_ref.model_dump(mode="json"),
+            target_profile_ref=None
+            if self.target_profile_ref is None
+            else (self.target_profile_ref.model_dump(mode="json")),
+            target_assignee={
+                "kind": self.target_assignee.kind,
+                "id": str(self.target_assignee.id),
+            },
+        )
+        return {key: _json_value(value) for key, value in values.items()}
+
+    def to_mapping(self) -> dict[str, object]:
+        return self.canonical_payload()
+
+    def canonical_bytes(self) -> bytes:
+        return _canonical_bytes(self.canonical_payload())
+
+    @property
+    def content_hash(self) -> str:
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+    @classmethod
+    def from_mapping(cls, value) -> NativeHandoffProposalPayload:
+        if not isinstance(value, Mapping) or set(value) != {
+            field.name for field in fields(cls)
+        }:
+            raise ValidationError("native handoff payload has an invalid shape")
+        values = dict(value)
+        for field in fields(cls):
+            if field.name.endswith("_id"):
+                values[field.name] = UUID(str(values[field.name]))
+        values["source_profile_ref"] = ProfileRef.model_validate(
+            values["source_profile_ref"]
+        )
+        values["target_profile_ref"] = (
+            None
+            if values["target_profile_ref"] is None
+            else (ProfileRef.model_validate(values["target_profile_ref"]))
+        )
+        assignee = values["target_assignee"]
+        if not isinstance(assignee, Mapping) or set(assignee) != {"kind", "id"}:
+            raise ValidationError("native handoff target assignee has an invalid shape")
+        values["target_assignee"] = AssigneeRef(assignee["kind"], assignee["id"])
+        values["transfer_mode"] = _enum(
+            values["transfer_mode"], HandoffTransferMode, "native transfer mode"
+        )
+        return cls(**values)
+
+
 @dataclass(slots=True)
 class HandoffProposal:
     id: UUID
-    payload: HandoffProposalPayload
+    payload: HandoffProposalPayload | NativeHandoffProposalPayload
     proposal_hash: str
     status: HandoffProposalStatus
     stale_reason: str | None
@@ -431,14 +625,16 @@ class HandoffProposal:
         cls,
         *,
         id: UUID,
-        payload: HandoffProposalPayload,
+        payload: HandoffProposalPayload | NativeHandoffProposalPayload,
         created_by_type: str,
         created_by_id: str,
         source_channel: HandoffSourceChannel | str,
         created_at: datetime,
         expires_at: datetime,
     ) -> HandoffProposal:
-        if not isinstance(payload, HandoffProposalPayload):
+        if not isinstance(
+            payload, (HandoffProposalPayload, NativeHandoffProposalPayload)
+        ):
             raise ValidationError("handoff proposal payload is required")
         return cls(
             id=id,
@@ -460,7 +656,9 @@ class HandoffProposal:
 
     def __post_init__(self) -> None:
         _uuid(self.id, "handoff proposal id")
-        if not isinstance(self.payload, HandoffProposalPayload):
+        if not isinstance(
+            self.payload, (HandoffProposalPayload, NativeHandoffProposalPayload)
+        ):
             raise ValidationError("handoff proposal payload is required")
         _hash(self.proposal_hash, "handoff proposal hash")
         if self.proposal_hash != self.payload.content_hash:
@@ -589,7 +787,7 @@ class HandoffTransition:
     source_execution_id: UUID
     source_session_id: UUID
     source_workspace_manifest_id: UUID
-    target_worker_id: UUID
+    target_worker_id: UUID | None
     target_runtime_snapshot: Mapping[str, object]
     target_execution_id: UUID | None
     target_session_id: UUID | None
@@ -621,6 +819,10 @@ class HandoffTransition:
     confirmed_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+    handoff_schema_version: int = 1
+    native_payload: NativeHandoffProposalPayload | None = None
+    target_binding_version: int | None = None
+    manual_context_facts: Mapping[str, object] | None = None
 
     @classmethod
     def create(
@@ -651,7 +853,14 @@ class HandoffTransition:
             target_session_id=None,
             target_workspace_manifest_id=None,
             handoff_context_bundle_id=None,
-            target_context_version=payload.source_worker_context_version,
+            target_context_version=(
+                _positive(
+                    payload.impact_summary["worker_item_context_version"],
+                    "native target context version",
+                )
+                if isinstance(payload, NativeHandoffProposalPayload)
+                else payload.source_worker_context_version
+            ),
             target_context_package_id=None,
             target_context_package_hash=None,
             status=HandoffTransitionStatus.PENDING,
@@ -677,6 +886,10 @@ class HandoffTransition:
             confirmed_at=confirmed_at,
             started_at=None,
             completed_at=None,
+            handoff_schema_version=payload.proposal_schema_version,
+            native_payload=payload
+            if isinstance(payload, NativeHandoffProposalPayload)
+            else None,
         )
 
     def __post_init__(self) -> None:
@@ -688,9 +901,71 @@ class HandoffTransition:
             "source_execution_id",
             "source_session_id",
             "source_workspace_manifest_id",
-            "target_worker_id",
         ):
             _uuid(getattr(self, name), f"handoff transition {name}")
+        if self.handoff_schema_version == 1:
+            _uuid(self.target_worker_id, "handoff transition target_worker_id")
+            if (
+                self.native_payload is not None
+                or self.target_binding_version is not None
+                or (self.manual_context_facts is not None)
+            ):
+                raise ValidationError("legacy transition cannot contain native fields")
+        elif self.handoff_schema_version == 2:
+            if type(self.handoff_schema_version) is not int:
+                raise ValidationError(
+                    "native transition discriminator must be integer 2"
+                )
+            native = self.native_payload
+            if not isinstance(native, NativeHandoffProposalPayload) or (
+                (
+                    self.workspace_id,
+                    self.worker_item_id,
+                    self.source_execution_id,
+                    self.source_session_id,
+                    self.source_workspace_manifest_id,
+                )
+                != (
+                    native.workspace_id,
+                    native.worker_item_id,
+                    native.source_execution_id,
+                    native.source_session_id,
+                    native.source_workspace_manifest_id,
+                )
+                or dict(self.target_runtime_snapshot)
+                != dict(native.target_runtime_snapshot)
+            ):
+                raise ValidationError(
+                    "native transition immutable pins do not match proposal"
+                )
+            _optional_uuid(self.target_worker_id, "native reserved target worker")
+            if self.target_binding_version is not None:
+                _positive(self.target_binding_version, "native target binding version")
+            if native.target_assignee.kind == "human" and any(
+                value is not None
+                for value in (
+                    self.target_worker_id,
+                    self.target_execution_id,
+                    self.target_session_id,
+                    self.target_workspace_manifest_id,
+                    self.handoff_context_bundle_id,
+                    self.target_context_package_id,
+                    self.target_context_package_hash,
+                )
+            ):
+                raise ValidationError(
+                    "manual handoff cannot contain automated target records"
+                )
+            if self.manual_context_facts is not None:
+                if native.target_assignee.kind != "human":
+                    raise ValidationError(
+                        "Profile handoff cannot contain manual convergence facts"
+                    )
+                self.manual_context_facts = _mapping(
+                    self.manual_context_facts, "manual context facts"
+                )
+        else:
+            raise ValidationError("unsupported handoff transition schema")
         for name in (
             "target_execution_id",
             "target_session_id",
@@ -875,6 +1150,7 @@ class HandoffTransition:
         _aware(now, "handoff phase timestamp")
         self.phase = requested
         self.writer_state = _PHASE_WRITERS[requested]
+        self.failure_code = None
         self.lease_owner = None
         self.lease_expires_at = None
         self.version += 1
@@ -992,6 +1268,7 @@ class HandoffTransition:
         _aware(now, "handoff transition completed_at")
         self.status = HandoffTransitionStatus.CONVERGED
         self.completed_at = now
+        self.failure_code = None
         self.lease_owner = None
         self.lease_expires_at = None
         self.version += 1
@@ -1057,12 +1334,58 @@ class HandoffTransition:
         if self.source_stop_sequence is not None:
             raise InvalidTransition("handoff stop evidence is write-once")
         _non_negative(sequence, "source_stop_sequence")
-        if self.source_checkpoint_sequence != sequence:
+        if self.handoff_schema_version == 2:
+            from sidera_control_plane.domain.handoff_evidence import (
+                HandoffCheckpointEvidence,
+                HandoffStopEvidence,
+            )
+
+            if self.source_checkpoint_facts is None:
+                raise ValidationError("native stop requires original snapshot")
+            checkpoint = HandoffCheckpointEvidence.from_native_mapping(
+                self.source_checkpoint_facts
+            )
+            stop = HandoffStopEvidence.from_native_mapping(facts)
+            stop.assert_matches(checkpoint)
+            if stop.accepted_sequence != sequence:
+                raise ValidationError("native stop sequence does not match proof")
+        elif self.source_checkpoint_sequence != sequence:
             raise ValidationError(
                 "source stop sequence must match the checkpoint sequence"
             )
         self.source_stop_sequence = sequence
         self.source_stop_facts = _mapping(facts, "source_stop_facts")
+        self.version += 1
+
+    def converge_manual_human(
+        self, *, facts: Mapping[str, object], now: datetime
+    ) -> None:
+        native = self.native_payload
+        if (
+            self.handoff_schema_version != 2
+            or native is None
+            or native.target_assignee.kind != "human"
+            or self.status is not HandoffTransitionStatus.RUNNING
+            or self.phase is not HandoffPhase.CREATE_TARGET_EXECUTION
+            or self.writer_state is not HandoffWriterState.WRITER_NONE
+            or self.source_stop_facts is None
+            or self.source_workspace_freeze_facts is None
+            or self.target_binding_version is None
+            or self.manual_context_facts is not None
+        ):
+            raise InvalidTransition(
+                "manual convergence requires stopped frozen native human handoff"
+            )
+        _aware(now, "manual handoff completed_at")
+        self.manual_context_facts = _mapping(facts, "manual context facts")
+        self.phase = HandoffPhase.COMPLETE
+        self.status = HandoffTransitionStatus.CONVERGED
+        self.writer_state = HandoffWriterState.WRITER_NONE
+        self.completed_at = now
+        self.failure_code = None
+        self.blocked_operation_id = None
+        self.lease_owner = None
+        self.lease_expires_at = None
         self.version += 1
 
     def record_workspace_freeze(

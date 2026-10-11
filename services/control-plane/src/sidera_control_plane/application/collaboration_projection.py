@@ -880,6 +880,8 @@ def _current_consumer_request_id(
         and item.worker_item_id == placement.worker_item_id
         and item.subtask_task_id == placement.subtask_task_id
         and item.handoff_transition_id is None
+        and item.purpose != "verification"
+        and item.result_derivation_kind != "verification"
     )
     reintegration_requests = tuple(
         item for item in requests if item.purpose == "reintegrate"

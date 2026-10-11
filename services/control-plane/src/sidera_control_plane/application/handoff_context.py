@@ -7,21 +7,26 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from sidera_control_plane.application.code_result_delivery import resolve_code_inputs
 from sidera_control_plane.application.context_requests import (
     ExecutionContextAuthorizationError,
     build_derived_execution_context_assembly_request,
     build_execution_context_assembly_request,
+    execution_context_manifest_schema_version,
     load_execution_context_selection,
     resolve_execution_context_authorization,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.domain.code_results import CodeInputManifestV1
 from sidera_control_plane.domain.context_packages import (
     ContextAssemblyRequest,
     ContextAssemblyStatus,
     ContextConsumerType,
     ContextPackageManifestV1,
+    ContextPackageManifestV3,
     ContextPackageStatus,
     ContextPurpose,
+    ResultInputManifestV1,
     context_package_reference,
 )
 from sidera_control_plane.domain.errors import DomainError, ValidationError
@@ -44,6 +49,8 @@ from sidera_control_plane.domain.handoffs import (
     HandoffProposalStatus,
     HandoffTransition,
 )
+from sidera_control_plane.domain.input_selections import CollaborationInputSelectionV1
+from sidera_control_plane.domain.result_operations import ResultError
 from sidera_control_plane.domain.work_context import WorkContextRevision
 from sidera_control_plane.domain.worker_item import WorkerItem
 from sidera_control_plane.domain.workspace import (
@@ -133,7 +140,7 @@ class HandoffContextService:
             transition.source_workspace_manifest_id
         ):
             raise HandoffContextError("handoff source manifest identity changed")
-        if (
+        if transition.handoff_schema_version != 2 and (
             freeze_facts.get("workspace_digest") != checkpoint.workspace_digest
         ):
             raise HandoffContextError("handoff source workspace digest changed")
@@ -145,8 +152,28 @@ class HandoffContextService:
             raise HandoffContextError("handoff checkpoint Session identity changed")
         if stop.source_session_id != transition.source_session_id:
             raise HandoffContextError("handoff stop Session identity changed")
-        if stop.accepted_sequence != checkpoint.accepted_sequence:
+        stop.assert_matches(checkpoint)
+        if (
+            transition.handoff_schema_version != 2
+            and stop.accepted_sequence != checkpoint.accepted_sequence
+        ):
             raise HandoffContextError("handoff stop sequence changed")
+        if transition.handoff_schema_version == 2:
+            from sidera_control_plane.application.workspace_handoff import (
+                WorkspaceHandoffService,
+            )
+
+            with self._uow_factory() as uow:
+                manifest = uow.workspaces.get(
+                    transition.source_workspace_manifest_id, transition.workspace_id
+                )
+                if manifest is None:
+                    raise HandoffContextError("native frozen source facts changed")
+                WorkspaceHandoffService._validate_exact_stop(transition, manifest)
+                if freeze_facts.get("workspace_digest") != workspace_manifest_digest(
+                    manifest
+                ):
+                    raise HandoffContextError("native frozen source facts changed")
         _validate_input_classification(transition, input_classification)
         return HandoffSourceFacts(
             checkpoint=checkpoint,
@@ -270,8 +297,19 @@ class HandoffContextService:
         )
         if worker_item is None:
             raise HandoffContextError("handoff WorkerItem was not found")
+        work_context = (
+            None
+            if current.handoff_schema_version != 2
+            else uow.work_contexts.get_by_root_task(
+                proposal.payload.root_task_id,
+                current.workspace_id,
+                for_update=True,
+            )
+        )
         context_revision = uow.work_contexts.get_revision(
-            source_package.work_context_revision_id,
+            source_package.work_context_revision_id
+            if work_context is None
+            else work_context.current_revision_id,
             current.workspace_id,
         )
         if context_revision is None:
@@ -290,6 +328,32 @@ class HandoffContextService:
             source_manifest=source_manifest,
             source_facts=source_facts,
         )
+        if current.handoff_schema_version == 2:
+            binding = uow.agent_bindings.get(
+                current.workspace_id,
+                "worker_item",
+                current.worker_item_id,
+                for_update=True,
+            )
+            head = uow.plans.get_head(
+                worker_item.root_task_id, current.workspace_id, for_update=True
+            )
+            if (
+                work_context is None
+                or binding is None
+                or head is None
+                or current.native_payload is None
+                or (
+                    work_context.id != current.native_payload.work_context_id
+                    or binding.profile_ref != current.native_payload.target_profile_ref
+                    or binding.version != current.target_binding_version
+                    or not binding.runnable
+                    or head.active_snapshot_id != target_request.plan_snapshot_id
+                    or head.active_generation != target_request.plan_generation
+                    or head.version != current.native_payload.observed_plan_head_version
+                )
+            ):
+                raise HandoffContextError("native target context appointment changed")
         bundle_id = uuid5(
             _HANDOFF_CONTEXT_NAMESPACE,
             f"sidera:handoff-context-bundle:{current.id}:{current.logical_attempt}",
@@ -322,24 +386,14 @@ class HandoffContextService:
             authorization = resolve_execution_context_authorization(
                 uow, target_execution
             )
-            selection = (
-                load_execution_context_selection(uow, authorization.request)
-                if authorization is not None
-                else None
-            )
             request_id = uuid5(
                 _HANDOFF_CONTEXT_NAMESPACE,
                 f"sidera:handoff-context-request:{current.id}:"
                 f"{current.logical_attempt}:{target_execution.id}",
             )
-            idempotency_key = (
+            idempotency_key_prefix = (
                 f"context:handoff:{current.id}:attempt:{current.logical_attempt}:"
-                f"execution:{target_execution.id}:"
-                + (
-                    f"v2:selection:{selection.selection_hash}"
-                    if selection is not None
-                    else "v1"
-                )
+                f"execution:{target_execution.id}"
             )
             additional_budget = {
                 "handoff_context_bundle_id": str(bundle.id),
@@ -359,7 +413,7 @@ class HandoffContextService:
                     ttl_seconds=self._context_ttl_seconds,
                     created_at=bundle.created_at,
                     request_id=request_id,
-                    idempotency_key=idempotency_key,
+                    idempotency_key=idempotency_key_prefix + ":v1",
                     additional_fact_scope_refs=("handoff_context_bundle",),
                     additional_budget=additional_budget,
                 )
@@ -373,12 +427,12 @@ class HandoffContextService:
                     ttl_seconds=self._context_ttl_seconds,
                     created_at=bundle.created_at,
                     request_id=request_id,
-                    idempotency_key=idempotency_key,
+                    idempotency_key_prefix=idempotency_key_prefix,
                     additional_fact_scope_refs=("handoff_context_bundle",),
                     additional_budget=additional_budget,
                     work_context_revision=context_revision,
                 )
-        except (ExecutionContextAuthorizationError, ValueError) as exc:
+        except (ExecutionContextAuthorizationError, ValueError, ValidationError) as exc:
             raise HandoffContextError(
                 "handoff target input Selection authorization is invalid",
                 code="handoff_context_input_selection_invalid",
@@ -454,12 +508,18 @@ class HandoffContextService:
                     if authorization is not None
                     else None
                 )
-            except (ExecutionContextAuthorizationError, ValueError) as exc:
+                manifest_schema_version = execution_context_manifest_schema_version(
+                    uow, target_execution
+                )
+            except (
+                ExecutionContextAuthorizationError,
+                ValueError,
+                ValidationError,
+            ) as exc:
                 raise HandoffContextError(
                     "handoff target input Selection authorization is invalid",
                     code="handoff_context_input_selection_invalid",
                 ) from exc
-            manifest_schema_version = 2 if selection is not None else 1
             assembly = uow.context_assemblies.get_for_consumer(
                 ContextPurpose.EXECUTION,
                 target_execution_id,
@@ -539,11 +599,12 @@ class HandoffContextService:
             if selection is not None:
                 result_input_manifest = getattr(package, "result_input_manifest", None)
                 if (
-                    assembly.manifest_schema_version != 2
+                    assembly.manifest_schema_version not in {2, 3}
+                    or assembly.manifest_schema_version != manifest_schema_version
                     or assembly.input_selection_id != selection.id
                     or assembly.input_selection_hash != selection.selection_hash
-                    or package.manifest_schema_version != 2
-                    or result_input_manifest is None
+                    or package.manifest_schema_version != manifest_schema_version
+                    or not isinstance(result_input_manifest, ResultInputManifestV1)
                     or result_input_manifest.input_selection_id != selection.id
                     or result_input_manifest.input_selection_hash
                     != selection.selection_hash
@@ -552,6 +613,21 @@ class HandoffContextService:
                         "handoff target input Selection package is stale",
                         code="handoff_context_input_selection_stale",
                     )
+            if manifest_schema_version == 3:
+                if authorization is None or selection is None:
+                    raise HandoffContextError(
+                        "handoff target code input Selection is missing",
+                        code="handoff_context_input_selection_stale",
+                    )
+                self._validate_code_package(
+                    uow,
+                    execution=target_execution,
+                    request=authorization.request,
+                    selection=selection,
+                    assembly=assembly,
+                    package=package,
+                    error_prefix="handoff_context_input_selection",
+                )
             handoff_facts = package.control_plane_fact_snapshot.get("handoff")
             if (
                 not isinstance(handoff_facts, Mapping)
@@ -633,16 +709,26 @@ class HandoffContextService:
                 if authorization is not None
                 else None
             )
-        except (ExecutionContextAuthorizationError, ValueError) as exc:
+            manifest_schema_version = (
+                execution_context_manifest_schema_version(uow, source_execution)
+                if source_execution is not None
+                else 1
+            )
+        except (ExecutionContextAuthorizationError, ValueError, ValidationError) as exc:
             raise HandoffContextError(
                 "handoff source input Selection authorization is invalid",
                 code="handoff_context_source_input_selection_invalid",
             ) from exc
+        if package.manifest_schema_version != manifest_schema_version:
+            raise HandoffContextError(
+                "handoff source ContextPackage input protocol is stale",
+                code="handoff_context_source_input_selection_stale",
+            )
         if selection is not None:
             result_input_manifest = getattr(package, "result_input_manifest", None)
             if (
-                package.manifest_schema_version != 2
-                or result_input_manifest is None
+                manifest_schema_version not in {2, 3}
+                or not isinstance(result_input_manifest, ResultInputManifestV1)
                 or result_input_manifest.input_selection_id != selection.id
                 or result_input_manifest.input_selection_hash
                 != selection.selection_hash
@@ -651,7 +737,79 @@ class HandoffContextService:
                     "handoff source ContextPackage input Selection is stale",
                     code="handoff_context_source_input_selection_stale",
                 )
+        if manifest_schema_version == 3:
+            if authorization is None or selection is None or source_execution is None:
+                raise HandoffContextError(
+                    "handoff source code input Selection is missing",
+                    code="handoff_context_source_input_selection_stale",
+                )
+            assembly = uow.context_assemblies.get_for_consumer(
+                ContextPurpose.EXECUTION,
+                source_execution.id,
+                transition.workspace_id,
+                manifest_schema_version=manifest_schema_version,
+            )
+            HandoffContextService._validate_code_package(
+                uow,
+                execution=source_execution,
+                request=authorization.request,
+                selection=selection,
+                assembly=assembly,
+                package=package,
+                error_prefix="handoff_context_source_input_selection",
+            )
         return package
+
+    @staticmethod
+    def _validate_code_package(
+        uow: ControlPlaneUnitOfWork,
+        *,
+        execution: Execution,
+        request: ExecutionRequest,
+        selection: CollaborationInputSelectionV1,
+        assembly: ContextAssemblyRequest | None,
+        package: ContextPackageManifestV1,
+        error_prefix: str,
+    ) -> None:
+        manifest = getattr(package, "code_input_manifest", None)
+        if (
+            not isinstance(package, ContextPackageManifestV3)
+            or not isinstance(manifest, CodeInputManifestV1)
+            or assembly is None
+            or assembly.manifest_schema_version != 3
+            or not isinstance(assembly.code_input_manifest, CodeInputManifestV1)
+            or assembly.code_input_manifest != manifest
+            or assembly.verification_manifest is not None
+            or package.verification_manifest is not None
+            or manifest.workspace_id != execution.workspace_id
+            or manifest.workspace_id != request.workspace_id
+            or manifest.root_task_id != request.root_task_id
+            or manifest.request_id != request.id
+            or manifest.execution_id != execution.id
+            or manifest.selection_id != selection.id
+            or manifest.selection_hash != selection.selection_hash
+            or manifest.input_hash != manifest.compute_content_hash()
+            or assembly.input_selection_id != selection.id
+            or assembly.input_selection_hash != selection.selection_hash
+            or assembly.budget.get("code_input_hash") != manifest.input_hash
+            or assembly.budget.get("execution_request_id") != str(request.id)
+            or assembly.work_context_revision_id != package.work_context_revision_id
+            or assembly.context_version != package.context_version
+            or assembly.idempotency_key != package.idempotency_key
+            or ":v3:" not in assembly.idempotency_key
+            or manifest.input_hash not in assembly.idempotency_key
+        ):
+            raise HandoffContextError(
+                "handoff code input package identity is stale",
+                code=f"{error_prefix}_stale",
+            )
+        try:
+            resolve_code_inputs(uow, manifest)
+        except (ResultError, ValueError, ValidationError) as exc:
+            raise HandoffContextError(
+                "handoff code input Selection authorization is invalid",
+                code=f"{error_prefix}_invalid",
+            ) from exc
 
     @staticmethod
     def _load_source_manifest(
@@ -673,7 +831,11 @@ class HandoffContextService:
             or manifest.execution_id != transition.source_execution_id
             or manifest.task_id != source_execution.task_id
             or workspace_manifest_digest(manifest)
-            != source_facts.checkpoint.workspace_digest
+            != (
+                source_facts.workspace_state.get("workspace_digest")
+                if transition.handoff_schema_version == 2
+                else source_facts.checkpoint.workspace_digest
+            )
         ):
             raise HandoffContextError("handoff source Workspace facts changed")
         state = source_facts.workspace_state
@@ -743,7 +905,10 @@ class HandoffContextService:
             target_request.proposal_revision_id,
         }:
             raise HandoffContextError("handoff WorkContext revision is stale")
-        if source_package.work_context_revision_id != context_revision.revision_id:
+        if (
+            transition.handoff_schema_version != 2
+            and source_package.work_context_revision_id != context_revision.revision_id
+        ):
             raise HandoffContextError("handoff source WorkContext revision changed")
         if source_facts.input_classification is None:
             raise HandoffContextError("handoff input classification is missing")
@@ -774,6 +939,8 @@ def _build_bundle(
     classification = source_facts.input_classification
     if classification is None:
         raise HandoffContextError("handoff input classification is missing")
+    if transition.target_context_version is None:
+        raise HandoffContextError("handoff target context version is missing")
     delivered = tuple(
         item.source_input_id
         for item in classification.dispositions
@@ -790,7 +957,7 @@ def _build_bundle(
     )
     return HandoffContextBundle.create(
         id=bundle_id,
-        schema_version=1,
+        schema_version=transition.handoff_schema_version,
         workspace_id=transition.workspace_id,
         worker_item_id=transition.worker_item_id,
         handoff_transition_id=transition.id,
@@ -805,7 +972,19 @@ def _build_bundle(
         source_worker_context_version=source_facts.source_worker_context_version,
         target_execution_id=target_execution.id,
         target_worker_id=transition.target_worker_id,
-        target_runtime_snapshot_hash=_hash_json(transition.target_runtime_snapshot),
+        target_runtime_snapshot_hash=None
+        if transition.handoff_schema_version == 2
+        else _hash_json(transition.target_runtime_snapshot),
+        target_profile_ref=None
+        if transition.native_payload is None
+        else transition.native_payload.target_profile_ref,
+        target_binding_version=transition.target_binding_version,
+        target_native_metadata=None
+        if transition.handoff_schema_version != 2
+        else {
+            "execution_mode": "native_profile",
+            "capability_requirements": sorted(target_execution.capability_requirements),
+        },
         target_context_version=transition.target_context_version,
         source_workspace_manifest_id=source_manifest.id,
         source_workspace_version=source_manifest.version,
@@ -856,6 +1035,11 @@ def _checkpoint_from_transition(
             code="handoff_context_source_checkpoint_missing",
         )
     try:
+        if transition.handoff_schema_version == 2:
+            evidence = HandoffCheckpointEvidence.from_native_mapping(facts)
+            if evidence.accepted_sequence != transition.source_checkpoint_sequence:
+                raise HandoffContextError("handoff checkpoint sequence changed")
+            return evidence
         evidence = HandoffCheckpointEvidence(
             operation_id=UUID(str(facts["operation_id"])),
             transition_id=UUID(str(facts["transition_id"])),
@@ -890,6 +1074,11 @@ def _stop_from_transition(transition: HandoffTransition) -> HandoffStopEvidence:
             code="handoff_context_source_stop_missing",
         )
     try:
+        if transition.handoff_schema_version == 2:
+            evidence = HandoffStopEvidence.from_native_mapping(facts)
+            if evidence.accepted_sequence != transition.source_stop_sequence:
+                raise HandoffContextError("handoff stop sequence changed")
+            return evidence
         evidence = HandoffStopEvidence(
             operation_id=UUID(str(facts["operation_id"])),
             source_session_id=UUID(str(facts["source_session_id"])),

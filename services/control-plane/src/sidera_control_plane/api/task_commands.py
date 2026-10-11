@@ -6,10 +6,16 @@ from fastapi import APIRouter, Depends, Response
 from sidera_control_plane.api.dependencies import (
     get_command_service,
     get_settings,
+    get_trusted_assignment_identity,
     require_demo_runtime_binding,
     require_result_integration_enabled,
 )
 from sidera_control_plane.api.schemas import CommandRequest, CommandResponse
+from sidera_control_plane.application.assignments import (
+    ASSIGNMENT_COMMAND_TYPES,
+    TrustedAssignmentIdentity,
+    require_trusted_assignment_identity,
+)
 from sidera_control_plane.application.collaboration_governance_commands import (
     CollaborationGovernanceCommandError,
 )
@@ -17,6 +23,7 @@ from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.application.handoff_commands import HandoffCommandError
 from sidera_control_plane.config import Settings
 from sidera_control_plane.demo.governance import arm_demo_governance_evaluation
+from sidera_control_plane.domain.agent_bindings import AssignmentDenied
 from sidera_control_plane.domain.errors import ValidationError
 
 router = APIRouter(prefix="/api/v1")
@@ -55,8 +62,11 @@ def execute_command(
     response: Response,
     service: Annotated[CommandService, Depends(get_command_service)],
     settings: Annotated[Settings, Depends(get_settings)],
+    trusted_identity: Annotated[
+        TrustedAssignmentIdentity | None, Depends(get_trusted_assignment_identity)
+    ] = None,
 ) -> CommandResponse:
-    return _execute_command(request, response, service, settings)
+    return _execute_command(request, response, service, settings, trusted_identity)
 
 
 @router.post(
@@ -71,6 +81,9 @@ def reconcile_worker_transition(
     response: Response,
     service: Annotated[CommandService, Depends(get_command_service)],
     settings: Annotated[Settings, Depends(get_settings)],
+    trusted_identity: Annotated[
+        TrustedAssignmentIdentity | None, Depends(get_trusted_assignment_identity)
+    ] = None,
 ) -> CommandResponse:
     _require_transition_route(
         request,
@@ -78,7 +91,7 @@ def reconcile_worker_transition(
         worker_transition_id=worker_transition_id,
         command_type="ReconcileWorkerTransition",
     )
-    return _execute_command(request, response, service, settings)
+    return _execute_command(request, response, service, settings, trusted_identity)
 
 
 @router.post(
@@ -93,6 +106,9 @@ def confirm_worker_transition_stopped(
     response: Response,
     service: Annotated[CommandService, Depends(get_command_service)],
     settings: Annotated[Settings, Depends(get_settings)],
+    trusted_identity: Annotated[
+        TrustedAssignmentIdentity | None, Depends(get_trusted_assignment_identity)
+    ] = None,
 ) -> CommandResponse:
     _require_transition_route(
         request,
@@ -100,7 +116,7 @@ def confirm_worker_transition_stopped(
         worker_transition_id=worker_transition_id,
         command_type="ConfirmWorkerTransitionStopped",
     )
-    return _execute_command(request, response, service, settings)
+    return _execute_command(request, response, service, settings, trusted_identity)
 
 
 @router.post(
@@ -115,6 +131,9 @@ def recover_worker_transition(
     response: Response,
     service: Annotated[CommandService, Depends(get_command_service)],
     settings: Annotated[Settings, Depends(get_settings)],
+    trusted_identity: Annotated[
+        TrustedAssignmentIdentity | None, Depends(get_trusted_assignment_identity)
+    ] = None,
 ) -> CommandResponse:
     _require_transition_route(
         request,
@@ -122,7 +141,7 @@ def recover_worker_transition(
         worker_transition_id=worker_transition_id,
         command_type="RecoverWorkerTransition",
     )
-    return _execute_command(request, response, service, settings)
+    return _execute_command(request, response, service, settings, trusted_identity)
 
 
 def _execute_command(
@@ -130,7 +149,19 @@ def _execute_command(
     response: Response,
     service: CommandService,
     settings: Settings,
+    trusted_identity: TrustedAssignmentIdentity | None = None,
 ) -> CommandResponse:
+    if request.command_type in {"PrepareProfileHandoff", "ConfirmProfileHandoff"}:
+        require_trusted_assignment_identity(request.to_envelope(), trusted_identity)
+        if (
+            request.command_type == "ConfirmProfileHandoff"
+            and request.actor.type != "user"
+        ):
+            raise AssignmentDenied(
+                "native handoff confirmation requires a trusted Web human"
+            )
+    if request.command_type in ASSIGNMENT_COMMAND_TYPES:
+        require_trusted_assignment_identity(request.to_envelope(), trusted_identity)
     require_demo_runtime_binding(request, settings)
     if request.command_type in _GOVERNANCE_COMMAND_TYPES and (
         request.actor.type != settings.local_actor_type
@@ -152,7 +183,10 @@ def _execute_command(
         )
     if request.command_type in _REWORK_COMMAND_TYPES:
         require_result_integration_enabled(settings)
-        if request.actor.type != settings.local_actor_type or request.actor.id != settings.local_actor_id:
+        if (
+            request.actor.type != settings.local_actor_type
+            or request.actor.id != settings.local_actor_id
+        ):
             raise ValidationError(
                 "result recovery commands require the configured local actor",
                 details={"actor_type": settings.local_actor_type},
@@ -192,6 +226,7 @@ def _execute_command(
             "RegisterCollaborationRuntimeModule",
             "RegisterPlanningProfile",
             "SubmitPlanningRequest",
+            "SubmitTaskGoal",
             "SubmitPlanRevision",
             "ConfirmPlanningProposal",
             "ConfirmPlanRevision",

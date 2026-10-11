@@ -5,6 +5,8 @@ from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
+from sidera_agents.contracts import ProfileRef
+
 from sidera_control_plane.domain.collaboration import (
     CollaborationRuntimeBindingSnapshot,
     CollaborationStrategy,
@@ -105,8 +107,8 @@ class PlanningProfileSnapshot:
     profile_key: str
     profile_version: int
     display_name: str
-    planner_module_instance_id: UUID
-    planner_module_config_version: int
+    planner_module_instance_id: UUID | None
+    planner_module_config_version: int | None
     planner_interface_version: str
     prompt_policy_version: str
     system_policy: Mapping[str, object]
@@ -120,12 +122,23 @@ class PlanningProfileSnapshot:
     execution_max_attempts: int
     execution_budget_level: str
     planner_secret_refs: tuple[str, ...]
-    planner_capabilities: PlannerAdapterCapabilityProfile
+    planner_capabilities: PlannerAdapterCapabilityProfile | None
     collaboration_runtime_binding: CollaborationRuntimeBindingSnapshot | None = None
+    execution_mode: str = "legacy"
+    planner_agent_ref: ProfileRef | None = None
 
     def __post_init__(self) -> None:
-        if self.profile_version < 1 or self.planner_module_config_version < 1:
-            raise ValidationError("profile and module versions must be positive")
+        _positive(self.profile_version, "profile_version")
+        _validate_execution_mode(self)
+        if self.execution_mode == "legacy" and not isinstance(
+            self.planner_capabilities, PlannerAdapterCapabilityProfile
+        ):
+            raise ValidationError("legacy planner capabilities required")
+        if (
+            self.execution_mode == "native_profile"
+            and self.planner_capabilities is not None
+        ):
+            raise ValidationError("native policy cannot activate legacy capabilities")
         if self.proposal_schema_version < 1:
             raise ValidationError("proposal_schema_version must be positive")
         _require_text(self.profile_key, "profile_key")
@@ -174,8 +187,8 @@ class PlanningProfile:
     profile_key: str
     version: int
     display_name: str
-    planner_module_instance_id: UUID
-    planner_module_config_version: int
+    planner_module_instance_id: UUID | None
+    planner_module_config_version: int | None
     planner_interface_version: str
     prompt_policy_version: str
     system_policy: Mapping[str, object]
@@ -192,6 +205,8 @@ class PlanningProfile:
     status: PlanningProfileStatus
     planner_secret_refs: tuple[str, ...]
     collaboration_runtime_binding: CollaborationRuntimeBindingSnapshot | None = None
+    execution_mode: str = "legacy"
+    planner_agent_ref: ProfileRef | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.profile_key, "profile_key")
@@ -201,7 +216,7 @@ class PlanningProfile:
         _require_text(self.execution_budget_level, "execution_budget_level")
         if self.version < 1:
             raise ValidationError("profile version must be positive")
-        _positive(self.planner_module_config_version, "planner_module_config_version")
+        _validate_execution_mode(self)
         if self.proposal_schema_version < 1:
             raise ValidationError("proposal_schema_version must be positive")
         if not isinstance(self.user_selectable, bool):
@@ -255,12 +270,18 @@ class PlanningProfile:
 
     def snapshot(
         self,
-        planner_capabilities: PlannerAdapterCapabilityProfile,
+        planner_capabilities: PlannerAdapterCapabilityProfile | None = None,
         *,
         module_type: str = PLANNER_ADAPTER_MODULE_TYPE,
         module_instance_config_version: int | None = None,
     ) -> PlanningProfileSnapshot:
-        if not isinstance(planner_capabilities, PlannerAdapterCapabilityProfile):
+        if self.execution_mode == "native_profile":
+            if (
+                planner_capabilities is not None
+                or module_instance_config_version is not None
+            ):
+                raise ValidationError("native policy cannot activate a legacy module")
+        elif not isinstance(planner_capabilities, PlannerAdapterCapabilityProfile):
             raise ValidationError("planner capabilities are required")
         if canonical_module_type(module_type) != PLANNER_ADAPTER_MODULE_TYPE:
             raise ValidationError("planning profile module type must be planner_adapter")
@@ -271,12 +292,24 @@ class PlanningProfile:
         )
         if config_version != self.planner_module_config_version:
             raise ValidationError("planner module config version does not match profile")
-        if planner_capabilities.interface_version != self.planner_interface_version:
+        if (
+            planner_capabilities is not None
+            and planner_capabilities.interface_version != self.planner_interface_version
+        ):
             raise ValidationError("planner interface version does not match profile")
-        if self.proposal_schema_version not in planner_capabilities.proposal_schema_versions:
+        if (
+            planner_capabilities is not None
+            and self.proposal_schema_version
+            not in planner_capabilities.proposal_schema_versions
+        ):
             raise ValidationError("planner proposal schema version is not supported")
-        if planner_capabilities.max_context_bytes < self.budget.max_context_bytes:
-            raise ValidationError("planner context limit is below profile context budget")
+        if (
+            planner_capabilities is not None
+            and planner_capabilities.max_context_bytes < self.budget.max_context_bytes
+        ):
+            raise ValidationError(
+                "planner context limit is below profile context budget"
+            )
         return PlanningProfileSnapshot(
             profile_id=self.id,
             workspace_id=self.workspace_id,
@@ -300,7 +333,34 @@ class PlanningProfile:
             planner_secret_refs=self.planner_secret_refs,
             planner_capabilities=planner_capabilities,
             collaboration_runtime_binding=self.collaboration_runtime_binding,
+            execution_mode=self.execution_mode,
+            planner_agent_ref=self.planner_agent_ref,
         )
+
+
+def _validate_execution_mode(profile) -> None:
+    if profile.execution_mode == "legacy":
+        if (
+            not isinstance(profile.planner_module_instance_id, UUID)
+            or profile.planner_agent_ref is not None
+        ):
+            raise ValidationError("legacy policy requires only a legacy planner module")
+        _positive(
+            profile.planner_module_config_version, "planner_module_config_version"
+        )
+    elif profile.execution_mode == "native_profile":
+        if (
+            profile.planner_module_instance_id is not None
+            or profile.planner_module_config_version is not None
+            or not isinstance(profile.planner_agent_ref, ProfileRef)
+            or profile.planner_agent_ref.workspace_id != profile.workspace_id
+            or profile.planner_secret_refs
+        ):
+            raise ValidationError(
+                "native policy requires only an exact scoped planner agent pin"
+            )
+    else:
+        raise ValidationError("unknown planning execution mode")
 
 
 def profile_requires_result_integration(

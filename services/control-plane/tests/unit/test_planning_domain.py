@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -220,7 +221,9 @@ def test_planning_run_follows_happy_path_and_fenced_completion() -> None:
         request.cancel(now=NOW + timedelta(seconds=5))
 
 
-def test_waiting_for_user_requires_blocking_clarification_and_answer_creates_run() -> None:
+def test_waiting_for_user_requires_blocking_clarification_and_answer_creates_run() -> (
+    None
+):
     request = create_request()
     lease_id, run = start_request(request)
     question = PlanningClarification.create(
@@ -284,7 +287,9 @@ def test_waiting_for_user_requires_blocking_clarification_and_answer_creates_run
         )
 
 
-def replace_brief(brief: PlanningBriefRevision, *, revision: int) -> PlanningBriefRevision:
+def replace_brief(
+    brief: PlanningBriefRevision, *, revision: int
+) -> PlanningBriefRevision:
     return PlanningBriefRevision.create(
         planning_request_id=brief.planning_request_id,
         revision=revision,
@@ -325,7 +330,9 @@ def test_non_blocking_clarification_does_not_enter_waiting_state() -> None:
         )
 
 
-def test_proposal_revision_requires_matching_hash_and_revision_feedback_creates_run() -> None:
+def test_proposal_revision_requires_matching_hash_and_revision_feedback_creates_run() -> (
+    None
+):
     request = create_request()
     lease_id, run = start_request(request)
     request.succeed_run(
@@ -343,9 +350,7 @@ def test_proposal_revision_requires_matching_hash_and_revision_feedback_creates_
         content_hash="b" * 64,
         now=NOW + timedelta(seconds=3),
     )
-    revision_brief = replace_brief(
-        request.briefs[-1], revision=2
-    )
+    revision_brief = replace_brief(request.briefs[-1], revision=2)
     revision_brief = PlanningBriefRevision.create(
         planning_request_id=revision_brief.planning_request_id,
         revision=revision_brief.revision,
@@ -388,7 +393,9 @@ def test_proposal_revision_requires_matching_hash_and_revision_feedback_creates_
     )
 
 
-def test_failed_and_unknown_runs_are_recoverable_without_treating_unknown_as_failed() -> None:
+def test_failed_and_unknown_runs_are_recoverable_without_treating_unknown_as_failed() -> (
+    None
+):
     request = create_request()
     lease_id, run = start_request(request)
     request.block_run_unknown(
@@ -457,3 +464,111 @@ def test_planning_usage_rejects_negative_values() -> None:
             runtime_seconds=0,
             context_bytes=0,
         )
+
+
+def _failed_feedback_domain_case():
+    request = create_request()
+    lease_id, run = start_request(request)
+    request.fail_run(
+        run_id=run.id,
+        lease_id=lease_id,
+        fencing_token=1,
+        error_code="invalid_output",
+        error_message="The original response is malformed.",
+        now=NOW + timedelta(seconds=2),
+    )
+    current = request.briefs[-1]
+    feedback = "Earlier requirements.\n\nKeep four workers and separate verification."
+    brief = PlanningBriefRevision.create(
+        planning_request_id=request.id,
+        revision=current.revision + 1,
+        objective=current.objective,
+        constraints=current.constraints,
+        acceptance_criteria=current.acceptance_criteria,
+        context_refs=current.context_refs,
+        requested_outputs=current.requested_outputs,
+        user_feedback=feedback,
+        created_by="user-1",
+        source_correlation=uuid4(),
+        created_at=NOW + timedelta(seconds=3),
+    )
+    return request, run, brief, feedback
+
+
+def test_revise_failed_appends_matching_brief_and_run_without_rewriting_history():
+    request, failed_run, brief, feedback = _failed_feedback_domain_case()
+    old_runs = tuple(replace(run) for run in request.runs)
+    old_briefs = request.briefs
+    old_version = request.version
+    new_run_id = uuid4()
+
+    request.revise_failed(
+        failed_run_id=failed_run.id,
+        feedback=feedback,
+        brief=brief,
+        new_run_id=new_run_id,
+        actor="user-1",
+        now=NOW + timedelta(seconds=3),
+    )
+
+    assert request.runs[:-1] == old_runs
+    assert request.briefs[:-1] == old_briefs
+    assert request.version == old_version + 1
+    assert request.status is PlanningRequestStatus.PLANNING
+    assert request.runs[-1].id == new_run_id
+    assert request.runs[-1].attempt == old_runs[-1].attempt + 1
+    assert request.runs[-1].brief_revision == brief.revision
+    assert request.briefs[-1] == brief
+    assert request.current_proposal_revision is None
+    assert request.current_proposal_content_hash is None
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "request_not_failed",
+        "wrong_run",
+        "latest_run_not_failed",
+        "foreign_brief",
+        "stale_brief",
+        "skipped_brief",
+        "wrong_actor",
+        "feedback_mismatch",
+        "blank_feedback",
+    ],
+)
+def test_revise_failed_refuses_invalid_transition_without_any_domain_mutation(damage):
+    request, run, brief, feedback = _failed_feedback_domain_case()
+    failed_run_id = run.id
+    actor = "user-1"
+    if damage == "request_not_failed":
+        request.status = PlanningRequestStatus.PLANNING
+    elif damage == "wrong_run":
+        failed_run_id = uuid4()
+    elif damage == "latest_run_not_failed":
+        run.status = PlanningRunStatus.BLOCKED
+    elif damage == "foreign_brief":
+        brief = replace(brief, planning_request_id=uuid4())
+    elif damage in {"stale_brief", "skipped_brief"}:
+        brief = replace(brief, revision=1 if damage == "stale_brief" else 3)
+    elif damage == "wrong_actor":
+        actor = "foreign-user"
+    else:
+        feedback = "Different feedback" if damage == "feedback_mismatch" else " \n "
+    before = replace(
+        request,
+        runs=tuple(replace(item) for item in request.runs),
+        clarifications=tuple(replace(item) for item in request.clarifications),
+    )
+
+    with pytest.raises((InvalidTransition, ValidationError)):
+        request.revise_failed(
+            failed_run_id=failed_run_id,
+            feedback=feedback,
+            brief=brief,
+            new_run_id=uuid4(),
+            actor=actor,
+            now=NOW + timedelta(seconds=3),
+        )
+
+    assert request == before

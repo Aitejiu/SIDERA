@@ -14,12 +14,14 @@ import {
   ServerCog,
 } from "lucide-react";
 import { Link } from "react-router-dom";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
+import { AssigneeAppointment } from "../assignments/AssigneeAppointment";
+import type { AssigneeValue } from "../assignments/types";
 
 import { workerCollaborationLabel } from "../collaboration/types";
-import { WorkerGovernancePanel } from "../collaboration/WorkerGovernancePanel";
+import { WorkerGovernancePanel, type NativeWorkerGovernanceOwner } from "../collaboration/WorkerGovernancePanel";
 import { WorkerContextSummary } from "../context/WorkerContextSummary";
 import type { ResultInputAction, WorkerResultInputsView } from "../result-inputs/api";
 import { ResultInputPanel } from "../result-inputs/ResultInputPanel";
@@ -30,11 +32,14 @@ import type { WorkerItemCollaborationSummary, WorkerPlacement, WorkerWorkspace }
 
 export function WorkerSidebar({
   workspace,
+  legacyExecutionEligible,
   taskTitle,
   subtaskTitle,
   onRefresh,
   handoffAvailable,
   onOpenHandoff,
+  onNativeHandoffRequest,
+  onNativeHandoffHistoryRequest,
   resultInputs,
   resultInputsLoading,
   resultInputsError,
@@ -48,13 +53,18 @@ export function WorkerSidebar({
   resultViewError,
   onRetryResultView,
   onOpenResults,
+  nativeActions,
+  nativeResultActionRecovery,
 }: {
   workspace: WorkerWorkspace;
+  legacyExecutionEligible: boolean;
   taskTitle: string;
   subtaskTitle: string;
   onRefresh: () => Promise<void>;
   handoffAvailable: boolean;
   onOpenHandoff: () => void;
+  onNativeHandoffRequest: (target: AssigneeValue) => void;
+  onNativeHandoffHistoryRequest: () => void;
   resultInputs: WorkerResultInputsView | undefined;
   resultInputsLoading: boolean;
   resultInputsError: boolean;
@@ -71,6 +81,8 @@ export function WorkerSidebar({
   resultViewError: boolean;
   onRetryResultView: () => void;
   onOpenResults: (candidateId: string | undefined) => void;
+  nativeActions?: NativeWorkerGovernanceOwner;
+  nativeResultActionRecovery?: ReactNode;
 }) {
   const { worker_item: workerItem, current_runtime: runtime } = workspace;
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -101,6 +113,15 @@ export function WorkerSidebar({
     || Boolean(resultInputs?.delivery.materialization_failure_code);
   return (
     <aside className="worker-item-sidebar" aria-label="WorkerItem 事实">
+      <AssigneeAppointment
+        workspaceId={workspace.workspace_id}
+        targetKind="worker_item"
+        targetId={workerItem.id}
+        workerWorkspace={workspace}
+        onRefresh={onRefresh}
+        onNativeHandoffRequest={onNativeHandoffRequest}
+        onNativeHandoffHistoryRequest={onNativeHandoffHistoryRequest}
+      />
       <section className="worker-item-sidebar__section worker-item-sidebar__agent">
         <h3><ServerCog size={15} aria-hidden="true" />当前 Agent</h3>
         <strong>{runtime?.worker_display_name ?? "尚未接入 Agent"}</strong>
@@ -116,6 +137,8 @@ export function WorkerSidebar({
           </button>
         ) : null}
       </section>
+
+      {nativeResultActionRecovery}
 
       <details className="worker-item-sidebar__collapsible">
         <summary className="worker-item-sidebar__collapsible-summary">
@@ -235,23 +258,26 @@ export function WorkerSidebar({
         canIntervene={workspace.can_intervene}
         collaboration={workspace.collaboration}
         {...(resultInputs === undefined ? {} : { resultInputs })}
+        {...(nativeActions === undefined ? {} : { nativeActions })}
         onRefresh={onRefresh}
       />
 
-      <details className="worker-item-sidebar__collapsible" open={showExecutionConfiguration}>
-        <summary className="worker-item-sidebar__collapsible-summary">
-          <span className="worker-item-sidebar__collapsible-title"><Route size={15} aria-hidden="true" />执行配置</span>
-          <ChevronDown size={15} aria-hidden="true" />
-        </summary>
-        <ExecutionRoutingPanel
-          workspaceId={workspace.workspace_id}
-          execution={currentExecution}
-          workerItemId={workerItem.id}
-          rootTaskId={workerItem.root_task_id}
-          subtaskKey={workspace.current_placement.subtask_key}
-          onRefresh={onRefresh}
-        />
-      </details>
+      {legacyExecutionEligible ? (
+        <details className="worker-item-sidebar__collapsible" open={showExecutionConfiguration}>
+          <summary className="worker-item-sidebar__collapsible-summary">
+            <span className="worker-item-sidebar__collapsible-title"><Route size={15} aria-hidden="true" />执行配置</span>
+            <ChevronDown size={15} aria-hidden="true" />
+          </summary>
+          <ExecutionRoutingPanel
+            workspaceId={workspace.workspace_id}
+            execution={currentExecution}
+            workerItemId={workerItem.id}
+            rootTaskId={workerItem.root_task_id}
+            subtaskKey={workspace.current_placement.subtask_key}
+            onRefresh={onRefresh}
+          />
+        </details>
+      ) : null}
 
       {needsAttention || detailsOpen ? <WorkerContextSummary
         workspaceId={workspace.workspace_id}

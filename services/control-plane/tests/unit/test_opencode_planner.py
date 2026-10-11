@@ -11,6 +11,7 @@ import pytest
 from sidera_runtime_guard import RuntimeGuardError
 
 from sidera_control_plane.adapters import opencode_planner
+from sidera_control_plane.adapters.acp_process import ACPProcessTransport
 from sidera_control_plane.adapters.fake_planner import (
     FakePlannerAdapter,
     FakePlannerConfig,
@@ -258,7 +259,9 @@ def _revision_planner_input() -> tuple[PlannerInput, PlanningProfileSnapshot]:
     return planner_input, snapshot
 
 
-def _response(result_type: str, body: object, *, usage: dict[str, int] | None = None) -> str:
+def _response(
+    result_type: str, body: object, *, usage: dict[str, int] | None = None
+) -> str:
     return json.dumps(
         {
             "result_type": result_type,
@@ -345,7 +348,9 @@ def test_opencode_parser_dispatches_initial_and_revision_v4() -> None:
     assert isinstance(initial_result, PlannerProposalResult)
     assert isinstance(initial_result.proposal.payload, PlanningProposalPayloadV4)
     assert isinstance(revision_result, PlannerProposalResult)
-    assert isinstance(revision_result.proposal.payload, PlanningRevisionProposalPayloadV4)
+    assert isinstance(
+        revision_result.proposal.payload, PlanningRevisionProposalPayloadV4
+    )
 
 
 def _adapter(
@@ -399,9 +404,7 @@ def test_planner_reports_prompt_json_rpc_error_as_unknown_once(
     assert result.retryable is False
     assert result.unknown_outcome is True
     assert capture.read_text(encoding="utf-8").splitlines() == ["prompt"]
-    assert observations == [
-        (f"{planner_input.operation_id}:prompt:0", "unknown")
-    ]
+    assert observations == [(f"{planner_input.operation_id}:prompt:0", "unknown")]
     prompt_errors = [
         record
         for record in caplog.records
@@ -419,11 +422,23 @@ def test_planner_reports_prompt_json_rpc_error_as_unknown_once(
     assert "remote-secret" not in caplog.text
 
 
+def _allow_synthetic_handshake(monkeypatch):
+    original = ACPProcessTransport.request
+
+    def request(self, method, params, *, timeout):
+        if method in {"initialize", "session/new"}:
+            timeout = max(timeout, 5.0)
+        return original(self, method, params, timeout=timeout)
+
+    monkeypatch.setattr(ACPProcessTransport, "request", request)
+
+
 def test_planner_reports_prompt_timeout_as_unknown_without_repair(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    _allow_synthetic_handshake(monkeypatch)
     planner_input, _ = _planner_input()
     capture = tmp_path / "prompt-calls.txt"
     monkeypatch.setenv("SIDERA_TEST_PLANNER_ACP_MODE", "prompt_timeout")
@@ -460,6 +475,7 @@ def test_planner_reports_repair_prompt_timeout_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    _allow_synthetic_handshake(monkeypatch)
     planner_input, _ = _planner_input()
     capture = tmp_path / "prompt-calls.txt"
     monkeypatch.setenv("SIDERA_TEST_PLANNER_ACP_MODE", "repair_timeout")
@@ -547,9 +563,7 @@ def test_planner_marks_pre_prompt_session_failure_as_failed(
         )
 
     assert not capture.exists()
-    assert observations == [
-        (f"{planner_input.operation_id}:prompt:0", "failed")
-    ]
+    assert observations == [(f"{planner_input.operation_id}:prompt:0", "failed")]
 
 
 def test_planner_marks_only_failed_repair_prompt_unknown(
@@ -646,9 +660,7 @@ def test_repair_guard_rejection_does_not_dispatch_another_prompt(
     assert result.retryable is False
     assert result.unknown_outcome is False
     assert capture.read_text(encoding="utf-8").splitlines() == ["prompt"]
-    assert observations == [
-        (f"{planner_input.operation_id}:prompt:0", "completed")
-    ]
+    assert observations == [(f"{planner_input.operation_id}:prompt:0", "completed")]
 
 
 def test_planner_probe_declares_json_text_not_json_schema(tmp_path: Path) -> None:
@@ -720,8 +732,14 @@ def test_planner_prompt_binds_proposal_shape_and_worker_coverage() -> None:
 
     prompt = _planner_prompt(planner_input)
 
-    assert "clarifications: [{question, rationale, answer_type, options, blocking}]" in prompt
-    assert "Every subtask with expected outputs must have a corresponding WorkerItem" in prompt
+    assert (
+        "clarifications: [{question, rationale, answer_type, options, blocking}]"
+        in prompt
+    )
+    assert (
+        "Every subtask with expected outputs must have a corresponding WorkerItem"
+        in prompt
+    )
     assert "Do not invent extra verification-only subtasks or WorkerItems" in prompt
     assert "impact_policy.manual_gate to false" in prompt
     assert "artifact_type:diff, artifact_type:log, artifact_type:report" in prompt
@@ -740,7 +758,10 @@ def test_planner_prompt_binds_proposal_shape_and_worker_coverage() -> None:
     assert "cross-Subtask ordering must use subtask_dependencies" in prompt
     assert "parallel source WorkerItems under one implementation Subtask" in prompt
     assert "activation_dependencies entries must be objects" in prompt
-    assert "upstream_worker_item_key, downstream_worker_item_key, kind, and required_artifact_refs" in prompt
+    assert (
+        "upstream_worker_item_key, downstream_worker_item_key, kind, and required_artifact_refs"
+        in prompt
+    )
     assert "Every execution_intents budget_class must be a string" in prompt
     assert "never put them at the proposal root" in prompt
     assert "The proposal object root has only these fields" in prompt
@@ -772,13 +793,18 @@ def test_planner_prompt_spells_out_worker_dependency_shape() -> None:
         "dependencies carry required artifacts"
     ) in prompt
     assert (
-        'worker_item_dependencies item must use exactly '
-        'upstream_worker_item_key, downstream_worker_item_key, kind, and '
-        'required_artifact_refs'
+        "worker_item_dependencies item must use exactly "
+        "upstream_worker_item_key, downstream_worker_item_key, kind, and "
+        "required_artifact_refs"
     ) in prompt
-    assert "Never use worker_item_key, depends_on_worker_item_key, or enforcement" in prompt
+    assert (
+        "Never use worker_item_key, depends_on_worker_item_key, or enforcement"
+        in prompt
+    )
     assert "Cross-Subtask result inputs must be represented by input_groups" in prompt
-    assert "never duplicate an input_groups relationship as a worker dependency" in prompt
+    assert (
+        "never duplicate an input_groups relationship as a worker dependency" in prompt
+    )
 
 
 def test_v4_planner_prompt_exposes_policy_vocabulary_without_runtime_bindings() -> None:
@@ -825,7 +851,9 @@ def test_v4_planner_prompt_exposes_policy_vocabulary_without_runtime_bindings() 
     assert "runtime_config_version" not in prompt
 
 
-def test_revision_planner_prompt_binds_complete_target_plan_and_exact_identity() -> None:
+def test_revision_planner_prompt_binds_complete_target_plan_and_exact_identity() -> (
+    None
+):
     planner_input, _ = _revision_planner_input()
 
     prompt = _planner_prompt(planner_input)
@@ -835,7 +863,9 @@ def test_revision_planner_prompt_binds_complete_target_plan_and_exact_identity()
     assert '"revision_context"' in prompt
     assert "complete target plan" in prompt
     assert "exact base_descriptor" in prompt
-    assert "every existing subtask and WorkerItem identity decision exactly once" in prompt
+    assert (
+        "every existing subtask and WorkerItem identity decision exactly once" in prompt
+    )
     assert "complete subtask and WorkerItem DAG" in prompt
     assert "full replacement plan, not a patch fragment" in prompt
     assert "identity decisions must cover every target node exactly once" in prompt
@@ -890,8 +920,7 @@ def test_repair_prompt_carries_safe_validation_diagnostic() -> None:
     assert "Dependency kind values are exactly hard or informational" in prompt
     assert "never use depends_on" in prompt
     assert (
-        "execution_intents required_evidence_refs must reuse "
-        "at least one exact value"
+        "execution_intents required_evidence_refs must reuse at least one exact value"
     ) in prompt
     assert "Never use a string for any *_refs field" in prompt
     assert "required_artifact_refs must always be a JSON array" in prompt
@@ -907,20 +936,25 @@ def test_repair_prompt_carries_supported_collaboration_strategy_ids() -> None:
     )
 
     assert (
-        'The only supported collaboration strategy IDs for this run are '
+        "The only supported collaboration strategy IDs for this run are "
         '["input_groups_v1"]'
     ) in prompt
     assert "never invent all_required or another ID" in prompt
 
 
 def test_planner_uses_latest_acp_agent_message_when_provider_retries_output() -> None:
-    valid = _response("clarification", [{
-        "question": "What should be debugged?",
-        "rationale": "The request is underspecified.",
-        "answer_type": "string",
-        "options": [],
-        "blocking": True,
-    }])
+    valid = _response(
+        "clarification",
+        [
+            {
+                "question": "What should be debugged?",
+                "rationale": "The request is underspecified.",
+                "answer_type": "string",
+                "options": [],
+                "blocking": True,
+            }
+        ],
+    )
     notifications = (
         {
             "method": "session/update",
@@ -929,7 +963,7 @@ def test_planner_uses_latest_acp_agent_message_when_provider_retries_output() ->
                 "update": {
                     "sessionUpdate": "agent_message_chunk",
                     "messageId": "old-message",
-                    "content": {"type": "text", "text": "{\"result_type\":\"proposal\"}"},
+                    "content": {"type": "text", "text": '{"result_type":"proposal"}'},
                 },
             },
         },
@@ -946,7 +980,9 @@ def test_planner_uses_latest_acp_agent_message_when_provider_retries_output() ->
         },
     )
 
-    assert _response_text(notifications, session_id="session", prompt_result={}) == valid
+    assert (
+        _response_text(notifications, session_id="session", prompt_result={}) == valid
+    )
 
 
 def test_planner_parses_proposal_and_usage_and_cleans_temp_directory(
@@ -1225,7 +1261,9 @@ def test_planner_canonicalizes_v6_verification_checks_from_system_environment(
     assert integration.checks[0].to_mapping() == configured_check
 
 
-def test_v6_planner_prompt_exposes_system_owned_result_integration_environment() -> None:
+def test_v6_planner_prompt_exposes_system_owned_result_integration_environment() -> (
+    None
+):
     planner_input, _ = _planner_input()
     from .test_result_plan_versions import v6_profile_snapshot
 
@@ -1261,7 +1299,9 @@ def test_v6_planner_prompt_exposes_system_owned_result_integration_environment()
     prompt = _planner_prompt(planner_input)
 
     assert '"result_integration_environment"' in prompt
-    assert "SIDERA canonicalizes these system-owned fields before confirmation" in prompt
+    assert (
+        "SIDERA canonicalizes these system-owned fields before confirmation" in prompt
+    )
     assert "exactly one check per integration spec" in prompt
     assert "verification environment" in prompt
 
@@ -1327,7 +1367,9 @@ def test_v6_planner_prompt_maps_required_sources_to_input_group_cardinality(
 
     assert "Every explicitly required source must be selected" in prompt
     assert "minimum_count must equal the candidate count" in prompt
-    assert "Only use a smaller minimum_count when the brief permits alternatives" in prompt
+    assert (
+        "Only use a smaller minimum_count when the brief permits alternatives" in prompt
+    )
 
 
 def test_v6_shape_hint_requires_enabled_result_input_groups() -> None:

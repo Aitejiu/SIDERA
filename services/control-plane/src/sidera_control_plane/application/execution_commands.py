@@ -1,10 +1,11 @@
 from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sidera_control_plane.application.code_result_capture import (
-    code_capture_operation_id,
+    capture_operation_for_execution,
 )
 from sidera_control_plane.application.context_requests import (
     ExecutionContextAuthorizationError,
@@ -60,6 +61,7 @@ from sidera_control_plane.domain.inputs import ExecutionInput
 from sidera_control_plane.domain.lease import AssignmentLease
 from sidera_control_plane.domain.plan_normalization import PlanNormalizer
 from sidera_control_plane.domain.plans import TaskPlanSnapshot
+from sidera_control_plane.domain.session_observation import session_observation_matches
 from sidera_control_plane.domain.task import TaskStatus
 from sidera_control_plane.domain.worker_item import WorkerItem, WorkerItemStatus
 
@@ -1032,6 +1034,10 @@ class ExecutionCommandHandler:
         )
 
 
+class InputReconciliationRequired(InvalidTransition):
+    code = "input_reconciliation_required"
+
+
 class ExecutionInputCommandHandler:
     command_types = frozenset(
         {
@@ -1042,12 +1048,200 @@ class ExecutionInputCommandHandler:
         }
     )
 
-    def __init__(self, clock: Callable[[], datetime]) -> None:
+    def __init__(
+        self,
+        clock: Callable[[], datetime],
+        *,
+        identity=None,
+        native_services=None,
+    ) -> None:
         self._clock = clock
+        self._identity = identity
+        self._native_services = native_services
+
+    def preflight(self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope) -> None:
+        if envelope.command_type not in self.command_types:
+            return
+        from sidera_agents.errors import AgentError
+
+        from sidera_control_plane.application.assignments import (
+            require_trusted_assignment_identity,
+        )
+        from sidera_control_plane.application.execution_authority import (
+            ExecutionAuthorityReader,
+        )
+        from sidera_control_plane.domain.agent_bindings import AssignmentDenied
+
+        if envelope.target_type != "execution_session" or envelope.target_id is None:
+            raise ValidationError("input commands require an execution_session target")
+        context = envelope.payload.get("context", {})
+        if envelope.command_type == "SendExecutionInput" and (
+            _required_uuid(context, "session_id") != envelope.target_id
+        ):
+            raise ExecutionContextChanged(
+                ("session_id",), current={"session_id": str(envelope.target_id)}
+            )
+        session = uow.sessions.get_any(envelope.target_id, envelope.workspace_id)
+        if session is None:
+            raise NotFound("original execution session unavailable")
+        repository = getattr(uow, "execution_authorities", None)
+        link = (
+            None
+            if session is None or repository is None
+            else repository.get_link(envelope.workspace_id, session.execution_id)
+        )
+        native_requested = (
+            isinstance(context, Mapping)
+            and context.get("execution_mode") == "native_profile"
+        )
+        if link is None:
+            if native_requested:
+                raise AssignmentDenied("original native input authority unavailable")
+            return
+        identity = self._identity
+        services = self._native_services
+        if (
+            identity is None
+            or services is None
+            or (services.principal_id != identity.principal_id)
+        ):
+            raise AssignmentDenied("trusted native input services required")
+        require_trusted_assignment_identity(envelope, identity)
+        if envelope.command_type == "SendExecutionInput" and (
+            not native_requested
+            or context.get("binding_version") != link.binding_version
+            or _required_uuid(context, "run_id") != link.run_id
+            or _required_uuid(context, "execution_id") != link.execution_id
+            or _required_uuid(context, "session_id") != session.id
+            or _required_uuid(context, "worker_id") != session.worker_id
+            or session.adapter_session_id != f"agent-run:{link.run_id}"
+        ):
+            raise AssignmentDenied("original native input binding changed")
+        if envelope.command_type == "SendExecutionInput":
+            address = _required_context(envelope.payload)
+            execution = uow.executions.get(link.execution_id, envelope.workspace_id)
+            if (
+                execution is None
+                or address["worker_item_id"] != execution.worker_item_id
+            ):
+                raise AssignmentDenied("original native execution unavailable")
+        else:
+            client_key = _required_str(envelope.payload, "client_idempotency_key")
+            item = uow.execution_inputs.find_by_client_idempotency_key(
+                session.id, envelope.workspace_id, client_key
+            )
+            if item is None or (
+                item.execution_id != link.execution_id
+                or _required_uuid(envelope.payload, "execution_id") != link.execution_id
+            ):
+                raise AssignmentDenied("original native input association unavailable")
+        reader = ExecutionAuthorityReader(
+            lambda: nullcontext(uow),
+            principal=lambda: identity.principal_id,
+            authorizer=services.authorizer,
+            clock=self._clock,
+        )
+        try:
+            reader.require_input_command_scope(link.authority_id, link.workspace_id)
+        except AgentError:
+            raise AssignmentDenied(
+                "original native input command scope denied"
+            ) from None
+
+    def _require_native_input_admission(
+        self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
+    ) -> None:
+        from sidera_agents.errors import AgentError
+
+        from sidera_control_plane.application.execution_authority import (
+            ExecutionAuthorityReader,
+        )
+        from sidera_control_plane.domain.agent_bindings import AssignmentDenied
+
+        repository = getattr(uow, "execution_authorities", None)
+        if envelope.target_id is None:
+            return
+        session = uow.sessions.get_any(envelope.target_id, envelope.workspace_id)
+        if session is None:
+            return
+        link = (
+            None
+            if repository is None
+            else repository.get_link(envelope.workspace_id, session.execution_id)
+        )
+        if link is None:
+            return
+        identity = self._identity
+        services = self._native_services
+        if identity is None or services is None:
+            raise AssignmentDenied("trusted native input services required")
+        if envelope.command_type == "SendExecutionInput":
+            address = _required_context(envelope.payload)
+            execution = uow.executions.get(session.execution_id, envelope.workspace_id)
+            if execution is None or execution.worker_item_id is None:
+                raise AssignmentDenied("original native execution unavailable")
+            worker_item = uow.worker_items.get(
+                execution.worker_item_id, envelope.workspace_id
+            )
+            binding = uow.bindings.get_for_execution(
+                execution.id, envelope.workspace_id
+            )
+            changed, current = _execution_context_mismatches(
+                context=address,
+                snapshot=None,
+                placement=(
+                    None
+                    if worker_item is None
+                    else uow.worker_items.get_current_placement(
+                        worker_item.id, envelope.workspace_id
+                    )
+                ),
+                worker_item=worker_item,
+                execution=execution,
+                session=session,
+                binding_worker_id=None if binding is None else binding.worker_id,
+                worker_loaded=uow.workers.get(session.worker_id, envelope.workspace_id)
+                is not None,
+            )
+            if changed:
+                raise ExecutionContextChanged(changed, current=current)
+            if envelope.expected_version is None:
+                raise ValidationError("mutation commands require expected_version")
+            if "session_last_sequence" in address:
+                if envelope.expected_version != address["session_version"]:
+                    raise VersionConflict(
+                        envelope.expected_version, cast(int, address["session_version"])
+                    )
+            elif envelope.expected_version != session.version:
+                raise VersionConflict(envelope.expected_version, session.version)
+        reader = ExecutionAuthorityReader(
+            lambda: nullcontext(uow),
+            principal=lambda: identity.principal_id,
+            authorizer=services.authorizer,
+            clock=self._clock,
+        )
+        try:
+            reader.require(link.authority_id, "run.input", link.workspace_id)
+            snapshot = services.execution.get_run(
+                link.workspace_id, link.run_id, grant_id=link.authority_id
+            )
+            if (
+                snapshot.workspace_id != link.workspace_id
+                or snapshot.run_id != link.run_id
+                or snapshot.profile_ref != link.profile_ref
+                or not snapshot.input_open
+                or snapshot.state.value not in {"running", "idle"}
+            ):
+                raise AssignmentDenied("original native input is closed")
+            reader.require(link.authority_id, "run.input", link.workspace_id)
+        except AgentError:
+            raise AssignmentDenied("native input authority denied") from None
 
     def handle(
         self, uow: ControlPlaneUnitOfWork, envelope: CommandEnvelope
     ) -> CommandResult:
+        self.preflight(uow, envelope)
+        self._require_native_input_admission(uow, envelope)
         if envelope.command_type == "SendExecutionInput":
             return self._send(uow, envelope)
         session = self._load_session(uow, envelope)
@@ -1072,6 +1266,18 @@ class ExecutionInputCommandHandler:
             item.cancel(now=self._clock())
             event_type = "ExecutionInputCanceled"
         else:
+            authorities = getattr(uow, "execution_authorities", None)
+            if (
+                item.operation_id is not None
+                and authorities is not None
+                and (
+                    authorities.get_link(item.workspace_id, item.execution_id)
+                    is not None
+                )
+            ):
+                raise InputReconciliationRequired(
+                    "original native input requires reconciliation"
+                )
             item.retry_blocked()
             event_type = "ExecutionInputRetryQueued"
         uow.execution_inputs.save(item, previous_version)
@@ -1091,6 +1297,14 @@ class ExecutionInputCommandHandler:
         context_session_id = cast(UUID, context["session_id"])
         context_worker_item_id = cast(UUID, context["worker_item_id"])
         _validate_input_target(envelope, context_session_id)
+        if (
+            "session_last_sequence" in context
+            and envelope.expected_version != context["session_version"]
+        ):
+            raise VersionConflict(
+                cast(int, envelope.expected_version),
+                cast(int, context["session_version"]),
+            )
 
         # Discover the Session without a lock, then keep the execution/root-task
         # lock order aligned with plan publication before revalidating the Session.
@@ -1194,7 +1408,9 @@ class ExecutionInputCommandHandler:
                 event_ids=(),
             )
         terminal_operation = uow.results.get_operation(
-            code_capture_operation_id(execution.id),
+            capture_operation_for_execution(
+                uow, workspace_id=execution.workspace_id, execution_id=execution.id
+            ),
             envelope.workspace_id,
             for_update=True,
         )
@@ -1620,7 +1836,7 @@ def _required_context(payload: dict[str, Any]) -> dict[str, UUID | int]:
     if not isinstance(raw_context, Mapping):
         raise ValidationError("context is required for SendExecutionInput")
     context = cast(Mapping[str, Any], raw_context)
-    return {
+    address: dict[str, UUID | int] = {
         "worker_item_id": _required_uuid(context, "worker_item_id"),
         "plan_generation": _required_positive_int(context, "plan_generation"),
         "context_version": _required_positive_int(context, "context_version"),
@@ -1629,6 +1845,15 @@ def _required_context(payload: dict[str, Any]) -> dict[str, UUID | int]:
         "session_version": _required_positive_int(context, "session_version"),
         "worker_id": _required_uuid(context, "worker_id"),
     }
+    if (
+        context.get("execution_mode") == "native_profile"
+        and context.get("session_last_sequence") is not None
+    ):
+        sequence = _required_int(context, "session_last_sequence")
+        if sequence < 0 or sequence >= cast(int, address["session_version"]):
+            raise ValidationError("Session sequence must be less than its version")
+        address["session_last_sequence"] = sequence
+    return address
 
 
 def _context_payload(context: Mapping[str, UUID | int]) -> dict[str, str]:
@@ -1704,7 +1929,17 @@ def _execution_context_mismatches(
         changed.add("execution_id")
     if context["session_id"] != session.id:
         changed.add("session_id")
-    if context["session_version"] != session.version:
+    session_matches = (
+        session_observation_matches(
+            expected_version=cast(int, context["session_version"]),
+            expected_last_sequence=cast(int, context["session_last_sequence"]),
+            current_version=session.version,
+            current_last_sequence=session.last_sequence,
+        )
+        if "session_last_sequence" in context
+        else context["session_version"] == session.version
+    )
+    if not session_matches:
         changed.add("session_version")
     return tuple(field for field in _CONTEXT_FIELDS if field in changed), current
 

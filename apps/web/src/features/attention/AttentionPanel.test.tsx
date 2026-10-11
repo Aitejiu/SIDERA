@@ -1,13 +1,16 @@
-import { render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { useState } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { server } from "@/test/server";
 
 import { AttentionPanel } from "./AttentionPanel";
+import { useNativeAttentionAcknowledgement } from "./useNativeAttentionAcknowledgement";
+import type { CommandRequest } from "../assignments/types";
 
 const WORKSPACE_ID = "20000000-0000-0000-0000-000000000001";
 const ROOT_TASK_ID = "30000000-0000-0000-0000-000000000001";
@@ -43,7 +46,71 @@ function RefreshingAttentionPanel() {
   );
 }
 
+function NativePanel({ item = ITEM, onAcknowledged }: { item?: typeof ITEM; onAcknowledged: () => void }) {
+  const action = useNativeAttentionAcknowledgement({ workspaceId: WORKSPACE_ID, rootTaskId: ROOT_TASK_ID, onRefresh: async () => undefined });
+  return <AttentionPanel workspaceId={WORKSPACE_ID} rootTaskId={ROOT_TASK_ID} rootTaskVersion={11}
+    items={[item]} nativeAction={action} onAcknowledged={onAcknowledged} />;
+}
+
+function nativeHandlers(kind = "mapped") {
+  const posted: CommandRequest[] = [];
+  server.use(
+    http.get("/main-agent/v1/health", () => HttpResponse.json({ status: "ok", service: "sidera-product" })),
+    http.get("/product/v1/session", () => HttpResponse.json({ session_id: "operator-session", workspace_id: WORKSPACE_ID, principal_id: "operator", expires_at: "2099-01-01T00:00:00Z" })),
+    http.get(`/api/v1/tasks/${ROOT_TASK_ID}`, () => HttpResponse.json({
+      id: ROOT_TASK_ID, workspace_id: WORKSPACE_ID, version: 11, title: "Task", description: "Review", acceptance_criteria: [],
+      requested_by: "operator", priority: 1, status: "running", created_at: "2026-10-07T00:00:00Z", updated_at: "2026-10-07T00:00:00Z",
+    })),
+    http.get(`/api/v1/tasks/${ROOT_TASK_ID}/graph`, () => HttpResponse.json({ schema_version: 1, nodes: [], edges: [], milestones: [], overview: {
+      schema_version: 1, workspace_id: WORKSPACE_ID, root_task_id: ROOT_TASK_ID, title: "Task", goal_summary: "Review", plan_snapshot_id: ROOT_TASK_ID,
+      generation: 1, acceptance_refs: [], current_milestone_key: null, subtask_count: 0, planned_subtask_count: 0,
+      running_subtask_count: 0, completed_subtask_count: 0, failed_subtask_count: 0, handoff_blocked_count: 0,
+      handoff_running_count: 0, next_subtask_keys: [], attention_items: [ITEM], last_change_cursor: 1, as_of: "2026-10-07T00:00:00Z",
+    } })),
+    http.post("/api/v1/commands", async ({ request }) => {
+      const command = await request.json() as CommandRequest; posted.push(command);
+      return kind === "lost" ? HttpResponse.error() : HttpResponse.json({ command_id: kind === "foreign" ? ITEM.correlation_id : command.command_id,
+        aggregate_id: ROOT_TASK_ID, aggregate_version: kind === "wrong-version" ? 12 : 11, event_ids: [], data: {} });
+    }),
+  );
+  return posted;
+}
+
+function mountNative(onAcknowledged: () => void) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const content = (item = ITEM) => <QueryClientProvider client={client}><MemoryRouter><NativePanel item={item} onAcknowledged={onAcknowledged} /></MemoryRouter></QueryClientProvider>;
+  const view = render(content());
+  return { ...view, nextFact: () => view.rerender(content({ ...ITEM, resource_version: 4 })) };
+}
+
 describe("AttentionPanel", () => {
+  beforeEach(() => localStorage.clear());
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each(["lost", "foreign", "wrong-version"])("does not hide a native item or notify its host on %s response", async (kind) => {
+    const posted = nativeHandlers(kind), acknowledged = vi.fn(); mountNative(acknowledged);
+    await waitFor(() => expect(screen.getByRole("button", { name: "确认已处理" })).toBeEnabled());
+    await userEvent.setup().click(screen.getByRole("button", { name: "确认已处理" }));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    await waitFor(() => expect(screen.getByRole("button", { name: "确认已处理" })).toBeDisabled());
+    expect(screen.getByText(ITEM.reason)).toBeVisible(); expect(acknowledged).not.toHaveBeenCalled();
+  });
+
+  it("notifies its host only after real native mapped acknowledgement", async () => {
+    const posted = nativeHandlers(), acknowledged = vi.fn(); mountNative(acknowledged);
+    await waitFor(() => expect(screen.getByRole("button", { name: "确认已处理" })).toBeEnabled());
+    await userEvent.setup().click(screen.getByRole("button", { name: "确认已处理" }));
+    expect(await screen.findByText("当前没有待确认事项")).toBeVisible(); expect(acknowledged).toHaveBeenCalledOnce();
+    expect(posted[0]?.actor).toEqual({ type: "user", id: "operator" });
+  });
+
+  it("hides only the exact acknowledged fact while a new source version remains visible", async () => {
+    nativeHandlers(); const view = mountNative(vi.fn());
+    await waitFor(() => expect(screen.getByRole("button", { name: "确认已处理" })).toBeEnabled());
+    await userEvent.setup().click(screen.getByRole("button", { name: "确认已处理" }));
+    expect(await screen.findByText("当前没有待确认事项")).toBeVisible(); view.nextFact();
+    expect(screen.getByText(ITEM.reason)).toBeVisible(); expect(screen.getByRole("button", { name: "确认已处理" })).toBeVisible();
+  });
   it.each(["title", "reason"])("opens the exact WorkerItem from the %s without acknowledging the item", async (target) => {
     let commands = 0;
     server.use(http.post("/api/v1/commands", () => {

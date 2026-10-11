@@ -6,12 +6,23 @@ import { server } from "@/test/server";
 
 import {
   executeResultInputAction,
+  resultInputActionPayload,
   retryContextAssemblyAction,
 } from "./api";
 
 describe("result input actions", () => {
   beforeEach(() => {
     server.resetHandlers();
+  });
+
+  it("exports the existing payload projection with its fixed approval Selection", () => {
+    const action = workerResultInputsFixture().available_actions[0];
+    if (!action) throw new Error("Missing approval action");
+    expect(resultInputActionPayload(action, "Reviewed")).toEqual({
+      transport: "web", reason: "Reviewed",
+      expected_input_selection_id: "61000000-0000-0000-0000-000000000001",
+      expected_input_selection_hash: "a".repeat(64),
+    });
   });
 
   it("sends the exact context assembly identity from the server view", async () => {

@@ -225,6 +225,28 @@ class ExecutionRequestRepository:
         if not isinstance(result, CursorResult) or result.rowcount != 1:
             raise VersionConflict(previous_version, actual or 0)
 
+    def list_activation_candidates(
+        self, *, status: ExecutionRequestStatus, now: datetime, limit: int
+    ) -> tuple[ExecutionRequest, ...]:
+        if status not in {ExecutionRequestStatus.BLOCKED, ExecutionRequestStatus.READY}:
+            raise ValueError("activation candidates must be BLOCKED or READY")
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        rows = self._session.scalars(
+            select(ExecutionRequestModel)
+            .where(
+                ExecutionRequestModel.status == status.value,
+                ExecutionRequestModel.not_before <= now,
+            )
+            .order_by(
+                ExecutionRequestModel.not_before.asc(),
+                ExecutionRequestModel.created_at.asc(),
+                ExecutionRequestModel.id.asc(),
+            )
+            .limit(limit)
+        ).all()
+        return tuple(_to_request(row) for row in rows)
+
     def claim_ready(self, *, now: datetime, limit: int) -> tuple[ExecutionRequest, ...]:
         rows = self._claim_status(
             status=ExecutionRequestStatus.READY, now=now, limit=limit

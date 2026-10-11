@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from sidera_control_plane.adapters.git_results import RepositoryResolver
+from sidera_control_plane.application.agent_worker_adapter import require_gateway_owner
 from sidera_control_plane.config import Settings
 from sidera_control_plane.gateway_worker import (
     GatewayRuntime,
@@ -137,6 +140,10 @@ class GatewayOwner:
     def gateway(self):
         return self.gateway_runtime.gateway
 
+    def require_owner(self) -> None:
+        if self.owner_lock is not None:
+            require_gateway_owner(self.owner_lock.check)
+
     def close(self) -> None:
         try:
             self.gateway_runtime.close()
@@ -145,7 +152,15 @@ class GatewayOwner:
                 self.owner_lock.close()
 
 
-def build_gateway_owner(settings: Settings) -> GatewayOwner:
+def build_gateway_owner(
+    settings: Settings,
+    *,
+    native_services=None,
+    use_acceptance_guard: bool = True,
+    assignment_claim_check: Callable[[], bool] | None = None,
+    repository_resolver: RepositoryResolver | None = None,
+    repository_refs: Callable[[], Sequence[str]] | None = None,
+) -> GatewayOwner:
     """Build all native consumers around exactly one GatewayRuntime."""
 
     lock_database = Database(settings.database_url)
@@ -154,13 +169,39 @@ def build_gateway_owner(settings: Settings) -> GatewayOwner:
         owner_lock.close()
         raise GatewayOwnerAlreadyRunning("gateway_owner_already_running")
     gateway_runtime: GatewayRuntime | None = None
+    repository_options = {}
+    if repository_resolver is not None or repository_refs is not None:
+        repository_options = {"repository_resolver": repository_resolver, "repository_refs": repository_refs}
     try:
-        gateway_runtime = build_gateway(settings)
+        gateway_runtime = (
+            build_gateway(
+                settings,
+                owner_check=owner_lock.check,
+                use_acceptance_guard=use_acceptance_guard,
+                assignment_claim_check=assignment_claim_check,
+                **repository_options,
+            )
+            if native_services is None
+            else build_gateway(
+                settings,
+                native_services=native_services,
+                owner_check=owner_lock.check,
+                use_acceptance_guard=use_acceptance_guard,
+                assignment_claim_check=assignment_claim_check,
+                **repository_options,
+            )
+        )
         input_runtime = build_input_dispatcher(
             settings, gateway_runtime=gateway_runtime
         )
-        handoff_runtime = build_handoff_worker(
-            settings, gateway_runtime=gateway_runtime
+        handoff_runtime = (
+            build_handoff_worker(settings, gateway_runtime=gateway_runtime)
+            if native_services is None
+            else build_handoff_worker(
+                settings,
+                gateway_runtime=gateway_runtime,
+                native_services=native_services,
+            )
         )
     except BaseException:
         if gateway_runtime is not None:

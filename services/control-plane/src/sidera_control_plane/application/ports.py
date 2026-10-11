@@ -2,10 +2,12 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from types import TracebackType
 from typing import BinaryIO, Literal, Protocol, Self
 from uuid import UUID
 
+from sidera_agents.contracts import ExecutionWorkspace
 from sqlalchemy.orm import Session
 
 from sidera_control_plane.application.collaboration_projection import CollaborationFacts
@@ -26,6 +28,11 @@ from sidera_control_plane.application.planner_runtime import (
 from sidera_control_plane.application.result_ports import (
     CodeInputReceipt,
     ResultRepositoryPort,
+)
+from sidera_control_plane.domain.agent_bindings import (
+    AgentBinding,
+    AgentExecutionLink,
+    ExecutionAuthority,
 )
 from sidera_control_plane.domain.artifacts import (
     Artifact,
@@ -77,6 +84,7 @@ from sidera_control_plane.domain.execution import Execution, ExecutionSession
 from sidera_control_plane.domain.execution_requests import (
     ExecutionRequest,
     ExecutionRequestDependency,
+    ExecutionRequestStatus,
 )
 from sidera_control_plane.domain.gateway import (
     AdapterEvent,
@@ -135,6 +143,11 @@ from sidera_control_plane.domain.planning import (
     PlanningRun,
     PlanningRunLease,
     ProposalMaterialization,
+    TaskGoalSubmission,
+)
+from sidera_control_plane.domain.planning_authority import (
+    PlanningAgentLink,
+    PlanningAuthority,
 )
 from sidera_control_plane.domain.planning_profiles import PlanningProfile
 from sidera_control_plane.domain.planning_proposals import ProposalRevision
@@ -150,6 +163,12 @@ from sidera_control_plane.domain.workspace import (
     ExecutionSpec,
     ExecutionWorkspaceManifest,
 )
+
+
+class PlanningWorkspaceProvider(Protocol):
+    def prepare(
+        self, *, workspace_id: UUID, planning_run_id: UUID, operation_id: UUID
+    ) -> ExecutionWorkspace: ...
 
 
 class TaskRepositoryPort(Protocol):
@@ -227,6 +246,11 @@ class PlanRepositoryPort(Protocol):
         raise NotImplementedError
 
     def list_roots_with_snapshots(self, workspace_id: UUID) -> tuple[UUID, ...]:
+        raise NotImplementedError
+
+    def list_root_scopes_with_snapshots(
+        self, *, after: tuple[UUID, UUID] | None = None, limit: int = 100
+    ) -> tuple[tuple[UUID, UUID], ...]:
         raise NotImplementedError
 
 
@@ -1016,6 +1040,12 @@ class ExecutionRequestRepositoryPort(Protocol):
         raise NotImplementedError
 
     def save(self, request: ExecutionRequest, previous_version: int) -> None:
+        raise NotImplementedError
+
+    def list_activation_candidates(
+        self, *, status: ExecutionRequestStatus, now: datetime, limit: int
+    ) -> tuple[ExecutionRequest, ...]:
+        """Discover due BLOCKED/READY requests without acquiring row locks."""
         raise NotImplementedError
 
     def claim_ready(self, *, now: datetime, limit: int) -> tuple[ExecutionRequest, ...]:
@@ -1878,6 +1908,9 @@ class SchedulingBlockRepositoryPort(Protocol):
 
 
 class ExecutionBindingRepositoryPort(Protocol):
+    def retire_not_admitted(self, binding: ExecutionBinding, pin) -> None:
+        raise NotImplementedError
+
     def get_for_execution(
         self, execution_id: UUID, workspace_id: UUID, *, for_update: bool = False
     ) -> ExecutionBinding | None:
@@ -1995,6 +2028,22 @@ class EvidenceClaimRepositoryPort(Protocol):
 
 
 class ExecutionInputRepositoryPort(Protocol):
+    def get_by_operation_id(
+        self,
+        operation_id: UUID,
+        workspace_id: UUID,
+        execution_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> ExecutionInput | None:
+        raise NotImplementedError
+
+    def select_pending_native(
+        self, limit: int, *, exclude_ids: tuple[UUID, ...] = ()
+    ) -> tuple[ExecutionInput, ...]:
+        """Select original native actions for queries, without requeueing them."""
+        raise NotImplementedError
+
     def get(
         self, input_id: UUID, workspace_id: UUID, *, for_update: bool = False
     ) -> ExecutionInput | None:
@@ -2161,6 +2210,26 @@ class PlannerAdapter(Protocol):
 
 
 class WorkspaceProvider(Protocol):
+    def refence_not_admitted(
+        self,
+        manifest: ExecutionWorkspaceManifest,
+        *,
+        pin,
+        binding: ExecutionBinding,
+        physical_input: CodeInputReceipt | None,
+        operation_id: UUID,
+    ) -> ExecutionWorkspaceManifest:
+        raise NotImplementedError
+
+    def confirm_not_admitted_refence(
+        self, persisted: ExecutionWorkspaceManifest, *, operation_id: UUID
+    ) -> None:
+        raise NotImplementedError
+
+    def physical_directory(self, manifest: ExecutionWorkspaceManifest) -> Path:
+        """Resolve an exact prepared manifest through provider-owned validation."""
+        raise NotImplementedError
+
     def prepare(
         self, spec: ExecutionSpec, *, operation_id: UUID
     ) -> ExecutionWorkspaceManifest:
@@ -2472,8 +2541,192 @@ class NotificationLedger(Protocol):
 NotificationLedgerPort = NotificationLedger
 
 
+class AgentBindingRepositoryPort(Protocol):
+    def get(
+        self,
+        workspace_id: UUID,
+        target_type: str,
+        target_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> AgentBinding | None:
+        raise NotImplementedError
+
+    def append(self, binding: AgentBinding) -> None:
+        raise NotImplementedError
+
+    def history(
+        self, workspace_id: UUID, target_type: str, target_id: UUID
+    ) -> tuple[AgentBinding, ...]:
+        raise NotImplementedError
+
+    def execution_facts(
+        self, workspace_id: UUID, target_type: str, target_id: UUID
+    ) -> tuple[bool, frozenset[str]]:
+        raise NotImplementedError
+
+    def retirable_intentions(self, workspace_id, target_type, target_id):
+        raise NotImplementedError
+
+
+class ExecutionAuthorityRepositoryPort(Protocol):
+    def list_reconciliation_links(
+        self,
+        workspace_id: UUID | None,
+        *,
+        limit: int = 100,
+        after_execution_id: UUID | None = None,
+    ) -> tuple[AgentExecutionLink, ...]:
+        raise NotImplementedError
+
+    def lock_original_observation(
+        self, expected: AgentExecutionLink, *, principal_id: str
+    ):
+        raise NotImplementedError
+
+    def save_original_observation(
+        self,
+        expected: AgentExecutionLink,
+        *,
+        principal_id: str,
+        event_cursor: int,
+        status: str,
+    ) -> AgentExecutionLink:
+        raise NotImplementedError
+
+    def save_preparation(
+        self, expected, preparation: Mapping[str, object], *, now: datetime
+    ):
+        raise NotImplementedError
+
+    def has_session(self, workspace_id: UUID, execution_id: UUID) -> bool:
+        raise NotImplementedError
+
+    def retirement_proof(self, workspace_id: UUID, execution_id: UUID):
+        raise NotImplementedError
+
+    def lock_unadmitted_original(
+        self, expected: AgentExecutionLink, *, principal_id: str
+    ):
+        raise NotImplementedError
+
+    def cancel_unadmitted_original(
+        self, expected: AgentExecutionLink, *, principal_id: str
+    ) -> AgentExecutionLink:
+        raise NotImplementedError
+
+    def begin_start(self, expected, *, request_sha256: str, now: datetime):
+        raise NotImplementedError
+
+    def record_start(self, expected, receipt, *, now: datetime):
+        raise NotImplementedError
+
+    def lock_intention(
+        self,
+        expected,
+        *,
+        now: datetime | None = None,
+        allow_observation_advance: bool = False,
+    ):
+        raise NotImplementedError
+
+    def append_admission_history(self, pin):
+        raise NotImplementedError
+
+    def remove_archived_link(self, pin):
+        raise NotImplementedError
+
+    def admission_history(self, workspace_id: UUID, execution_id: UUID):
+        raise NotImplementedError
+
+    def list_intentions(self, workspace_id: UUID, *, limit: int = 100):
+        raise NotImplementedError
+
+    def get(
+        self, authority_id: UUID, *, workspace_id: UUID | None = None
+    ) -> ExecutionAuthority | None:
+        raise NotImplementedError
+
+    def add(self, authority: ExecutionAuthority) -> None:
+        raise NotImplementedError
+
+    def revoke(self, authority_id: UUID, workspace_id: UUID) -> None:
+        raise NotImplementedError
+
+    def prepared_location_ref(
+        self, authority_id: UUID, workspace_id: UUID
+    ) -> str | None:
+        raise NotImplementedError
+
+    def add_link(self, link: AgentExecutionLink) -> None:
+        raise NotImplementedError
+
+    def get_link(
+        self,
+        workspace_id: UUID,
+        execution_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> AgentExecutionLink | None:
+        raise NotImplementedError
+
+    def advance_link(
+        self,
+        *,
+        workspace_id: UUID,
+        execution_id: UUID,
+        authority_id: UUID,
+        run_id: UUID | None,
+        event_cursor: int,
+        status: str,
+    ) -> AgentExecutionLink:
+        raise NotImplementedError
+
+
+class PlanningAuthorityRepositoryPort(Protocol):
+    def list_reconciliation_links(
+        self,
+        workspace_id: UUID | None,
+        *,
+        limit: int = 100,
+        after_planning_run_id: UUID | None = None,
+    ) -> tuple[PlanningAgentLink, ...]: ...
+    def save_original_observation(
+        self,
+        expected: PlanningAgentLink,
+        *,
+        event_cursor: int,
+        response_id: UUID | None,
+        closed: bool,
+    ) -> PlanningAgentLink: ...
+    def add(self, authority: PlanningAuthority) -> None: ...
+    def get(
+        self, authority_id: UUID, *, workspace_id: UUID | None = None
+    ) -> PlanningAuthority | None: ...
+    def add_link(self, link: PlanningAgentLink) -> None: ...
+    def get_link(
+        self, workspace_id: UUID, planning_run_id: UUID, *, for_update: bool = False
+    ) -> PlanningAgentLink | None: ...
+    def save_link(
+        self, expected: PlanningAgentLink, **changes: object
+    ) -> PlanningAgentLink: ...
+    def revoke(self, authority_id: UUID, workspace_id: UUID) -> None: ...
+
+
+class TaskGoalRepositoryPort(Protocol):
+    def add(self, submission: "TaskGoalSubmission") -> None: ...
+
+    def get(
+        self, workspace_id: UUID, planning_request_id: UUID, *, for_update: bool = False
+    ) -> "TaskGoalSubmission | None": ...
+
+
 class ControlPlaneUnitOfWork(Protocol):
     session: Session
+    task_goals: TaskGoalRepositoryPort
+    planning_authorities: PlanningAuthorityRepositoryPort
+    agent_bindings: AgentBindingRepositoryPort
+    execution_authorities: ExecutionAuthorityRepositoryPort
     tasks: TaskRepositoryPort
     plans: PlanRepositoryPort
     plan_transitions: PlanTransitionRepositoryPort

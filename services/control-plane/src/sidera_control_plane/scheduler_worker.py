@@ -2,13 +2,18 @@ import argparse
 import json
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from sidera_control_plane.application.agent_worker_adapter import (
+    NativeWorkerServices,
+    require_gateway_owner,
+)
 from sidera_control_plane.application.scheduler import Scheduler, SchedulerRunResult
 from sidera_control_plane.application.worker_policy import LowestCostWorkerPolicy
+from sidera_control_plane.application.worker_runtime import WorkerRuntimeResolver
 from sidera_control_plane.config import Settings
 from sidera_control_plane.persistence.database import Database
 from sidera_control_plane.persistence.unit_of_work import SqlAlchemyUnitOfWork
@@ -20,17 +25,33 @@ class SchedulerRuntime:
     database: Database
 
 
-def build_scheduler(settings: Settings) -> SchedulerRuntime:
+def build_scheduler(
+    settings: Settings,
+    *,
+    owner_check: Callable[[], bool] | None = None,
+    native_services: NativeWorkerServices | None = None,
+) -> SchedulerRuntime:
     database = Database(settings.database_url)
+
+    def uow_factory() -> SqlAlchemyUnitOfWork:
+        require_gateway_owner(owner_check)
+        return SqlAlchemyUnitOfWork(
+            database,
+            before_commit=None
+            if owner_check is None
+            else lambda: require_gateway_owner(owner_check),
+        )
+
     try:
         scheduler = Scheduler(
-            uow_factory=lambda: SqlAlchemyUnitOfWork(database),
+            uow_factory=uow_factory,
             policy=LowestCostWorkerPolicy(),
             clock=lambda: datetime.now(UTC),
             assignment_lease_seconds=settings.assignment_lease_seconds,
             worker_heartbeat_timeout_seconds=settings.worker_heartbeat_timeout_seconds,
             context_enforcement=True,
             context_package_cutover_at=settings.context_package_cutover_at,
+            runtime_resolver=None if native_services is None else WorkerRuntimeResolver(native_services=native_services),
         )
     except BaseException:
         database.dispose()

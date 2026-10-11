@@ -285,6 +285,55 @@ class ExecutionBindingRepository:
         row = self._session.scalar(statement)
         return _to_domain_binding(row) if row is not None else None
 
+    def retire_not_admitted(self, binding, pin):
+        import json
+        from dataclasses import asdict
+
+        from sqlalchemy import delete
+
+        from sidera_control_plane.domain.agent_bindings import AssignmentDenied
+        from sidera_control_plane.persistence.execution_authority_repository import (
+            ExecutionAuthorityRepository,
+        )
+
+        authorities = ExecutionAuthorityRepository(self._session)
+        current = self.get_for_execution(
+            binding.execution_id, binding.workspace_id, for_update=True
+        )
+        snapshot = json.loads(json.dumps(asdict(binding), default=str))
+        if (
+            current != binding
+            or not pin.link.not_admitted
+            or pin.execution_binding_snapshot != snapshot
+            or (
+                binding.workspace_id,
+                binding.execution_id,
+                binding.lease_id,
+                binding.fencing_token,
+            )
+            != (
+                pin.link.workspace_id,
+                pin.link.execution_id,
+                pin.lease_id,
+                pin.fencing_token,
+            )
+            or authorities.get_link(binding.workspace_id, binding.execution_id)
+            != pin.link
+            or authorities.has_session(binding.workspace_id, binding.execution_id)
+            or pin
+            not in authorities.admission_history(
+                binding.workspace_id, binding.execution_id
+            )
+        ):
+            raise AssignmentDenied("only an archived BUSY binding can retire")
+        self._session.execute(
+            delete(ExecutionBindingModel).where(
+                ExecutionBindingModel.id == binding.id,
+                ExecutionBindingModel.version == binding.version,
+                ExecutionBindingModel.lease_id == pin.lease_id,
+            )
+        )
+
     def add(self, binding: ExecutionBinding) -> None:
         self._session.add(
             ExecutionBindingModel(

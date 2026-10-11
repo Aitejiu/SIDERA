@@ -10,22 +10,35 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 PROJECTS = {
+    "sidera-agents": "packages/agents",
     "sidera-runtime-guard": "packages/runtime-guard",
     "sidera-control-plane-client": "packages/control-plane-client",
     "sidera-control-plane": "services/control-plane",
     "sidera-akashic-task-bridge": "integrations/akashic",
     "sidera-main-agent-gateway": "services/main-agent-gateway",
+    "sidera-product": "apps/server",
+    "sidera-model-connections": "packages/model-connections",
 }
 REQUIREMENTS = {
+    "agents-core": "sidera-agents==0.1.0",
     "control-plane-core": "sidera-control-plane==0.1.0",
+    "control-plane-agents": "sidera-control-plane==0.1.0",
     "public-client": "sidera-control-plane-client==0.1.0",
     "gateway-core": "sidera-main-agent-gateway==0.1.0",
     "bridge-client": "sidera-akashic-task-bridge==0.1.0",
     "gateway-demo": "sidera-main-agent-gateway[demo]==0.1.0",
+    "native-product": "sidera-product==0.1.0",
 }
 COMBINATION_PROJECTS = {
+    "agents-core": ("sidera-agents",),
     "control-plane-core": (
         "sidera-control-plane",
+        "sidera-agents",
+        "sidera-runtime-guard",
+    ),
+    "control-plane-agents": (
+        "sidera-control-plane",
+        "sidera-agents",
         "sidera-runtime-guard",
     ),
     "public-client": ("sidera-control-plane-client",),
@@ -43,19 +56,51 @@ COMBINATION_PROJECTS = {
         "sidera-control-plane-client",
         "sidera-runtime-guard",
     ),
+    "native-product": (
+        "sidera-product",
+        "sidera-agents",
+        "sidera-control-plane",
+        "sidera-control-plane-client",
+        "sidera-model-connections",
+        "sidera-runtime-guard",
+    ),
 }
 SOURCE_ROOTS = {
+    "sidera-agents": "packages/agents/src",
     "sidera-runtime-guard": "packages/runtime-guard/src",
     "sidera-control-plane-client": "packages/control-plane-client/src",
     "sidera-control-plane": "services/control-plane/src",
     "sidera-akashic-task-bridge": "integrations/akashic/sidera_task_bridge",
     "sidera-main-agent-gateway": "services/main-agent-gateway/src",
+    "sidera-product": "apps/server/src",
+    "sidera-model-connections": "packages/model-connections/src",
 }
 ABSENT_MODULES = {
+    "agents-core": (
+        "sidera_control_plane",
+        "sidera_control_plane_client",
+        "sidera_product",
+        "sidera_main_agent_gateway",
+        "sidera_task_bridge",
+        "sidera_runtime_guard",
+        "akashic_sdk",
+        "sqlalchemy",
+        "alembic",
+        "psycopg",
+        "openai",
+        "anthropic",
+    ),
     "control-plane-core": (
         "akashic_sdk",
         "sidera_task_bridge",
         "sidera_main_agent_gateway",
+        "sidera_control_plane_client",
+    ),
+    "control-plane-agents": (
+        "akashic_sdk",
+        "sidera_task_bridge",
+        "sidera_main_agent_gateway",
+        "sidera_product",
         "sidera_control_plane_client",
     ),
     "public-client": (
@@ -78,12 +123,39 @@ ABSENT_MODULES = {
         "sidera_main_agent_gateway",
     ),
     "gateway-demo": ("akashic_sdk", "sidera_control_plane"),
+    "native-product": (
+        "akashic_sdk",
+        "sidera_task_bridge",
+        "sidera_main_agent_gateway",
+    ),
 }
 ABSENT_DISTRIBUTIONS = {
+    "agents-core": (
+        "sidera-control-plane",
+        "sidera-control-plane-client",
+        "sidera-product",
+        "sidera-main-agent-gateway",
+        "sidera-akashic-task-bridge",
+        "sidera-runtime-guard",
+        "akashic-agent-sdk",
+        "sqlalchemy",
+        "alembic",
+        "psycopg",
+        "psycopg-binary",
+        "openai",
+        "anthropic",
+    ),
     "control-plane-core": (
         "akashic-agent-sdk",
         "sidera-akashic-task-bridge",
         "sidera-main-agent-gateway",
+        "sidera-control-plane-client",
+    ),
+    "control-plane-agents": (
+        "akashic-agent-sdk",
+        "sidera-akashic-task-bridge",
+        "sidera-main-agent-gateway",
+        "sidera-product",
         "sidera-control-plane-client",
     ),
     "public-client": (
@@ -107,10 +179,15 @@ ABSENT_DISTRIBUTIONS = {
         "sidera-main-agent-gateway",
     ),
     "gateway-demo": ("akashic-agent-sdk", "sidera-control-plane"),
+    "native-product": (
+        "akashic-agent-sdk",
+        "sidera-akashic-task-bridge",
+        "sidera-main-agent-gateway",
+    ),
 }
 
 
-PROVENANCE_HELPER_SOURCE = r'''
+PROVENANCE_HELPER_SOURCE = r"""
 import base64
 import csv
 import hashlib
@@ -169,21 +246,27 @@ def wheel_record_matches(wheel_path, installed_root):
             return checked > 0 and has_python and has_metadata
     except (OSError, ValueError, zipfile.BadZipFile, csv.Error):
         return False
-'''
+"""
 
 
-PROBE_SOURCE = PROVENANCE_HELPER_SOURCE + r'''
+PROBE_SOURCE = (
+    PROVENANCE_HELPER_SOURCE
+    + r"""
 import asyncio
+from configparser import ConfigParser
 import importlib
 import importlib.metadata as metadata
 import importlib.util
+from importlib.resources import files
 import json
 import re
 import sys
 from pathlib import Path
 
 PROJECTS = {
-    "control-plane-core": ("sidera-control-plane", "sidera-runtime-guard"),
+    "agents-core": ("sidera-agents",),
+    "control-plane-core": ("sidera-control-plane", "sidera-agents", "sidera-runtime-guard"),
+    "control-plane-agents": ("sidera-control-plane", "sidera-agents", "sidera-runtime-guard"),
     "public-client": ("sidera-control-plane-client",),
     "gateway-core": ("sidera-main-agent-gateway", "sidera-runtime-guard"),
     "bridge-client": ("sidera-akashic-task-bridge", "sidera-control-plane-client"),
@@ -193,11 +276,24 @@ PROJECTS = {
         "sidera-control-plane-client",
         "sidera-runtime-guard",
     ),
+    "native-product": (
+        "sidera-product", "sidera-agents", "sidera-control-plane",
+        "sidera-control-plane-client", "sidera-model-connections", "sidera-runtime-guard",
+    ),
 }
 ABSENT_MODULES = {
+    "agents-core": (
+        "sidera_control_plane", "sidera_control_plane_client", "sidera_product",
+        "sidera_main_agent_gateway", "sidera_task_bridge", "sidera_runtime_guard",
+        "akashic_sdk", "sqlalchemy", "alembic", "psycopg", "openai", "anthropic",
+    ),
     "control-plane-core": (
         "akashic_sdk", "sidera_task_bridge", "sidera_main_agent_gateway",
         "sidera_control_plane_client",
+    ),
+    "control-plane-agents": (
+        "akashic_sdk", "sidera_task_bridge", "sidera_main_agent_gateway",
+        "sidera_product", "sidera_control_plane_client",
     ),
     "public-client": (
         "sidera_control_plane", "sqlalchemy", "alembic", "psycopg",
@@ -210,10 +306,23 @@ ABSENT_MODULES = {
         "akashic_sdk", "sidera_control_plane", "sidera_main_agent_gateway",
     ),
     "gateway-demo": ("akashic_sdk", "sidera_control_plane"),
+    "native-product": (
+        "akashic_sdk", "sidera_task_bridge", "sidera_main_agent_gateway",
+    ),
 }
 ABSENT_DISTRIBUTIONS = {
+    "agents-core": (
+        "sidera-control-plane", "sidera-control-plane-client", "sidera-product",
+        "sidera-main-agent-gateway", "sidera-akashic-task-bridge", "sidera-runtime-guard",
+        "akashic-agent-sdk", "sqlalchemy", "alembic", "psycopg", "psycopg-binary",
+        "openai", "anthropic",
+    ),
     "control-plane-core": (
         "akashic-agent-sdk", "sidera-akashic-task-bridge",
+        "sidera-main-agent-gateway", "sidera-control-plane-client",
+    ),
+    "control-plane-agents": (
+        "akashic-agent-sdk", "sidera-akashic-task-bridge", "sidera-product",
         "sidera-main-agent-gateway", "sidera-control-plane-client",
     ),
     "public-client": (
@@ -228,6 +337,9 @@ ABSENT_DISTRIBUTIONS = {
         "akashic-agent-sdk", "sidera-control-plane", "sidera-main-agent-gateway",
     ),
     "gateway-demo": ("akashic-agent-sdk", "sidera-control-plane"),
+    "native-product": (
+        "akashic-agent-sdk", "sidera-akashic-task-bridge", "sidera-main-agent-gateway",
+    ),
 }
 
 class ProbeFailure(Exception):
@@ -247,6 +359,56 @@ def _module_available(name):
 def _normalized_distribution(name):
     return re.sub(r"[-_.]+", "-", name).lower()
 
+def _probe_agents_core():
+    forbidden = (
+        "sidera_agents.postgres", "sidera_agents.harnesses.opencode",
+        "sidera_agents.harnesses.opencode_config", "sidera_agents.harnesses.opencode_descriptor",
+        "sidera_agents.harnesses.acp_transport",
+    )
+    if any(
+        module == prefix or module.startswith(prefix + ".")
+        for module in sys.modules for prefix in forbidden
+    ):
+        raise ProbeFailure("dependency_boundary_failed")
+    installed = Path(metadata.distribution("sidera-agents").locate_file("")).resolve()
+    if not installed.is_relative_to(Path(sys.prefix).resolve()):
+        raise ProbeFailure("dependency_boundary_failed")
+    for name in (
+        "sidera_agents", "sidera_agents.api", "sidera_agents.bootstrap",
+        "sidera_agents.contracts", "sidera_agents.errors", "sidera_agents.ports",
+    ):
+        module = importlib.import_module(name)
+        origin = getattr(module, "__file__", None)
+        if not origin or not Path(origin).resolve().is_relative_to(installed):
+            raise ProbeFailure("dependency_boundary_failed")
+    package = Path(str(files("sidera_agents"))).resolve()
+    if not package.is_relative_to(installed):
+        raise ProbeFailure("dependency_boundary_failed")
+    config = ConfigParser(defaults={"here": str(package)})
+    config.read_string((package / "alembic.ini").read_text(encoding="utf-8"))
+    migrations = Path(config.get("alembic", "script_location")).resolve()
+    if not migrations.is_relative_to(package) or any(
+        not (migrations / relative).is_file() for relative in (
+            "env.py", "versions/0001_agent_catalog.py", "versions/0002_runtime_catalog.py",
+            "versions/0003_agent_runs_operations.py", "versions/0004_inputs_events.py",
+        )
+    ):
+        raise ProbeFailure("dependency_boundary_failed")
+    consumer = {"__name__": "installed_agents_consumer"}
+    exec(compile(sys.argv[3], "standalone-public-consumer", "exec"), consumer)
+    if consumer["main"]() != {
+        "harness_id": "fixture-harness", "state": "completed",
+        "messages": ["Fixture response."], "closed": True,
+        "profile_status": {"enabled": False, "version": 2},
+        "resource_status": {"enabled": False, "version": 2},
+    }:
+        raise ProbeFailure("probe_failed")
+    if any(
+        module == prefix or module.startswith(prefix + ".")
+        for module in sys.modules for prefix in forbidden
+    ):
+        raise ProbeFailure("dependency_boundary_failed")
+
 def _probe_control_plane_core():
     from fastapi.testclient import TestClient
     from sidera_control_plane.adapters.fake_worker import FakeWorkerAdapter
@@ -264,6 +426,243 @@ def _probe_control_plane_core():
         "/api/v1/commands",
     } <= paths.keys():
         raise ProbeFailure("probe_failed")
+
+def _probe_control_plane_agents():
+    from fastapi.testclient import TestClient
+    from sidera_control_plane.composition.native_runtime import create_control_plane_runtime
+    from sidera_control_plane.config import Settings
+
+    forbidden = (
+        "sidera_agents.postgres", "sidera_agents.harnesses.opencode",
+        "sidera_agents.harnesses.acp_transport", "sidera_agents.harnesses.opencode_config",
+        "sidera_agents.harnesses.opencode_descriptor",
+        "sidera_control_plane.adapters.opencode_acp", "sidera_control_plane.adapters.opencode_planner",
+        "sidera_control_plane.adapters.dsh_acp", "sidera_control_plane.adapters.acp_process",
+    )
+    if any(module == prefix or module.startswith(prefix + ".") for module in sys.modules for prefix in forbidden):
+        raise ProbeFailure("dependency_boundary_failed")
+    for distribution, modules in (
+        ("sidera-control-plane", ("sidera_control_plane", "sidera_control_plane.composition.native_runtime")),
+        ("sidera-agents", ("sidera_agents", "sidera_agents.api", "sidera_agents.contracts", "sidera_agents.ports")),
+    ):
+        installed = Path(metadata.distribution(distribution).locate_file("")).resolve()
+        if not installed.is_relative_to(Path(sys.prefix).resolve()):
+            raise ProbeFailure("dependency_boundary_failed")
+        for name in modules:
+            origin = getattr(importlib.import_module(name), "__file__", None)
+            if not origin or not Path(origin).resolve().is_relative_to(installed):
+                raise ProbeFailure("dependency_boundary_failed")
+    package = Path(str(files("sidera_control_plane"))).resolve()
+    installed = Path(metadata.distribution("sidera-control-plane").locate_file("")).resolve()
+    if not package.is_relative_to(installed):
+        raise ProbeFailure("dependency_boundary_failed")
+    config = ConfigParser(defaults={"here": str(package)})
+    config.read_string((package / "alembic.ini").read_text(encoding="utf-8"))
+    migrations = Path(config.get("alembic", "script_location")).resolve()
+    if not migrations.is_relative_to(package) or not (migrations / "env.py").is_file() or not tuple((migrations / "versions").glob("*.py")):
+        raise ProbeFailure("dependency_boundary_failed")
+    class UnusedPublicPorts:
+        def __getattr__(self, name):
+            raise ProbeFailure("probe_failed")
+    ports = UnusedPublicPorts()
+    runtime = create_control_plane_runtime(
+        Settings(database_url="postgresql+psycopg://unused@/unused?host=/private/tmp/unused"),
+        ports, ports, ports, ports,
+    )
+    try:
+        reader = runtime.context_source_reader
+        if reader is ports or reader is not runtime.context_source_reader:
+            raise ProbeFailure("probe_failed")
+        if not all(callable(getattr(runtime, name)) for name in ("start_background", "close", "migrate", "readiness", "configure_workspace")):
+            raise ProbeFailure("probe_failed")
+        with TestClient(runtime.app) as client:
+            if client.get("/healthz").status_code != 200:
+                raise ProbeFailure("probe_failed")
+            if client.get("/api/v1/tasks").status_code != 401:
+                raise ProbeFailure("probe_failed")
+    finally:
+        if runtime.close(grace_seconds=0) is not True:
+            raise ProbeFailure("probe_failed")
+    if any(module == prefix or module.startswith(prefix + ".") for module in sys.modules for prefix in forbidden):
+        raise ProbeFailure("dependency_boundary_failed")
+
+async def _probe_native_product():
+    import httpx
+    import subprocess
+    from sqlalchemy.engine import Engine, URL
+    from tempfile import TemporaryDirectory
+    from unittest.mock import patch
+    from uuid import UUID
+
+    forbidden = (
+        "sidera_control_plane.adapters.opencode_acp",
+        "sidera_control_plane.adapters.opencode_planner",
+        "sidera_control_plane.adapters.dsh_acp",
+        "sidera_control_plane.adapters.acp_process",
+    )
+    if any(
+        module == prefix or module.startswith(prefix + ".")
+        for module in sys.modules for prefix in forbidden
+    ):
+        raise ProbeFailure("dependency_boundary_failed")
+
+    def reject_external_action(*args, **kwargs):
+        raise ProbeFailure("probe_failed")
+
+    with (
+        patch.object(Engine, "connect", side_effect=reject_external_action),
+        patch.object(subprocess, "Popen", side_effect=reject_external_action),
+    ):
+        installed_roots = {}
+        for distribution, modules in (
+            ("sidera-product", (
+                "sidera_product", "sidera_product.app", "sidera_product.composition",
+                "sidera_product.config", "sidera_product.cli",
+            )),
+            ("sidera-agents", (
+                "sidera_agents", "sidera_agents.api", "sidera_agents.contracts",
+                "sidera_agents.ports",
+            )),
+            ("sidera-control-plane", (
+                "sidera_control_plane", "sidera_control_plane.composition.native_runtime",
+            )),
+            ("sidera-control-plane-client", ("sidera_control_plane_client",)),
+            ("sidera-model-connections", (
+                "sidera_model_connections", "sidera_model_connections.contracts",
+                "sidera_model_connections.postgres",
+            )),
+            ("sidera-runtime-guard", ("sidera_runtime_guard",)),
+        ):
+            installed = Path(metadata.distribution(distribution).locate_file("")).resolve()
+            if not installed.is_relative_to(Path(sys.prefix).resolve()):
+                raise ProbeFailure("dependency_boundary_failed")
+            installed_roots[distribution] = installed
+            for name in modules:
+                origin = getattr(importlib.import_module(name), "__file__", None)
+                if not origin or not Path(origin).resolve().is_relative_to(installed):
+                    raise ProbeFailure("dependency_boundary_failed")
+        for distribution, name in (
+            ("sidera-product", "sidera_product"),
+            ("sidera-agents", "sidera_agents"),
+            ("sidera-control-plane", "sidera_control_plane"),
+            ("sidera-model-connections", "sidera_model_connections"),
+        ):
+            package = Path(str(files(name))).resolve()
+            if not package.is_relative_to(installed_roots[distribution]):
+                raise ProbeFailure("dependency_boundary_failed")
+            config = ConfigParser(defaults={"here": str(package)})
+            config.read_string((package / "alembic.ini").read_text(encoding="utf-8"))
+            migrations = Path(config.get("alembic", "script_location")).resolve()
+            if (
+                not migrations.is_relative_to(package)
+                or not (migrations / "env.py").is_file()
+                or not any(path.is_file() for path in (migrations / "versions").glob("*.py"))
+            ):
+                raise ProbeFailure("dependency_boundary_failed")
+
+        from sidera_product import cli
+        from sidera_product.app import create_app
+        from sidera_product.composition import build_product_runtime
+        from sidera_product.config import ProductSettings
+
+        with TemporaryDirectory(prefix="sidera-installed-product-") as temporary:
+            scratch = Path(temporary).resolve()
+            targets = {
+                component: URL.create(
+                    "postgresql+psycopg",
+                    username=f"unused_{component}",
+                    database=f"unused_{component}",
+                    query={"host": str(scratch / "missing-db-socket"), "port": "5432"},
+                ).render_as_string(hide_password=False)
+                for component in ("product", "agents", "cp", "credentials")
+            }
+            settings = ProductSettings(
+                _env_file=None,
+                product_database_url=targets["product"],
+                agent_database_url=targets["agents"],
+                cp_database_url=targets["cp"],
+                credential_database_url=targets["credentials"],
+                deployment_namespace=UUID("40000000-0000-0000-0000-000000000001"),
+                workspace_id=UUID("40000000-0000-0000-0000-000000000002"),
+                local_principal_id="installed-product-user",
+                workspace_root=scratch / "workspaces",
+                artifact_root=scratch / "artifacts",
+                bind_host="127.0.0.1",
+                port=18080,
+                web_origin="http://127.0.0.1:5173",
+                managed_credentials_enabled=False,
+                selected_secrets={},
+                knowledge_base_url=None,
+                knowledge_token=None,
+            )
+            runtime = build_product_runtime(settings)
+            try:
+                if (
+                    runtime.execution is not runtime.agents.execution
+                    or runtime.authority.control_plane is not runtime.control_plane.execution_authorizer
+                    or runtime.sources.control_plane is not runtime.control_plane.context_source_reader
+                ):
+                    raise ProbeFailure("probe_failed")
+                app = create_app(runtime=runtime)
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url=settings.local_url
+                ) as client:
+                    if (await client.get("/healthz")).status_code != 200:
+                        raise ProbeFailure("probe_failed")
+                    if (await client.get("/api/v1/tasks")).status_code != 401:
+                        raise ProbeFailure("probe_failed")
+                    profiles = await client.get(
+                        f"/agents/v1/workspaces/{settings.workspace_id}/profiles"
+                    )
+                    if (
+                        profiles.status_code != 401
+                        or profiles.json().get("detail", {}).get("code") != "local_session_required"
+                    ):
+                        raise ProbeFailure("probe_failed")
+                    response = await client.get("/product/v1/status")
+                    if response.status_code != 200:
+                        raise ProbeFailure("probe_failed")
+                    status = response.json()
+                    if (
+                        status.get("execution", {}).get("ready") is not False
+                        or status.get("main_agent", {}).get("available") is not False
+                        or status.get("knowledge", {}).get("available") is not False
+                    ):
+                        raise ProbeFailure("probe_failed")
+                entry_points = [
+                    entry for entry in metadata.distribution("sidera-product").entry_points
+                    if entry.group == "console_scripts" and entry.name == "sidera"
+                ]
+                if len(entry_points) != 1 or entry_points[0].value != "sidera_product.cli:main":
+                    raise ProbeFailure("probe_failed")
+                opened = []
+                with (
+                    patch.object(cli.webbrowser, "open", side_effect=lambda url: opened.append(url) or True),
+                    patch.object(cli, "build_product_runtime", side_effect=reject_external_action) as owner,
+                ):
+                    if (
+                        cli.main(["open"], settings=settings) != 0
+                        or opened != [f"{settings.web_origin}/workspaces/{settings.workspace_id}/tasks"]
+                        or owner.call_count != 0
+                    ):
+                        raise ProbeFailure("probe_failed")
+                consumer = {"__name__": "installed_agents_consumer"}
+                exec(compile(sys.argv[3], "standalone-public-consumer", "exec"), consumer)
+                if consumer["main"]() != {
+                    "harness_id": "fixture-harness", "state": "completed",
+                    "messages": ["Fixture response."], "closed": True,
+                    "profile_status": {"enabled": False, "version": 2},
+                    "resource_status": {"enabled": False, "version": 2},
+                }:
+                    raise ProbeFailure("probe_failed")
+            finally:
+                if runtime.close(grace_seconds=0) is not True:
+                    raise ProbeFailure("probe_failed")
+        if any(
+            module == prefix or module.startswith(prefix + ".")
+            for module in sys.modules for prefix in forbidden
+        ):
+            raise ProbeFailure("dependency_boundary_failed")
 
 async def _probe_public_client():
     import httpx
@@ -428,8 +827,12 @@ def _run_probe():
         if dist.version != "0.1.0" or not record_match:
             raise ProbeFailure("dependency_boundary_failed", packages)
     try:
-        if name == "control-plane-core":
+        if name == "agents-core":
+            _probe_agents_core()
+        elif name == "control-plane-core":
             _probe_control_plane_core()
+        elif name == "control-plane-agents":
+            _probe_control_plane_agents()
         elif name == "public-client":
             asyncio.run(_probe_public_client())
         elif name == "gateway-core":
@@ -438,6 +841,8 @@ def _run_probe():
             _probe_bridge_client()
         elif name == "gateway-demo":
             _probe_gateway_demo()
+        elif name == "native-product":
+            asyncio.run(_probe_native_product())
         else:
             raise ProbeFailure("probe_failed")
     except ProbeFailure as failure:
@@ -453,7 +858,8 @@ except Exception:
     print(json.dumps({"status": "FAIL", "code": "probe_failed", "packages": locals().get("packages", {})}, separators=(",", ":")))
     sys.exit(1)
 print(json.dumps({"status": "PASS", "packages": _packages}, separators=(",", ":")))
-'''
+"""
+)
 
 
 class CheckFailure(ValueError):
@@ -470,11 +876,12 @@ class CheckFailure(ValueError):
         super().__init__(message)
 
 
-def check_repository(repository: Path) -> Path:
+def check_repository(repository: Path, projects: Sequence[str] | None = None) -> Path:
     resolved = Path(repository).resolve()
+    selected = tuple(PROJECTS) if projects is None else projects
     if not resolved.is_dir() or any(
-        not (resolved / relative / "pyproject.toml").is_file()
-        for relative in PROJECTS.values()
+        not (resolved / PROJECTS[package] / "pyproject.toml").is_file()
+        for package in selected
     ):
         raise CheckFailure("invalid_repository")
     return resolved
@@ -498,7 +905,7 @@ def check_output_root(output_root: Path, repository: Path) -> Path:
 def build_argv(repository: Path, project: str, output_root: Path) -> list[str]:
     if project not in PROJECTS:
         raise ValueError("unknown project")
-    return [
+    result = [
         "uv",
         "build",
         str(Path(repository) / PROJECTS[project]),
@@ -507,6 +914,9 @@ def build_argv(repository: Path, project: str, output_root: Path) -> list[str]:
         str(Path(output_root) / "wheels"),
         "--no-create-gitignore",
     ]
+    if project == "sidera-agents":
+        result.append("--offline")
+    return result
 
 
 def venv_argv(name: str, output_root: Path) -> list[str]:
@@ -533,9 +943,11 @@ def install_argv(name: str, output_root: Path) -> list[str]:
         str(python),
         "--find-links",
         str(Path(output_root) / "wheels"),
-        REQUIREMENTS[name],
     ]
-    if name in {"control-plane-core", "gateway-core"}:
+    if name == "agents-core":
+        result.append("--offline")
+    result.append(REQUIREMENTS[name])
+    if name in {"control-plane-core", "control-plane-agents", "gateway-core"}:
         result.append("httpx>=0.28,<1")
     return result
 
@@ -559,11 +971,14 @@ def _run(
     code: str,
     combination: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    environment = subprocess_environment(output_root)
+    if combination == "agents-core":
+        environment.pop("UV_CACHE_DIR", None)
     try:
         return subprocess.run(
             list(argv),
             cwd=output_root,
-            env=subprocess_environment(output_root),
+            env=environment,
             timeout=timeout,
             shell=False,
             capture_output=True,
@@ -587,12 +1002,22 @@ def _wheel_name_prefix(package: str) -> str:
     return re.sub(r"[-_.]+", "_", package).lower() + "-"
 
 
-def build_wheels(repository: Path, output_root: Path) -> dict[str, Path]:
+def build_wheels(
+    repository: Path, output_root: Path, projects: Sequence[str] | None = None
+) -> dict[str, Path]:
     wheel_dir = Path(output_root) / "wheels"
     wheel_dir.mkdir(parents=True, exist_ok=True)
     built = {}
-    for package in PROJECTS:
-        result = _run(build_argv(repository, package, output_root), output_root, 300, "build_failed")
+    selected = tuple(PROJECTS) if projects is None else projects
+    for package in selected:
+        combination = "agents-core" if package == "sidera-agents" else None
+        result = _run(
+            build_argv(repository, package, output_root),
+            output_root,
+            300,
+            "build_failed",
+            combination,
+        )
         _check_returncode(result, "build_failed")
         matches = sorted(
             path
@@ -605,18 +1030,25 @@ def build_wheels(repository: Path, output_root: Path) -> dict[str, Path]:
     return built
 
 
-def source_fingerprints(repository: Path) -> dict[str, str]:
+def source_fingerprints(
+    repository: Path, projects: Sequence[str] | None = None
+) -> dict[str, str]:
     root = Path(repository)
     fingerprints = {}
-    for package, relative in PROJECTS.items():
-        project = root / relative
+    selected = tuple(PROJECTS) if projects is None else projects
+    for package in selected:
+        project = root / PROJECTS[package]
         digest = hashlib.sha256()
         digest.update(b"pyproject.toml\0")
         digest.update((project / "pyproject.toml").read_bytes())
         source_root = root / SOURCE_ROOTS[package]
         if source_root.is_dir():
             for path in sorted(source_root.rglob("*.py")):
-                if path.is_symlink() or "__pycache__" in path.parts or not path.is_file():
+                if (
+                    path.is_symlink()
+                    or "__pycache__" in path.parts
+                    or not path.is_file()
+                ):
                     continue
                 relative_source = path.relative_to(source_root).as_posix()
                 digest.update(b"\0")
@@ -645,10 +1077,15 @@ def _wheel_version(path: Path, package: str) -> str:
     return version
 
 
-def _probe_argv(name: str, wheels: Mapping[str, Path], output_root: Path) -> list[str]:
+def _probe_argv(
+    name: str,
+    wheels: Mapping[str, Path],
+    output_root: Path,
+    repository: Path | None = None,
+) -> list[str]:
     python = Path(output_root) / f"{name}-venv" / "bin" / "python"
     selected = {package: str(wheels[package]) for package in COMBINATION_PROJECTS[name]}
-    return [
+    result = [
         str(python),
         "-I",
         "-c",
@@ -656,6 +1093,12 @@ def _probe_argv(name: str, wheels: Mapping[str, Path], output_root: Path) -> lis
         name,
         json.dumps(selected, sort_keys=True, separators=(",", ":")),
     ]
+    if name in {"agents-core", "native-product"}:
+        if repository is None:
+            raise CheckFailure("invalid_repository", name)
+        example = repository / PROJECTS["sidera-agents"] / "examples" / "standalone.py"
+        result.append(example.read_text(encoding="utf-8"))
+    return result
 
 
 def _safe_probe_packages(
@@ -688,14 +1131,23 @@ def _safe_probe_packages(
 
 
 def check_combination(
-    name: str, wheels: Mapping[str, Path], output_root: Path
+    name: str,
+    wheels: Mapping[str, Path],
+    output_root: Path,
+    repository: Path | None = None,
 ) -> dict[str, object]:
     if name not in REQUIREMENTS:
         raise ValueError("unknown combination")
     for argv in (venv_argv(name, output_root), install_argv(name, output_root)):
         result = _run(argv, output_root, 300, "install_failed", name)
         _check_returncode(result, "install_failed", name)
-    result = _run(_probe_argv(name, wheels, output_root), output_root, 30, "probe_failed", name)
+    result = _run(
+        _probe_argv(name, wheels, output_root, repository),
+        output_root,
+        30,
+        "probe_failed",
+        name,
+    )
     try:
         payload = json.loads(result.stdout)
     except (TypeError, ValueError):
@@ -712,8 +1164,7 @@ def check_combination(
         )
         raise CheckFailure(failure_code, name, safe_packages)
     if set(safe_packages) != set(COMBINATION_PROJECTS[name]) or any(
-        item.get("version") != "0.1.0"
-        or item.get("record_match") is not True
+        item.get("version") != "0.1.0" or item.get("record_match") is not True
         for item in safe_packages.values()
     ):
         raise CheckFailure("dependency_boundary_failed", name, safe_packages)
@@ -753,23 +1204,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     requested_output = str(args.output_root)
     report = _initial_report(requested_output)
     output_root: Path | None = None
+    selected = (args.combination,) if args.combination else tuple(REQUIREMENTS)
+    selected_projects = tuple(
+        dict.fromkeys(
+            package for name in selected for package in COMBINATION_PROJECTS[name]
+        )
+    )
     try:
-        repository = check_repository(Path(args.repository))
+        repository = check_repository(Path(args.repository), selected_projects)
         output_root = check_output_root(Path(args.output_root), repository)
         output_root.mkdir(parents=True, exist_ok=True)
         report["output_root"] = str(output_root)
         try:
-            fingerprints = source_fingerprints(repository)
+            fingerprints = source_fingerprints(repository, selected_projects)
         except (OSError, UnicodeError):
             raise CheckFailure("invalid_repository") from None
         combinations = report["combinations"]
         assert isinstance(combinations, dict)
-        for name, packages in COMBINATION_PROJECTS.items():
+        for name in selected:
+            packages = COMBINATION_PROJECTS[name]
             combinations[name]["source_fingerprint"] = {
                 package: fingerprints[package] for package in packages
             }
-        wheels = build_wheels(repository, output_root)
-        for name, packages in COMBINATION_PROJECTS.items():
+        wheels = build_wheels(repository, output_root, selected_projects)
+        for name in selected:
+            packages = COMBINATION_PROJECTS[name]
             combinations[name]["packages"] = {
                 package: {
                     "version": _wheel_version(wheels[package], package),
@@ -778,11 +1237,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
                 for package in packages
             }
-        selected = (args.combination,) if args.combination else tuple(REQUIREMENTS)
         first_failure = None
         for name in selected:
             try:
-                result = check_combination(name, wheels, output_root)
+                result = check_combination(name, wheels, output_root, repository)
             except CheckFailure as failure:
                 combinations[name]["status"] = "FAIL"
                 combinations[name]["code"] = failure.code
@@ -801,9 +1259,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             report["status"] = "FAIL"
             report["code"] = first_failure
             exit_code = 1
-        elif all(
-            combinations[name]["status"] == "PASS" for name in REQUIREMENTS
-        ):
+        elif all(combinations[name]["status"] == "PASS" for name in selected):
             report["status"] = "PASS"
             exit_code = 0
         else:

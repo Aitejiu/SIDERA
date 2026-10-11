@@ -2,15 +2,22 @@ import ipaddress
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, cast
+from typing import TYPE_CHECKING, Annotated, cast
 from uuid import UUID
 
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request
+from sidera_agents.api import AgentCatalog, AgentRuntimes
+from sidera_agents.ports import ExecutionAuthorizer
 
 from sidera_control_plane.adapters.git_results import GitResultStore
 from sidera_control_plane.adapters.knowledge_http import KnowledgeHttpAdapter
-from sidera_control_plane.api.handoff_queries import HandoffPublicQueryService
+from sidera_control_plane.application.agent_sources import TaskContextSourceReader
+from sidera_control_plane.application.agent_worker_adapter import NativeWorkerServices
 from sidera_control_plane.application.artifact_content import ArtifactContentService
+from sidera_control_plane.application.assignments import (
+    AssignmentCommandHandler,
+    TrustedAssignmentIdentity,
+)
 from sidera_control_plane.application.attention_commands import (
     AcknowledgeAttentionItemHandler,
 )
@@ -31,6 +38,9 @@ from sidera_control_plane.application.command_service import CommandService
 from sidera_control_plane.application.context_package_queries import (
     ContextPackageCommandHandler,
     ContextPackageQueryService,
+)
+from sidera_control_plane.application.execution_authority import (
+    ExecutionAuthorityReader,
 )
 from sidera_control_plane.application.execution_commands import (
     ExecutionCommandHandler,
@@ -72,7 +82,12 @@ from sidera_control_plane.application.plan_transition_queries import (
 from sidera_control_plane.application.planning_commands import PlanningCommandHandler
 from sidera_control_plane.application.planning_metrics import PlanningMetricsService
 from sidera_control_plane.application.planning_queries import PlanningQueryService
-from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.ports import (
+    ControlPlaneUnitOfWork,
+    KnowledgeCatalogPort,
+    ResultInputContentPort,
+)
+from sidera_control_plane.application.profile_handoff import ProfileHandoffValidator
 from sidera_control_plane.application.resource_queries import ResourceQueryService
 from sidera_control_plane.application.result_acceptance import ResultAcceptanceService
 from sidera_control_plane.application.result_input_queries import (
@@ -102,6 +117,9 @@ from sidera_control_plane.application.work_context_queries import (
     WorkContextQueryService,
 )
 from sidera_control_plane.application.worker_commands import WorkerCommandHandler
+from sidera_control_plane.application.worker_progress import (
+    WorkerProgressCommandHandler,
+)
 from sidera_control_plane.application.worker_runtime import WorkerRuntimeResolver
 from sidera_control_plane.application.worker_trace_queries import (
     WorkerTraceQueryService,
@@ -183,6 +201,10 @@ from sidera_control_plane.persistence.worker_workspace_query_store import (
 _PROJECT_ROOT = Path(__file__).resolve().parents[5]
 
 
+if TYPE_CHECKING:
+    from sidera_control_plane.api.handoff_queries import HandoffPublicQueryService
+
+
 def get_database(request: Request) -> Database:
     database: Database = request.app.state.database
     return database
@@ -193,10 +215,17 @@ def get_settings(request: Request) -> Settings:
     return settings
 
 
-def get_worker_runtime_resolver() -> WorkerRuntimeResolver:
+def get_native_worker_services() -> NativeWorkerServices | None:
+    """Product composition injects public agents services and a trusted scope."""
+    return None
+
+
+def get_worker_runtime_resolver(
+    native_services: NativeWorkerServices | None = None,
+) -> WorkerRuntimeResolver:
     """Construct the shared runtime-fact resolver used by command/query edges."""
 
-    return WorkerRuntimeResolver()
+    return WorkerRuntimeResolver(native_services=native_services)
 
 
 class AdapterWorkflowRequiresLoopback(ValidationError):
@@ -311,17 +340,26 @@ def _require_demo_runtime_configuration(
         )
     payload = getattr(request, "payload", {})
     if not isinstance(payload, dict):
-        raise DemoRuntimeBindingForbidden("demo runtime configuration payload is invalid")
+        raise DemoRuntimeBindingForbidden(
+            "demo runtime configuration payload is invalid"
+        )
     allowed_adapter_ids = frozenset(
         manifest.module_ids[key] for key in _DEMO_WORKER_ADAPTER_KEYS[worker_key]
     )
     expected_workspace = manifest.module_ids["workspace"]
-    adapter_id = _demo_uuid(payload.get("adapter_module_instance_id"), "adapter_module_instance_id")
-    workspace_id = _demo_uuid(payload.get("workspace_module_instance_id"), "workspace_module_instance_id")
+    adapter_id = _demo_uuid(
+        payload.get("adapter_module_instance_id"), "adapter_module_instance_id"
+    )
+    workspace_id = _demo_uuid(
+        payload.get("workspace_module_instance_id"), "workspace_module_instance_id"
+    )
     if adapter_id not in allowed_adapter_ids:
         raise DemoRuntimeBindingForbidden(
             "demo runtime configuration adapter is outside the allowed provider binding",
-            details={"worker_key": worker_key, "adapter_module_instance_id": str(adapter_id)},
+            details={
+                "worker_key": worker_key,
+                "adapter_module_instance_id": str(adapter_id),
+            },
         )
     if workspace_id != expected_workspace:
         raise DemoRuntimeBindingForbidden(
@@ -349,15 +387,111 @@ def _demo_uuid(value: object, field: str) -> UUID:
         ) from exc
 
 
+def get_trusted_assignment_identity() -> TrustedAssignmentIdentity | None:
+    """Standalone composition may override this with a verified request principal."""
+    return
+
+
+def get_assignment_authorizer() -> ExecutionAuthorizer | None:
+    return None
+
+
+def get_native_command_preflight(request: Request):
+    return getattr(request.state, "control_plane_command_preflight", None)
+
+
+def get_assignment_agent_catalog() -> AgentCatalog | None:
+    return None
+
+
+def get_assignment_agent_runtimes() -> AgentRuntimes | None:
+    return None
+
+
+def get_agent_context_identity(
+    identity: Annotated[
+        TrustedAssignmentIdentity | None, Depends(get_trusted_assignment_identity)
+    ],
+) -> TrustedAssignmentIdentity:
+    if identity is None or not identity.principal_id:
+        raise HTTPException(status_code=401, detail="Trusted task identity required.")
+    return identity
+
+
+def get_agent_context_knowledge_catalog() -> KnowledgeCatalogPort | None:
+    """Product composition injects exact knowledge I/O; no legacy service token."""
+    return None
+
+
+def get_agent_context_result_input_content() -> ResultInputContentPort | None:
+    return None
+
+
+def get_agent_context_source_reader(
+    identity: Annotated[TrustedAssignmentIdentity, Depends(get_agent_context_identity)],
+    authorizer: Annotated[
+        ExecutionAuthorizer | None, Depends(get_assignment_authorizer)
+    ],
+    database: Annotated[Database, Depends(get_database)],
+    catalog: Annotated[
+        KnowledgeCatalogPort | None, Depends(get_agent_context_knowledge_catalog)
+    ],
+    content: Annotated[
+        ResultInputContentPort | None, Depends(get_agent_context_result_input_content)
+    ],
+) -> TaskContextSourceReader:
+    if authorizer is None:
+        raise HTTPException(status_code=403, detail="Task source access denied.")
+
+    def factory():
+        return SqlAlchemyUnitOfWork(database)
+
+    authority_reader = ExecutionAuthorityReader(
+        factory,
+        principal=lambda: identity.principal_id,
+        authorizer=authorizer,
+    )
+    return TaskContextSourceReader(
+        factory,
+        authorizer=authority_reader,
+        catalog=catalog,
+        result_input_content=content,
+    )
+
+
 def get_command_service(
     database: Annotated[Database, Depends(get_database)],
     settings: Annotated[Settings, Depends(get_settings)],
+    assignment_identity: Annotated[
+        TrustedAssignmentIdentity | None, Depends(get_trusted_assignment_identity)
+    ] = None,
+    assignment_authorizer: Annotated[
+        ExecutionAuthorizer | None, Depends(get_assignment_authorizer)
+    ] = None,
+    agent_catalog: Annotated[
+        AgentCatalog | None, Depends(get_assignment_agent_catalog)
+    ] = None,
+    agent_runtimes: Annotated[
+        AgentRuntimes | None, Depends(get_assignment_agent_runtimes)
+    ] = None,
+    native_services: Annotated[
+        NativeWorkerServices | None, Depends(get_native_worker_services)
+    ] = None,
+    native_command_preflight: Annotated[
+        Callable | None, Depends(get_native_command_preflight)
+    ] = None,
 ) -> CommandService:
+    assignments = AssignmentCommandHandler(
+        catalog=agent_catalog,
+        runtimes=agent_runtimes,
+        identity=assignment_identity,
+        authorizer=assignment_authorizer,
+    )
     factory: Callable[[], ControlPlaneUnitOfWork] = lambda: SqlAlchemyUnitOfWork(
         database,
         projection_change_retention_seconds=settings.projection_change_retention_seconds,
     )
-    runtime_resolver = get_worker_runtime_resolver()
+    runtime_resolver = get_worker_runtime_resolver(native_services)
     handoff_candidates = HandoffCandidateService(
         factory,
         runtime_resolver=runtime_resolver,
@@ -374,9 +508,59 @@ def get_command_service(
             max_projection_bytes=settings.collaboration_max_projection_bytes
         ),
     )
+    planning = PlanningCommandHandler(
+        local_actor_type=settings.local_actor_type,
+        local_actor_id=settings.local_actor_id,
+        clock=lambda: datetime.now(UTC),
+        planning_context_ttl_seconds=settings.planning_context_ttl_seconds,
+        result_inputs_enabled=settings.result_inputs_enabled,
+        candidate_submission_service=KnowledgeCandidateSubmissionService(
+            FileCandidateProposalSpool(
+                settings.knowledge_candidate_spool_dir,
+                quota_bytes=settings.knowledge_candidate_spool_quota_bytes,
+            )
+        ),
+        assignment_handler=assignments,
+        identity=assignment_identity,
+        authorizer=assignment_authorizer,
+    )
+    inputs = ExecutionInputCommandHandler(
+        lambda: datetime.now(UTC),
+        identity=assignment_identity,
+        native_services=native_services,
+    )
+    progress = WorkerProgressCommandHandler(
+        lambda: datetime.now(UTC),
+        identity=assignment_identity,
+        authorizer=assignment_authorizer,
+        native_services=native_services,
+    )
+    handoffs = HandoffCommandHandler(
+        lambda: datetime.now(UTC),
+        candidate_service=handoff_candidates,
+        runtime_resolver=runtime_resolver,
+        recovery_service=handoff_recovery,
+        native_validator=ProfileHandoffValidator(
+            assignments=assignments,
+            identity=assignment_identity,
+            native_services=native_services,
+            clock=lambda: datetime.now(UTC),
+        ),
+    )
+
+    def preflight(uow, envelope):
+        if native_command_preflight is not None:
+            native_command_preflight(envelope)
+        assignments.preflight(uow, envelope)
+        planning.preflight(uow, envelope)
+        inputs.preflight(uow, envelope)
+        progress.preflight(uow, envelope)
+        handoffs.preflight(uow, envelope)
+
     return CommandService(
         factory,
         (
+            assignments,
             ResultAcceptanceService(
                 lambda: datetime.now(UTC),
                 local_actor_type=settings.local_actor_type,
@@ -396,7 +580,8 @@ def get_command_service(
                 lease_ttl_seconds=settings.assignment_lease_seconds,
                 result_integration_enabled=settings.result_integration_enabled,
             ),
-            ExecutionInputCommandHandler(lambda: datetime.now(UTC)),
+            inputs,
+            progress,
             ResultReworkService(
                 lambda: datetime.now(UTC),
                 local_actor_type=settings.local_actor_type,
@@ -410,19 +595,7 @@ def get_command_service(
                 factory,
                 clock=lambda: datetime.now(UTC),
             ),
-            PlanningCommandHandler(
-                local_actor_type=settings.local_actor_type,
-                local_actor_id=settings.local_actor_id,
-                clock=lambda: datetime.now(UTC),
-                planning_context_ttl_seconds=settings.planning_context_ttl_seconds,
-                result_inputs_enabled=settings.result_inputs_enabled,
-                candidate_submission_service=KnowledgeCandidateSubmissionService(
-                    FileCandidateProposalSpool(
-                        settings.knowledge_candidate_spool_dir,
-                        quota_bytes=settings.knowledge_candidate_spool_quota_bytes,
-                    )
-                ),
-            ),
+            planning,
             NotificationCommandHandler(
                 local_actor_type=settings.local_actor_type,
                 local_actor_id=settings.local_actor_id,
@@ -439,12 +612,7 @@ def get_command_service(
                 clock=lambda: datetime.now(UTC),
             ),
             PlanTransitionCommandHandler(lambda: datetime.now(UTC)),
-            HandoffCommandHandler(
-                lambda: datetime.now(UTC),
-                candidate_service=handoff_candidates,
-                runtime_resolver=runtime_resolver,
-                recovery_service=handoff_recovery,
-            ),
+            handoffs,
             CollaborationGovernanceCommandHandler(
                 lambda: datetime.now(UTC),
                 local_actor_type=settings.local_actor_type,
@@ -453,6 +621,7 @@ def get_command_service(
                 approver=governance_approver,
             ),
         ),
+        preflight=preflight,
     )
 
 
@@ -465,12 +634,29 @@ def get_command_query_service(
 def get_handoff_public_query_service(
     database: Annotated[Database, Depends(get_database)],
     settings: Annotated[Settings, Depends(get_settings)],
-) -> HandoffPublicQueryService:
+    native_services: Annotated[
+        NativeWorkerServices | None, Depends(get_native_worker_services)
+    ] = None,
+    assignment_identity: Annotated[
+        TrustedAssignmentIdentity | None, Depends(get_trusted_assignment_identity)
+    ] = None,
+    assignment_authorizer: Annotated[
+        ExecutionAuthorizer | None, Depends(get_assignment_authorizer)
+    ] = None,
+    agent_catalog: Annotated[
+        AgentCatalog | None, Depends(get_assignment_agent_catalog)
+    ] = None,
+    agent_runtimes: Annotated[
+        AgentRuntimes | None, Depends(get_assignment_agent_runtimes)
+    ] = None,
+) -> "HandoffPublicQueryService":
+    from sidera_control_plane.api.handoff_queries import HandoffPublicQueryService
+
     factory: Callable[[], ControlPlaneUnitOfWork] = lambda: SqlAlchemyUnitOfWork(
         database,
         projection_change_retention_seconds=settings.projection_change_retention_seconds,
     )
-    runtime_resolver = get_worker_runtime_resolver()
+    runtime_resolver = get_worker_runtime_resolver(native_services)
     candidate_service = HandoffCandidateService(
         factory,
         runtime_resolver=runtime_resolver,
@@ -487,6 +673,18 @@ def get_handoff_public_query_service(
         ),
         recovery_service=recovery_service,
         runtime_resolver=runtime_resolver,
+        native_validator=ProfileHandoffValidator(
+            assignments=AssignmentCommandHandler(
+                catalog=agent_catalog,
+                runtimes=agent_runtimes,
+                identity=assignment_identity,
+                authorizer=assignment_authorizer,
+            ),
+            identity=assignment_identity,
+            native_services=native_services,
+            clock=lambda: datetime.now(UTC),
+        ),
+        clock=lambda: datetime.now(UTC),
     )
 
 

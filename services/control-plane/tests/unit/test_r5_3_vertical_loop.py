@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from sidera_control_plane.gateway_worker import (
+from sidera_control_plane.composition.worker_adapters import (
     _deterministic_artifact_storage_ref,
 )
 

@@ -2,11 +2,12 @@ import argparse
 import json
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from sidera_control_plane.application.agent_worker_adapter import require_gateway_owner
 from sidera_control_plane.application.reconciler import Reconciler, ReconcilerRunResult
 from sidera_control_plane.config import Settings
 from sidera_control_plane.persistence.database import Database
@@ -19,11 +20,25 @@ class ReconcilerRuntime:
     database: Database
 
 
-def build_reconciler(settings: Settings) -> ReconcilerRuntime:
+def build_reconciler(
+    settings: Settings,
+    *,
+    owner_check: Callable[[], bool] | None = None,
+) -> ReconcilerRuntime:
     database = Database(settings.database_url)
+
+    def uow_factory() -> SqlAlchemyUnitOfWork:
+        require_gateway_owner(owner_check)
+        return SqlAlchemyUnitOfWork(
+            database,
+            before_commit=None
+            if owner_check is None
+            else lambda: require_gateway_owner(owner_check),
+        )
+
     try:
         reconciler = Reconciler(
-            uow_factory=lambda: SqlAlchemyUnitOfWork(database),
+            uow_factory=uow_factory,
             clock=lambda: datetime.now(UTC),
             worker_heartbeat_timeout_seconds=settings.worker_heartbeat_timeout_seconds,
         )

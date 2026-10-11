@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Self
 from uuid import UUID, uuid4
 
 import pytest
+from sidera_agents.contracts import ProfileRef
 
 from sidera_control_plane.application.handoff_commands import (
     HandoffCommandError,
@@ -18,6 +19,7 @@ from sidera_control_plane.application.handoff_recovery import (
     HandoffRecoveryError,
     HandoffRecoveryService,
 )
+from sidera_control_plane.domain.agent_bindings import AssigneeRef
 from sidera_control_plane.domain.commands import CommandEnvelope
 from sidera_control_plane.domain.execution import ExecutionSessionStatus
 from sidera_control_plane.domain.gateway import (
@@ -33,13 +35,17 @@ from sidera_control_plane.domain.handoff_evidence import (
 )
 from sidera_control_plane.domain.handoff_recovery import (
     HandoffRecoveryDecision,
+    HandoffRecoveryInspection,
     HandoffRecoveryStrategy,
+    HandoffSafeConclusion,
 )
 from sidera_control_plane.domain.handoffs import (
     HandoffPhase,
+    HandoffProposal,
     HandoffTransition,
     HandoffTransitionStatus,
     HandoffWriterState,
+    NativeHandoffProposalPayload,
 )
 from tests.unit.test_handoff_commands import (
     MemoryEventStore,
@@ -621,3 +627,184 @@ def test_recover_command_cannot_accept_a_client_declared_source_channel() -> Non
 
     assert error.value.code == "validation_error"
     assert not uow.handoff_recovery_decisions.decisions
+
+
+def _native_recovery_fixture():
+    legacy_uow, item, _source, target, _execution, _session = _fixture()
+    prepared = _handler(legacy_uow).handle(legacy_uow, _prepare_envelope(item, target))
+    original = legacy_uow.handoff_proposals.proposals[prepared.aggregate_id]
+    old = original.payload
+    profile = ProfileRef(workspace_id=WORKSPACE_ID, profile_id=uuid4(), revision=1)
+    values = {
+        field.name: getattr(old, field.name)
+        for field in fields(NativeHandoffProposalPayload)
+        if hasattr(old, field.name)
+    }
+    values.update(
+        proposal_schema_version=2,
+        source_worker_item_version=1,
+        source_run_id=uuid4(),
+        source_authority_id=uuid4(),
+        source_binding_version=1,
+        source_profile_ref=profile,
+        source_binding_target_type="worker_item",
+        source_binding_target_id=item.id,
+        work_context_id=uuid4(),
+        work_context_revision_id=uuid4(),
+        work_context_hash="c" * 64,
+        work_context_version=1,
+        target_assignee=AssigneeRef("profile", profile.profile_id),
+        target_profile_ref=profile,
+        impact_summary={"worker_item_context_version": 1},
+    )
+    proposal = HandoffProposal.create(
+        id=original.id,
+        payload=NativeHandoffProposalPayload(**values),
+        created_by_type="user",
+        created_by_id="unit",
+        source_channel="web",
+        created_at=original.created_at,
+        expires_at=original.expires_at,
+    )
+    proposal.mark_confirmed(now=original.created_at)
+    transition = HandoffTransition.create(
+        id=uuid4(),
+        proposal=proposal,
+        confirmed_by_type="user",
+        confirmed_by_id="unit",
+        confirmed_at=original.created_at,
+    )
+    operation_id = handoff_step_operation_id(
+        transition.id, transition.phase, logical_attempt=1, action="checkpoint"
+    )
+    transition.block(
+        failure_code="adapter_rejected", now=NOW, blocked_operation_id=operation_id
+    )
+    operation = GatewayOperation.create(
+        id=uuid4(),
+        operation_id=operation_id,
+        workspace_id=WORKSPACE_ID,
+        task_id=uuid4(),
+        execution_id=transition.source_execution_id,
+        session_id=transition.source_session_id,
+        operation_type=GatewayOperationType.HANDOFF_CHECKPOINT,
+        module_instance_id=None,
+        config_version=None,
+        lease_id=uuid4(),
+        fencing_token=1,
+        now=NOW,
+    )
+    operation.start(now=NOW)
+    operation.fail(failure_code="adapter_rejected", now=NOW)
+    observation = HandoffOperationInspection(
+        operation_id=operation_id,
+        operation_type=operation.operation_type,
+        outcome=HandoffInspectionOutcome.FAILED,
+        execution_id=None,
+        session_id=None,
+        accepted_sequence=None,
+        context_binding=None,
+        observed_at=NOW,
+        evidence_refs=("inspection:failed",),
+    )
+    inspection = HandoffRecoveryInspection(
+        transition_id=transition.id,
+        transition_version=transition.version,
+        logical_attempt=1,
+        phase=transition.phase,
+        writer_state=transition.writer_state,
+        blocked_operation_id=operation_id,
+        operation_inspections=(observation,),
+        workspace_inspection=None,
+        source_session_state="active",
+        target_session_state=None,
+        target_manifest_state=None,
+        safe_conclusions=(HandoffSafeConclusion.OPERATION_FAILED,),
+        evidence_refs=("inspection:failed",),
+        inspected_at=NOW,
+    )
+    uow = RecoveryUnitOfWork(transition, operation=operation)
+    return transition, uow, inspection, operation
+
+
+@pytest.mark.parametrize("boundary", ["inspect", "persist", "apply", "apply_in_uow"])
+def test_legacy_recovery_rejects_native_before_inspection_receipts_or_writes(boundary):
+    transition, uow, inspection, operation = _native_recovery_fixture()
+    gateway = StaticGatewayInspector(HandoffInspectionOutcome.FAILED)
+    service = HandoffRecoveryService(lambda: uow, gateway=gateway)
+    decision = _decision(
+        transition,
+        HandoffRecoveryStrategy.RETRY_CURRENT_PHASE,
+        inspection.evidence_refs,
+    )
+    saves = []
+    receipts = []
+    uow.gateway_operations.save = lambda *args: saves.append(args)
+    get_receipt = uow.handoff_recovery_decisions.get
+    uow.handoff_recovery_decisions.get = lambda *args, **kwargs: (
+        receipts.append(args),
+        get_receipt(*args, **kwargs),
+    )[1]
+    previous = operation.version
+    with pytest.raises(HandoffRecoveryError):
+        if boundary == "inspect":
+            service.inspect_unknown(transition=transition, now=NOW)
+        elif boundary == "persist":
+            service.persist_operation_inspection(
+                transition=transition, inspection=inspection
+            )
+        elif boundary == "apply":
+            service.apply_decision(transition=transition, decision=decision, now=NOW)
+        else:
+            service.apply_decision_in_uow(
+                uow,
+                transition=transition,
+                decision=decision,
+                inspection=inspection,
+                now=NOW,
+            )
+    assert gateway.calls == saves == receipts == []
+    assert operation.version == previous
+    assert (
+        not uow.handoff_recovery_decisions.decisions
+        and uow.handoff_transitions.recovery_saves == 0
+    )
+
+
+def test_legacy_recovery_advertises_no_native_strategy():
+    transition, uow, inspection, _ = _native_recovery_fixture()
+    service = HandoffRecoveryService(lambda: uow)
+    assert (
+        service.available_strategies(transition=transition, inspection=inspection) == ()
+    )
+
+
+@pytest.mark.parametrize("receipt", [False, True])
+def test_legacy_recovery_rechecks_persisted_variant_before_decision_lookup(receipt):
+    native, uow, inspection, _ = _native_recovery_fixture()
+    legacy, _ = _base_transition()
+    legacy.id = native.id
+    legacy.version = native.version
+    legacy.phase = native.phase
+    legacy.status = native.status
+    legacy.writer_state = native.writer_state
+    legacy.blocked_operation_id = native.blocked_operation_id
+    decision = _decision(
+        legacy, HandoffRecoveryStrategy.RETRY_CURRENT_PHASE, inspection.evidence_refs
+    )
+    if receipt:
+        uow.handoff_recovery_decisions.decisions[decision.id] = decision
+    reads = []
+    get_receipt = uow.handoff_recovery_decisions.get
+    uow.handoff_recovery_decisions.get = lambda *args, **kwargs: (
+        reads.append(args),
+        get_receipt(*args, **kwargs),
+    )[1]
+    service = HandoffRecoveryService(lambda: uow)
+    with pytest.raises(HandoffRecoveryError):
+        service.apply_decision_in_uow(
+            uow, transition=legacy, decision=decision, inspection=inspection, now=NOW
+        )
+    assert reads == []
+    assert len(uow.handoff_recovery_decisions.decisions) == int(receipt)
+    assert uow.handoff_transitions.recovery_saves == 0

@@ -674,6 +674,7 @@ def _delivery_view(intent: Any, route: Any) -> NotificationDeliveryView:
         exhausted_at=_optional_utc(intent.exhausted_at),
         created_at=_as_utc(intent.created_at),
         updated_at=_as_utc(intent.updated_at),
+        route_version=route.version,
     )
 
 

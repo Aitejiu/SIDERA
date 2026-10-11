@@ -93,6 +93,7 @@ class GitResultStore:
         clock: Callable[[], datetime] | None = None,
         author_name: str = "SIDERA Result Capture",
         author_email: str = "results@sidera.local",
+        repository_refs: Callable[[], Sequence[str]] | None = None,
     ) -> None:
         if not git_executable.strip():
             raise ValueError("git executable is required")
@@ -109,6 +110,7 @@ class GitResultStore:
         else:
             raise TypeError("repository_resolver must be a mapping or callable")
         self._resolved_repositories: dict[str, Path] = {}
+        self._repository_refs = repository_refs
         self._git_executable = git_executable.strip()
         self._max_export_bytes = max_export_bytes
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -1114,11 +1116,12 @@ class GitResultStore:
         return tuple(sorted(_decode_paths(output)))
 
     def _known_repositories(self) -> tuple[tuple[str, Path], ...]:
-        values: dict[str, Path] = {}
-        for repository_ref in self._configured_repositories:
-            values[repository_ref] = self._resolve_repository(repository_ref)
-        values.update(self._resolved_repositories)
-        return tuple(values.items())
+        refs = dict.fromkeys(
+            (*self._configured_repositories, *self._resolved_repositories)
+        )
+        if self._repository_refs is not None:
+            refs.update(dict.fromkeys(self._repository_refs()))
+        return tuple((ref, self._resolve_repository(ref)) for ref in refs)
 
     def _resolve_repository(self, repository_ref: str) -> Path:
         if not isinstance(repository_ref, str) or not repository_ref.strip():

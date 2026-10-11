@@ -6,6 +6,8 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { server } from "@/test/server";
+import type { AgentExecutionView } from "@/features/assignments/types";
+import type { Execution } from "./types";
 
 import { WorkerTracePage } from "./WorkerTracePage";
 
@@ -62,10 +64,13 @@ const session = {
   workspace_ref: null,
 };
 
-const execution = {
+const worker = { id: WORKER_ID, adapter_type: "opencode", display_name: "Saved legacy worker",
+  status: "online", desired_state: "online", capacity: 1, current_load: 1 };
+const execution: Execution = {
   id: EXECUTION_ID,
   workspace_id: WORKSPACE_ID,
   task_id: "40000000-0000-0000-0000-000000000001",
+  worker_item_id: null,
   lineage_id: EXECUTION_ID,
   attempt: 1,
   max_attempts: 3,
@@ -74,6 +79,16 @@ const execution = {
   capability_requirements: ["python"],
   pinned_worker_id: WORKER_ID,
   assigned_worker_id: WORKER_ID,
+  assigned_worker_summary: worker,
+  pinned_worker_summary: worker,
+  binding_summary: null,
+  adapter_forbidden: [],
+  adapter_preferences: ["opencode"],
+  blocked_since: null,
+  requires_operator: false,
+  scheduling_status: "running",
+  waiting_details_summary: null,
+  waiting_reason: null,
   active_lease_id: null,
   last_fencing_token: 1,
   not_before: "2026-08-21T08:00:00Z",
@@ -86,6 +101,12 @@ const execution = {
   source_session_id: null,
   created_at: "2026-08-21T08:00:00Z",
   updated_at: "2026-08-21T08:04:00Z",
+};
+const savedExecution: AgentExecutionView = {
+  workspace_id: WORKSPACE_ID, execution_id: EXECUTION_ID, root_task_id: null,
+  subtask_id: execution.task_id, worker_item_id: null, status: "running",
+  updated_at: "2026-08-21T08:04:00Z", profile_ref: null, binding_version: null,
+  run_id: null, link_status: null, event_cursor: null,
 };
 
 function traceResponse(events: ReturnType<typeof makeEvent>[], previous: number | null) {
@@ -136,6 +157,9 @@ describe("WorkerTracePage", () => {
   beforeEach(() => {
     server.resetHandlers();
     server.use(
+      http.get("/product/v1/session", () => HttpResponse.json({ session_id: "authorized-local-session",
+        workspace_id: WORKSPACE_ID, principal_id: "current-human", expires_at: "2099-01-01T00:00:00Z" })),
+      http.get(`/api/v1/workspaces/${WORKSPACE_ID}/agent-executions/${EXECUTION_ID}`, () => HttpResponse.json(savedExecution)),
       http.get(`/api/v1/tasks/${ROOT_TASK_ID}/executions/${EXECUTION_ID}/sessions/${SESSION_ID}/trace`, ({ request }) => {
         const before = new URL(request.url).searchParams.get("before_sequence");
         if (before !== null) {

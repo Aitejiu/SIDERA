@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
+from sidera_agents.contracts import ProfileRef
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
@@ -80,6 +81,10 @@ class PlanningProfileRepository:
                 display_name=profile.display_name,
                 planner_module_instance_id=profile.planner_module_instance_id,
                 planner_module_config_version=profile.planner_module_config_version,
+                execution_mode=profile.execution_mode,
+                planner_agent_ref=None
+                if profile.planner_agent_ref is None
+                else profile.planner_agent_ref.model_dump(mode="json"),
                 planner_interface_version=profile.planner_interface_version,
                 status=profile.status.value,
                 user_selectable=profile.user_selectable,
@@ -161,9 +166,7 @@ class PlanningRequestRepository:
                 _clarification_model(
                     clarification,
                     request.workspace_id,
-                    self._next_clarification_sequence(
-                        request.id, request.workspace_id
-                    ),
+                    self._next_clarification_sequence(request.id, request.workspace_id),
                 )
             )
         row.current_brief_revision = request.current_brief_revision
@@ -189,7 +192,9 @@ class PlanningRequestRepository:
         return _to_request(
             row,
             briefs=_list_briefs(self._session, request_id, workspace_id),
-            runs=_list_runs(self._session, request_id, workspace_id, row.profile_snapshot),
+            runs=_list_runs(
+                self._session, request_id, workspace_id, row.profile_snapshot
+            ),
             clarifications=tuple(
                 _to_clarification(item)
                 for item in self._session.scalars(
@@ -222,7 +227,9 @@ class PlanningRequestRepository:
             _to_request(
                 row,
                 briefs=_list_briefs(self._session, row.id, workspace_id),
-                runs=_list_runs(self._session, row.id, workspace_id, row.profile_snapshot),
+                runs=_list_runs(
+                    self._session, row.id, workspace_id, row.profile_snapshot
+                ),
                 clarifications=tuple(
                     _to_clarification(item)
                     for item in self._session.scalars(
@@ -305,9 +312,7 @@ class PlanningRequestRepository:
             previous_version,
         )
 
-    def _next_clarification_sequence(
-        self, request_id: UUID, workspace_id: UUID
-    ) -> int:
+    def _next_clarification_sequence(self, request_id: UUID, workspace_id: UUID) -> int:
         current = self._session.scalar(
             select(func.max(PlanningClarificationModel.sequence)).where(
                 PlanningClarificationModel.planning_request_id == request_id,
@@ -415,9 +420,7 @@ class PlanningRunRepository:
                 PlanningRunModel.status == PlanningRunStatus.FAILED.value,
                 PlanningRunModel.finished_at <= now,
             )
-            .order_by(
-                PlanningRunModel.finished_at.asc(), PlanningRunModel.id.asc()
-            )
+            .order_by(PlanningRunModel.finished_at.asc(), PlanningRunModel.id.asc())
             .limit(limit)
             .with_for_update(skip_locked=True)
         )
@@ -583,7 +586,14 @@ class PlanningRecordRepository:
         plan_template = {
             key: value
             for key, value in mapping.items()
-            if key not in {"schema_version", "kind", "decision_summary", "impact_policy", "execution_intents"}
+            if key
+            not in {
+                "schema_version",
+                "kind",
+                "decision_summary",
+                "impact_policy",
+                "execution_intents",
+            }
         }
         self._session.add(
             PlanningProposalRevisionModel(
@@ -599,6 +609,14 @@ class PlanningRecordRepository:
                 profile_version=proposal.profile_descriptor.profile_version,
                 planner_module_instance_id=proposal.profile_descriptor.planner_module_instance_id,
                 planner_module_config_version=proposal.profile_descriptor.planner_module_config_version,
+                execution_mode=proposal.profile_descriptor.execution_mode,
+                planner_agent_ref=(
+                    None
+                    if proposal.profile_descriptor.planner_agent_ref is None
+                    else proposal.profile_descriptor.planner_agent_ref.model_dump(
+                        mode="json"
+                    )
+                ),
                 decision_summary=_json_value(mapping["decision_summary"]),
                 plan_template=_json_value(plan_template),
                 execution_intents=_json_value(mapping["execution_intents"]),
@@ -669,9 +687,7 @@ class PlanningRecordRepository:
         sequence = self._next_clarification_sequence(
             clarification.planning_request_id, workspace_id
         )
-        self._session.add(
-            _clarification_model(clarification, workspace_id, sequence)
-        )
+        self._session.add(_clarification_model(clarification, workspace_id, sequence))
 
     def list_pending_clarifications(
         self, request_id: UUID, workspace_id: UUID
@@ -827,6 +843,10 @@ def _to_profile(row: PlanningProfileModel) -> PlanningProfile:
         profile_key=row.profile_key,
         version=row.version,
         display_name=row.display_name,
+        execution_mode=row.execution_mode,
+        planner_agent_ref=None
+        if row.planner_agent_ref is None
+        else ProfileRef.model_validate(row.planner_agent_ref),
         planner_module_instance_id=row.planner_module_instance_id,
         planner_module_config_version=row.planner_module_config_version,
         planner_interface_version=row.planner_interface_version,
@@ -875,7 +895,13 @@ def _snapshot_to_mapping(snapshot: PlanningProfileSnapshot) -> dict[str, object]
         "profile_key": snapshot.profile_key,
         "profile_version": snapshot.profile_version,
         "display_name": snapshot.display_name,
-        "planner_module_instance_id": str(snapshot.planner_module_instance_id),
+        "execution_mode": snapshot.execution_mode,
+        "planner_agent_ref": None
+        if snapshot.planner_agent_ref is None
+        else snapshot.planner_agent_ref.model_dump(mode="json"),
+        "planner_module_instance_id": None
+        if snapshot.planner_module_instance_id is None
+        else str(snapshot.planner_module_instance_id),
         "planner_module_config_version": snapshot.planner_module_config_version,
         "planner_interface_version": snapshot.planner_interface_version,
         "prompt_policy_version": snapshot.prompt_policy_version,
@@ -890,7 +916,9 @@ def _snapshot_to_mapping(snapshot: PlanningProfileSnapshot) -> dict[str, object]
         "execution_max_attempts": snapshot.execution_max_attempts,
         "execution_budget_level": snapshot.execution_budget_level,
         "planner_secret_refs": list(snapshot.planner_secret_refs),
-        "planner_capabilities": _capability_to_mapping(capabilities),
+        "planner_capabilities": None
+        if capabilities is None
+        else _capability_to_mapping(capabilities),
         "collaboration_runtime_binding": (
             None
             if snapshot.collaboration_runtime_binding is None
@@ -902,14 +930,23 @@ def _snapshot_to_mapping(snapshot: PlanningProfileSnapshot) -> dict[str, object]
 def _snapshot_from_mapping(value: Mapping[str, object]) -> PlanningProfileSnapshot:
     budget = _mapping(value.get("budget"), "snapshot budget")
     retry = _mapping(value.get("retry_policy"), "snapshot retry_policy")
+    native = value.get("execution_mode", "legacy") == "native_profile"
     return PlanningProfileSnapshot(
         profile_id=_uuid(value, "profile_id"),
         workspace_id=_uuid(value, "workspace_id"),
         profile_key=_string(value, "profile_key"),
         profile_version=_int(value, "profile_version"),
         display_name=_string(value, "display_name"),
-        planner_module_instance_id=_uuid(value, "planner_module_instance_id"),
-        planner_module_config_version=_int(value, "planner_module_config_version"),
+        execution_mode=value.get("execution_mode", "legacy"),
+        planner_agent_ref=None
+        if value.get("planner_agent_ref") is None
+        else ProfileRef.model_validate(value["planner_agent_ref"]),
+        planner_module_instance_id=None
+        if native and value.get("planner_module_instance_id") is None
+        else _uuid(value, "planner_module_instance_id"),
+        planner_module_config_version=None
+        if native and value.get("planner_module_config_version") is None
+        else _int(value, "planner_module_config_version"),
         planner_interface_version=_string(value, "planner_interface_version"),
         prompt_policy_version=_string(value, "prompt_policy_version"),
         system_policy=_mapping(value.get("system_policy"), "snapshot system_policy"),
@@ -940,7 +977,9 @@ def _snapshot_from_mapping(value: Mapping[str, object]) -> PlanningProfileSnapsh
         execution_max_attempts=_int(value, "execution_max_attempts"),
         execution_budget_level=_string(value, "execution_budget_level"),
         planner_secret_refs=_strings(value, "planner_secret_refs"),
-        planner_capabilities=_capability_from_mapping(
+        planner_capabilities=None
+        if native and value.get("planner_capabilities") is None
+        else _capability_from_mapping(
             _mapping(value.get("planner_capabilities"), "planner_capabilities")
         ),
         collaboration_runtime_binding=_binding_from_mapping(
@@ -1016,7 +1055,9 @@ def _binding_from_mapping(value: object) -> CollaborationRuntimeBindingSnapshot 
     )
 
 
-def _brief_model(brief: PlanningBriefRevision, workspace_id: UUID) -> PlanningBriefRevisionModel:
+def _brief_model(
+    brief: PlanningBriefRevision, workspace_id: UUID
+) -> PlanningBriefRevisionModel:
     return PlanningBriefRevisionModel(
         planning_request_id=brief.planning_request_id,
         revision=brief.revision,
@@ -1062,11 +1103,19 @@ def _run_model(run: PlanningRun) -> PlanningRunModel:
         planning_profile_version=run.profile_snapshot.profile_version,
         planner_module_instance_id=run.planner_module_instance_id,
         planner_module_config_version=run.planner_module_config_version,
+        execution_mode=run.profile_snapshot.execution_mode,
+        planner_agent_ref=(
+            None
+            if run.profile_snapshot.planner_agent_ref is None
+            else run.profile_snapshot.planner_agent_ref.model_dump(mode="json")
+        ),
         attempt=run.attempt,
         operation_id=run.operation_id,
         status=run.status.value,
         result_kind=run.structured_result_type,
-        capability_snapshot=_capability_to_mapping(run.capability_snapshot),
+        capability_snapshot=None
+        if run.capability_snapshot is None
+        else _capability_to_mapping(run.capability_snapshot),
         usage=_usage_to_mapping(run.usage),
         provider_ref=run.provider_ref,
         error_code=run.error_code,
@@ -1302,6 +1351,10 @@ def _to_proposal(row: PlanningProposalRevisionModel) -> ProposalRevision:
         profile_version=row.profile_version,
         planner_module_instance_id=row.planner_module_instance_id,
         planner_module_config_version=row.planner_module_config_version,
+        execution_mode=row.execution_mode,
+        planner_agent_ref=None
+        if row.planner_agent_ref is None
+        else ProfileRef.model_validate(row.planner_agent_ref),
     )
     canonical = json.dumps(
         row.canonical_payload,
@@ -1350,7 +1403,7 @@ def _to_materialization(row: ProposalMaterializationModel) -> ProposalMaterializ
     )
 
 
-def _usage_to_mapping(usage: PlanningUsage) -> dict[str, int]:
+def _usage_to_mapping(usage: PlanningUsage) -> dict[str, int | None]:
     return {
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
@@ -1362,11 +1415,16 @@ def _usage_to_mapping(usage: PlanningUsage) -> dict[str, int]:
 
 def _usage_from_mapping(value: Mapping[str, object]) -> PlanningUsage:
     return PlanningUsage(
-        input_tokens=_int(value, "input_tokens"),
-        output_tokens=_int(value, "output_tokens"),
-        cost_microunits=_int(value, "cost_microunits"),
-        runtime_seconds=_int(value, "runtime_seconds"),
-        context_bytes=_int(value, "context_bytes"),
+        **{
+            field: None if value[field] is None else _int(value, field)
+            for field in (
+                "input_tokens",
+                "output_tokens",
+                "cost_microunits",
+                "runtime_seconds",
+                "context_bytes",
+            )
+        }
     )
 
 

@@ -3,6 +3,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from threading import RLock
+from typing import Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sidera_control_plane.application.knowledge_candidate_submission import (
@@ -118,7 +119,9 @@ class FakeWorkerAdapter:
             raise ValueError("handoff workspace digest must be a SHA-256 hash")
         self._handoff_workspace_digest = handoff_workspace_digest
         self._checkpoint_override: tuple[bool, str | None] | None = None
-        self._patch_outcomes: deque[tuple[DeliveryOutcome, str | None]] = deque()
+        self._patch_outcomes: deque[
+            tuple[Literal["delivered", "blocked", "failed", "unknown"], str | None]
+        ] = deque()
         self._patch_results: dict[UUID, ContextPatchDeliveryResult] = {}
         self._applied_context_patches: list[ContextPatchMaterializationV1] = []
         self._sessions: dict[str, _FakeSession] = {}
@@ -388,14 +391,14 @@ class FakeWorkerAdapter:
                 )
             if self._patch_outcomes:
                 outcome, error_code = self._patch_outcomes.popleft()
-                if outcome is not DeliveryOutcome.DELIVERED:
+                if outcome != "delivered":
                     return self._remember_patch_result(
                         ContextPatchDeliveryResult(
-                            outcome=outcome.value,
+                            outcome=outcome,
                             operation_id=operation_id,
                             patch_hash=patch_hash,
                             accepted_sequence=None,
-                            error_code=error_code or outcome.value,
+                            error_code=error_code or outcome,
                         )
                     )
             if session.prompt_busy:
@@ -796,11 +799,23 @@ class FakeWorkerAdapter:
             )
         except (TypeError, ValueError) as exc:
             raise ValueError(f"unsupported patch outcome: {outcome!r}") from exc
+        if normalized is DeliveryOutcome.DELIVERED:
+            patch_outcome: Literal["delivered", "blocked", "failed", "unknown"] = (
+                "delivered"
+            )
+        elif normalized is DeliveryOutcome.BLOCKED:
+            patch_outcome = "blocked"
+        elif normalized is DeliveryOutcome.FAILED:
+            patch_outcome = "failed"
+        elif normalized is DeliveryOutcome.UNKNOWN:
+            patch_outcome = "unknown"
+        else:
+            raise ValueError(f"unsupported patch outcome: {outcome!r}")
         if normalized is DeliveryOutcome.DELIVERED and error_code is not None:
             raise ValueError("delivered patch outcome cannot have an error_code")
         if error_code is not None and not error_code.strip():
             raise ValueError("error_code is required when provided")
-        self._patch_outcomes.append((normalized, error_code))
+        self._patch_outcomes.append((patch_outcome, error_code))
 
     def inject_failure(self, operation: str, failure_code: str) -> None:
         clean_code = failure_code.strip()

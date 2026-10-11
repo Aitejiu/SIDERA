@@ -36,6 +36,7 @@ def build_input_dispatcher(
     uow_factory = lambda: SqlAlchemyUnitOfWork(
         gateway_runtime.database,
         projection_change_retention_seconds=settings.projection_change_retention_seconds,
+        before_commit=gateway_runtime.before_commit,
     )
     return InputDispatcherRuntime(
         dispatcher=InputDispatcher(

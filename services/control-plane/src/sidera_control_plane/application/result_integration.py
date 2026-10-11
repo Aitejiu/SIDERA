@@ -10,7 +10,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sidera_control_plane.application.code_result_capture import (
-    code_capture_operation_id,
+    capture_operation_for_execution,
 )
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.context_requests import (
@@ -543,7 +543,10 @@ class ResultIntegrationService:
             )
 
             integration_snapshot = uow.results.get_code_result_by_capture_operation(
-                code_capture_operation_id(execution.id), workspace_id
+                capture_operation_for_execution(
+                    uow, workspace_id=execution.workspace_id, execution_id=execution.id
+                ),
+                workspace_id,
             )
             if integration_snapshot is None:
                 raise ResultError(

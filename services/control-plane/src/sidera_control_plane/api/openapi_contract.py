@@ -20,6 +20,7 @@ from sidera_control_plane.api.schemas import (
     ConfigureWorkerRuntimePayload,
     ConfirmPlanningProposalPayload,
     ConfirmPlanRevisionPayload,
+    ConfirmProfileHandoffPayload,
     ConfirmWorkerHandoffPayload,
     ConfirmWorkerTransitionStoppedPayload,
     ErrorBody,
@@ -38,6 +39,7 @@ from sidera_control_plane.api.schemas import (
     NotificationReadinessResponse,
     PauseCollaborationReleasePayload,
     PinExecutionWorkerPayload,
+    PrepareProfileHandoffPayload,
     PrepareWorkerHandoffPayload,
     ReconcileWorkerTransitionPayload,
     RecoverWorkerHandoffPayload,
@@ -48,6 +50,7 @@ from sidera_control_plane.api.schemas import (
     ReintegrateTaskResultPayload,
     RejectCollaborationReleaseProposalPayload,
     RejectPlanningProposalPayload,
+    RepairPlanningContextPayload,
     RequestProposalRevisionPayload,
     RequestTaskReworkPayload,
     RequeueNotificationDeliveryPayload,
@@ -55,11 +58,16 @@ from sidera_control_plane.api.schemas import (
     RetryBlockedPlanningRunPayload,
     RetryContextAssemblyPayload,
     RetryResultVerificationPayload,
+    ReviseFailedPlanningRequestPayload,
     ReviseWorkContextPayload,
     RevokeContextPackagePayload,
+    SendExecutionInputPayload,
+    SetAgentAssigneePayload,
     SetModuleLifecyclePayload,
     SubmitPlanningRequestPayload,
     SubmitPlanRevisionPayload,
+    SubmitTaskGoalPayload,
+    UpdateUnstartedAgentBindingPayload,
 )
 from sidera_control_plane.config import Settings
 
@@ -71,12 +79,15 @@ _PLANNING_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
     ),
     ("RegisterPlanningProfile", RegisterPlanningProfilePayload),
     ("SubmitPlanningRequest", SubmitPlanningRequestPayload),
+    ("SubmitTaskGoal", SubmitTaskGoalPayload),
     ("SubmitPlanRevision", SubmitPlanRevisionPayload),
     ("CancelPlanningRequest", CancelPlanningRequestPayload),
     ("AnswerPlanningClarification", AnswerPlanningClarificationPayload),
     ("RequestProposalRevision", RequestProposalRevisionPayload),
+    ("ReviseFailedPlanningRequest", ReviseFailedPlanningRequestPayload),
     ("RejectPlanningProposal", RejectPlanningProposalPayload),
     ("RetryBlockedPlanningRun", RetryBlockedPlanningRunPayload),
+    ("RepairPlanningContext", RepairPlanningContextPayload),
     ("ConfirmPlanningProposal", ConfirmPlanningProposalPayload),
     ("ConfirmPlanRevision", ConfirmPlanRevisionPayload),
     ("ReviseWorkContext", ReviseWorkContextPayload),
@@ -87,6 +98,10 @@ _PLANNING_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
 )
 
 _RUNTIME_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
+    ("SendExecutionInput", SendExecutionInputPayload),
+    ("SetSubtaskAssignee", SetAgentAssigneePayload),
+    ("SetWorkerItemAssignee", SetAgentAssigneePayload),
+    ("UpdateUnstartedAgentBinding", UpdateUnstartedAgentBindingPayload),
     ("ConfigureWorkerRuntime", ConfigureWorkerRuntimePayload),
     ("SetModuleLifecycle", SetModuleLifecyclePayload),
     ("PinExecutionWorker", PinExecutionWorkerPayload),
@@ -100,6 +115,8 @@ _TRANSITION_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
 )
 
 _HANDOFF_COMMAND_PAYLOADS: tuple[tuple[str, type[BaseModel]], ...] = (
+    ("PrepareProfileHandoff", PrepareProfileHandoffPayload),
+    ("ConfirmProfileHandoff", ConfirmProfileHandoffPayload),
     ("PrepareWorkerHandoff", PrepareWorkerHandoffPayload),
     ("ConfirmWorkerHandoff", ConfirmWorkerHandoffPayload),
     ("CancelWorkerHandoff", CancelWorkerHandoffPayload),

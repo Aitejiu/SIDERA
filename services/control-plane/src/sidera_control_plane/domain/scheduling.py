@@ -20,6 +20,7 @@ class SchedulingBlockStatus(StrEnum):
 
 
 class SchedulingBlockReason(StrEnum):
+    WAITING_CAPACITY = "waiting_capacity"
     NO_ELIGIBLE_WORKER = "no_eligible_worker"
     PINNED_WORKER_UNAVAILABLE = "pinned_worker_unavailable"
     RUNTIME_CONFIGURATION_MISSING = "runtime_configuration_missing"
@@ -48,6 +49,7 @@ class SchedulingBlockReason(StrEnum):
 
 
 _SCHEDULING_REASON_LABELS = {
+    "waiting_capacity": "Native capacity unavailable",
     "no_eligible_worker": "暂无可用执行节点",
     "pinned_worker_unavailable": "固定执行节点不可用",
     "runtime_configuration_missing": "运行环境未配置",

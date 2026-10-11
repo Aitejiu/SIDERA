@@ -1,9 +1,20 @@
-export const WORKSPACE_TABS_SCHEMA_VERSION = 5;
+import type { components } from "@/shared/api/product-schema";
+
+export const WORKSPACE_TABS_SCHEMA_VERSION = 6;
+
+export type ConfigurationRecovery = {
+  operationId: string;
+  target_ref?: components["schemas"]["ProfileRef"] | components["schemas"]["ResourceRef"];
+};
 
 export type WorkspaceTabId =
   | "task-index"
   | "inbox"
   | "planning-new"
+  | "agents"
+  | "runtimes"
+  | `agent:${string}`
+  | `runtime:${string}`
   | `planning:${string}`
   | `root-task:${string}`
   | `collaboration:${string}`
@@ -17,6 +28,7 @@ export type WorkspaceTabId =
 export type WorkspaceTab = {
   returnTabId?: WorkspaceTabId;
   description?: string;
+  configurationRecovery?: ConfigurationRecovery;
 } & (
   | {
       id: "task-index";
@@ -31,6 +43,34 @@ export type WorkspaceTab = {
       title: "信箱";
       href: string;
       closeable: false;
+    }
+  | {
+      id: "agents";
+      kind: "agents";
+      title: string;
+      href: string;
+      closeable: true;
+    }
+  | {
+      id: "runtimes";
+      kind: "runtimes";
+      title: string;
+      href: string;
+      closeable: true;
+    }
+  | {
+      id: `agent:${string}`;
+      kind: "agent";
+      title: string;
+      href: string;
+      closeable: true;
+    }
+  | {
+      id: `runtime:${string}`;
+      kind: "runtime";
+      title: string;
+      href: string;
+      closeable: true;
     }
   | {
       id: "planning-new";
@@ -111,15 +151,19 @@ export type WorkspaceTabsState = {
   navigationHref: string | null;
 };
 
-export type WorkspaceTabsAction =
+export type WorkspaceTabNavigationAction =
   | { type: "open"; tab: WorkspaceTab }
   | { type: "activate"; id: WorkspaceTabId }
-  | { type: "close"; id: WorkspaceTabId }
+  | { type: "close"; id: WorkspaceTabId };
+
+export type WorkspaceTabsAction =
+  | WorkspaceTabNavigationAction
+  | { type: "commit-navigation"; action: WorkspaceTabNavigationAction; destinationTab: WorkspaceTab }
   | { type: "register-direct-route"; tab: WorkspaceTab }
   | { type: "clear-navigation" };
 
 type SerializedTabs = {
-  schemaVersion: typeof WORKSPACE_TABS_SCHEMA_VERSION;
+  schemaVersion: 5 | typeof WORKSPACE_TABS_SCHEMA_VERSION;
   tabs: WorkspaceTab[];
   activeTabId: WorkspaceTabId;
 };
@@ -141,15 +185,15 @@ export function initialTabs(workspaceId: string): WorkspaceTabsState {
   };
 }
 
-export function openTab(tab: WorkspaceTab): WorkspaceTabsAction {
+export function openTab(tab: WorkspaceTab): WorkspaceTabNavigationAction {
   return { type: "open", tab };
 }
 
-export function activateTab(id: WorkspaceTabId): WorkspaceTabsAction {
+export function activateTab(id: WorkspaceTabId): WorkspaceTabNavigationAction {
   return { type: "activate", id };
 }
 
-export function closeTab(id: WorkspaceTabId): WorkspaceTabsAction {
+export function closeTab(id: WorkspaceTabId): WorkspaceTabNavigationAction {
   return { type: "close", id };
 }
 
@@ -161,11 +205,23 @@ export function clearNavigation(): WorkspaceTabsAction {
   return { type: "clear-navigation" };
 }
 
+export function commitNavigation(action: WorkspaceTabNavigationAction, destinationTab: WorkspaceTab): WorkspaceTabsAction {
+  return { type: "commit-navigation", action, destinationTab };
+}
+
 export function reduceTabs(
   state: WorkspaceTabsState,
   action: WorkspaceTabsAction,
 ): WorkspaceTabsState {
   switch (action.type) {
+    case "commit-navigation": {
+      const next = reduceTabs(state, action.action);
+      const aligned = next.activeTabId === action.destinationTab.id
+        && next.tabs.some(tab => tab.id === action.destinationTab.id)
+        ? next
+        : reduceTabs(next, registerDirectRoute(action.destinationTab));
+      return { ...aligned, navigationHref: null };
+    }
     case "open":
     case "register-direct-route": {
       const existingIndex = state.tabs.findIndex((tab) => tab.id === action.tab.id);
@@ -234,7 +290,7 @@ export function reduceTabs(
 }
 
 export function storageKey(workspaceId: string): string {
-  return `sidera.workspace-tabs.v5:${workspaceId}`;
+  return `sidera.workspace-tabs.v6:${workspaceId}`;
 }
 
 export function serializeTabs(state: WorkspaceTabsState): string {
@@ -259,6 +315,7 @@ export function hydrateTabs(
     if (!isSerializedTabs(parsed) || !isValidTabSet(workspaceId, parsed.tabs)) {
       return fallback;
     }
+    if (parsed.schemaVersion === 5 && parsed.tabs.some(tab => ["agent", "agents", "runtime", "runtimes"].includes(tab.kind) || tab.configurationRecovery !== undefined)) return fallback;
     if (!parsed.tabs.some((tab) => tab.id === parsed.activeTabId)) {
       return fallback;
     }
@@ -277,7 +334,8 @@ export function loadTabs(workspaceId: string): WorkspaceTabsState {
   if (typeof window === "undefined") {
     return initialTabs(workspaceId);
   }
-  return hydrateTabs(workspaceId, window.sessionStorage.getItem(storageKey(workspaceId)));
+  return hydrateTabs(workspaceId, window.sessionStorage.getItem(storageKey(workspaceId))
+    ?? window.sessionStorage.getItem(`sidera.workspace-tabs.v5:${workspaceId}`));
 }
 
 export function saveTabs(state: WorkspaceTabsState): void {
@@ -288,7 +346,7 @@ export function saveTabs(state: WorkspaceTabsState): void {
 }
 
 function isSerializedTabs(value: unknown): value is SerializedTabs {
-  if (!isRecord(value) || value.schemaVersion !== WORKSPACE_TABS_SCHEMA_VERSION) {
+  if (!isRecord(value) || ![5, WORKSPACE_TABS_SCHEMA_VERSION].includes(Number(value.schemaVersion))) {
     return false;
   }
   return Array.isArray(value.tabs) && isTabId(value.activeTabId);
@@ -318,6 +376,15 @@ function isWorkspaceTab(value: unknown, workspaceId: string): value is Workspace
   }
   if (value.description !== undefined && typeof value.description !== "string") {
     return false;
+  }
+  if (Object.keys(value).some(key => !["id", "kind", "title", "href", "closeable", "returnTabId", "description", "configurationRecovery"].includes(key))) return false;
+  if (value.returnTabId !== undefined && !isTabId(value.returnTabId)) return false;
+  if (value.configurationRecovery !== undefined && (value.kind !== "agent" || !isRecovery(value.configurationRecovery, workspaceId))) return false;
+  if (value.id === "agents" || value.id === "runtimes") {
+    return value.kind === value.id && value.closeable === true && isWorkspaceHref(value.href, workspaceId);
+  }
+  if (value.id.startsWith("agent:") || value.id.startsWith("runtime:")) {
+    return value.kind === value.id.split(":")[0] && value.closeable === true && isWorkspaceHref(value.href, workspaceId);
   }
   if (value.id === "task-index") {
     return value.kind === "task-index"
@@ -383,16 +450,23 @@ function isTabId(value: unknown): value is WorkspaceTabId {
     || (typeof value === "string" && (
       value === "inbox"
       || value === "planning-new"
-      || value.startsWith("planning:")
-      || value.startsWith("root-task:")
-      || value.startsWith("collaboration:")
-      || value.startsWith("subtask:")
-      || value.startsWith("worker-item:")
-      || value.startsWith("chat:")
-      || value.startsWith("knowledge-page:")
-      || value.startsWith("knowledge-candidate:")
-      || value.startsWith("context-package:")
+      || value === "agents"
+      || value === "runtimes"
+      || /^(agent|runtime|planning|root-task|collaboration|worker-item|chat|knowledge-page|knowledge-candidate|context-package):[^\s:][^\r\n]*$/.test(value)
+      || /^subtask:[^\s:][^:]*:[^\s:][^\r\n]*$/.test(value)
     ));
+}
+
+function isRecovery(value: unknown, workspaceId: string): value is ConfigurationRecovery {
+  if (!isRecord(value) || Object.keys(value).some(key => !["operationId", "target_ref"].includes(key))
+    || typeof value.operationId !== "string" || value.operationId.length === 0 || value.operationId.length > 128) return false;
+  if (!Object.hasOwn(value, "target_ref")) return true;
+  if (!isRecord(value.target_ref)) return false;
+  const ref = value.target_ref;
+  const kind = typeof ref.profile_id === "string" ? "profile_id" : "resource_id";
+  return Object.keys(ref).length === 3 && Object.keys(ref).every(key => ["workspace_id", kind, "revision"].includes(key))
+    && ref.workspace_id === workspaceId && typeof ref[kind] === "string" && ref[kind].length > 0
+    && typeof ref.revision === "number" && Number.isInteger(ref.revision) && ref.revision > 0;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

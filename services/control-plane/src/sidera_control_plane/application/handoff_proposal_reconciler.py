@@ -20,6 +20,7 @@ from sidera_control_plane.application.handoff_candidates import (
     runtime_snapshot_for_handoff,
 )
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
+from sidera_control_plane.application.profile_handoff import ProfileHandoffValidator
 from sidera_control_plane.application.worker_runtime import (
     ResolvedWorkerRuntime,
     WorkerRuntimeInspectionPort,
@@ -36,6 +37,7 @@ from sidera_control_plane.domain.handoffs import (
     HandoffCandidateList,
     HandoffProposal,
     HandoffProposalStatus,
+    NativeHandoffProposalPayload,
 )
 from sidera_control_plane.domain.plan_transitions import PlanTransitionStatus
 from sidera_control_plane.domain.worker_item import WorkerItem, WorkerItemStatus
@@ -312,12 +314,14 @@ class HandoffProposalReconciler:
         runtime_resolver: WorkerRuntimeInspectionPort,
         actor_type: str = "system",
         actor_id: str = "handoff-proposal-reconciler",
+        native_validator: ProfileHandoffValidator | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._candidate_service = candidate_service
         self._runtime_resolver = runtime_resolver
         self._actor_type = actor_type
         self._actor_id = actor_id
+        self._native_validator = native_validator
 
     def reconcile(
         self,
@@ -341,6 +345,11 @@ class HandoffProposalReconciler:
         workspace_id: UUID,
         now: datetime,
     ) -> HandoffProposal:
+        original = uow.handoff_proposals.get(proposal_id, workspace_id)
+        if original is not None and isinstance(
+            original.payload, NativeHandoffProposalPayload
+        ):
+            return self._reconcile_native(uow, original, now)
         proposal = uow.handoff_proposals.get(
             proposal_id,
             workspace_id,
@@ -376,6 +385,44 @@ class HandoffProposalReconciler:
         )
         return proposal
 
+    def _reconcile_native(self, uow, proposal, now):
+        if self._native_validator is None:
+            raise HandoffBaseInspectionError("native_handoff_services_required")
+        self._native_validator.authorize_payload(uow, proposal.payload)
+        if proposal.status is not HandoffProposalStatus.PREPARED:
+            return proposal
+        expired = now >= proposal.expires_at
+        reason = (
+            "proposal_expired"
+            if expired
+            else self._native_validator.stale_reason(uow, proposal.payload)
+        )
+        locked = uow.handoff_proposals.get(
+            proposal.id, proposal.payload.workspace_id, for_update=True
+        )
+        if locked is None:
+            raise NotFound("handoff proposal not found")
+        if (
+            locked.version != proposal.version
+            or locked.status is not HandoffProposalStatus.PREPARED
+        ):
+            return locked
+        if reason is None:
+            return locked
+        previous = locked.version
+        if expired:
+            locked.mark_expired(now=now)
+        else:
+            locked.mark_stale(reason=reason, now=now)
+        self._save_and_emit(
+            uow,
+            locked,
+            previous_version=previous,
+            event_type="HandoffProposalExpired" if expired else "HandoffProposalStale",
+            reason=reason,
+        )
+        return locked
+
     def _stale_reason(
         self,
         uow: ControlPlaneUnitOfWork,
@@ -383,6 +430,8 @@ class HandoffProposalReconciler:
         now: datetime,
     ) -> str | None:
         payload = proposal.payload
+        if payload.target_worker_id is None:
+            return "target_worker_changed"
         try:
             candidate = self._candidate_service.inspect_in_uow(
                 uow,
@@ -593,11 +642,15 @@ def _proposal_event_payload(proposal: HandoffProposal, *, reason: str) -> dict[s
         "source_execution_id": str(payload.source_execution_id),
         "source_session_id": str(payload.source_session_id),
         "source_worker_id": str(payload.source_worker_id),
-        "target_worker_id": str(payload.target_worker_id),
+        "target_worker_id": None
+        if payload.target_worker_id is None
+        else str(payload.target_worker_id),
         "proposal_hash": proposal.proposal_hash,
         "status": proposal.status.value,
         "reason": reason,
-        "handoff_reason_hash": hashlib.sha256(payload.handoff_reason.encode()).hexdigest(),
+        "handoff_reason_hash": hashlib.sha256(
+            payload.handoff_reason.encode()
+        ).hexdigest(),
     }
 
 

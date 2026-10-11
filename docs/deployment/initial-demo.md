@@ -1,7 +1,244 @@
 # 快速开始
 
-在 macOS 上启动 SIDERA 本地 Demo，用样例任务体验完整的页面浏览与介入记录。
-不需要模型 API key，也不会产生模型调用费用。
+新版原生产品在本机管理 Harness、Profile 和复杂任务。本页先介绍真实执行的安装路径；
+文末保留无模型演示和 legacy 运行栈，两者不是新版的必需依赖。
+当前范围是桌面、本机单人和内置 OpenCode，不支持公网部署。
+
+> **版本选择：** 新版已合入 `main`，本页按主分支说明安装。原生开发分支继续保留，
+> 但不再是首次安装的必需入口。不要将新版命令、旧数据库和演示 seed 混用。
+
+真实执行按顺序完成：[安装](#安装新版) → [数据库与环境](#配置产品环境) →
+[凭据](#配置模型凭据) → [启动与登录](#启动与连接网页) →
+[项目配置](#配置项目与验证) → [首次任务](../guide/workspace.md#试一个有依赖的小任务)。
+不准备配置模型的用户可直接选[无模型演示](#可操作的网页版演示)，不必执行真实运行步骤。
+
+## 新版环境要求
+
+- Node.js 24、npm、Python 3.12、`uv`、Git，以及浏览器。
+- PostgreSQL 16；准备四个由你拥有、可迁移的专用数据库，分别用于 Product、Agents、
+  Control Plane 和凭据元数据。它们可以位于不同服务器，不要借用其他应用的库。
+- 本机 OpenCode 可执行文件及明确授权的模型账户。真实执行会产生 Provider 费用。
+
+当前真实桌面路径使用过 OpenCode 1.18.32。Runtime 会记录实际版本与能力；这不是对任意
+新版本的兼容保证。新版不需要 Akashic、旧 Main Agent Gateway 或 Docker。
+
+## 安装新版
+
+Web 当前仍从仓库运行，尚无打包的前端安装器或已发布的 PyPI 安装命令。
+已有仓库可跳过 clone。在项目根目录执行：
+
+```bash
+git clone --branch main https://github.com/Aitejiu/SIDERA.git
+cd SIDERA
+npm --prefix apps/web ci
+SIDERA_INSTALL_ROOT="$(mktemp -d /private/tmp/sidera-install.XXXXXX)"
+python3.12 scripts/check-agent-module-installation.py \
+  --repository "$PWD" --output-root "$SIDERA_INSTALL_ROOT" \
+  --combination native-product
+export PATH="$SIDERA_INSTALL_ROOT/native-product-venv/bin:$PATH"
+```
+
+安装检查会构建并安装新版所需的六个 wheel，在隔离环境核对包、迁移资源和公共接口，
+不调用模型，也不迁移你的业务库。需要 `uv` 在 PATH 中，构建和下载依赖需要网络。
+只选择 `native-product`；其他 legacy 组合显示 `NOT_RUN` 是预期结果，不应补跑全部组合。
+确认该组合通过后再继续。临时安装目录适合首次体验；重新安装时使用新的空目录。
+已有仓库先用 `git branch --show-current` 核对分支；若本地有未提交修改，保留原目录，
+另行 clone 到新目录体验，不要为切分支清空自己的改动。
+
+记下 `SIDERA_INSTALL_ROOT` 的实际值。新终端不会继承上一个终端里的变量和 PATH；
+后续运行 CLI 的终端都需要重新设置安装目录和上述 PATH。
+
+## 配置产品环境
+
+以下是占位配置。先由本机数据库管理员创建四个专用数据库并授予应用角色所需权限，
+再替换数据库名、角色、端口和目录。连接需要密码时使用受保护的本地配置，不要提交
+带密码的 URL。PostgreSQL 本机安装可参考[数据库说明](../../services/control-plane/README.md#native-postgresql)。
+
+以下示例假定 PostgreSQL 已监听本机 `55432`，`sidera` 角色已创建且当前用户有创建库
+并指定 owner 的权限；数据库工具需要在 PATH 中。只在首次安装时创建：
+
+```bash
+pg_isready -h 127.0.0.1 -p 55432
+createdb -h 127.0.0.1 -p 55432 -O sidera sidera_native_product
+createdb -h 127.0.0.1 -p 55432 -O sidera sidera_native_agents
+createdb -h 127.0.0.1 -p 55432 -O sidera sidera_native_cp
+createdb -h 127.0.0.1 -p 55432 -O sidera sidera_native_credentials
+```
+
+遇到同名库已存在时，先确认归属和用途，不要删除或重置它们。使用其他端口、角色或
+数据库名时，要同步替换下面的四条 URL。安装在别处的 PostgreSQL 不必改成示例端口。
+
+```bash
+export SIDERA_PRODUCT_PRODUCT_DATABASE_URL="postgresql+psycopg://sidera@127.0.0.1:55432/sidera_native_product"
+export SIDERA_PRODUCT_AGENT_DATABASE_URL="postgresql+psycopg://sidera@127.0.0.1:55432/sidera_native_agents"
+export SIDERA_PRODUCT_CP_DATABASE_URL="postgresql+psycopg://sidera@127.0.0.1:55432/sidera_native_cp"
+export SIDERA_PRODUCT_CREDENTIAL_DATABASE_URL="postgresql+psycopg://sidera@127.0.0.1:55432/sidera_native_credentials"
+export SIDERA_PRODUCT_DEPLOYMENT_NAMESPACE="00000000-0000-4000-8000-000000000101"
+export SIDERA_PRODUCT_WORKSPACE_ID="00000000-0000-4000-8000-000000000102"
+export SIDERA_PRODUCT_LOCAL_PRINCIPAL_ID="local-developer"
+export SIDERA_PRODUCT_WORKSPACE_ROOT="$PWD/.sidera/native-product/workspaces"
+export SIDERA_PRODUCT_ARTIFACT_ROOT="$PWD/.sidera/native-product/artifacts"
+export SIDERA_PRODUCT_WEB_ORIGIN="http://127.0.0.1:5173"
+```
+
+两处 UUID 是虚构示例；为自己的安装选择 UUID，并在重启时保持 namespace、workspace、
+principal、数据库和存储目录稳定。`AGENT_DATABASE_URL` 是单数。
+配置从启动进程环境读取，不会自动发现项目中的 `.env`，也不继承旧 `SIDERA_DATABASE_URL`。
+在后续每个终端加载同一组受保护的配置。
+建议将这些非密钥环境设置及安装目录保存在仓库外的私有 shell 配置文件中，限制为
+本人可读，并在每个相关终端手动 `source`；模型 key 仍通过下方的凭据入口管理。
+重启要复用原配置，不要每次生成新 UUID。
+
+默认后端 `127.0.0.1:18080`、单进程、无 reload；结果输入和集成默认开启。
+显式迁移并检查，不要运行演示 seed：
+
+```bash
+sidera migrate
+sidera preflight --json
+```
+
+迁移只操作你选择的目标。preflight 不启动 Agent、不调用模型，也不自动修复 schema。
+迁移不完整时先处理错误，不要更换成内存存储或样例库。
+
+## 配置模型凭据
+
+新版默认关闭托管凭据写入。在受支持的 macOS 上，安装可选 Keychain 依赖并在启动
+服务的环境中启用：
+
+```bash
+uv pip install --python "$SIDERA_INSTALL_ROOT/native-product-venv/bin/python" \
+  --find-links "$SIDERA_INSTALL_ROOT/wheels" 'sidera-model-connections[macos]==0.1.0'
+export SIDERA_PRODUCT_MANAGED_CREDENTIALS_ENABLED=true
+```
+
+启动并连接网页后，在 Profile 设置中展开“配置凭据引用”→“新建凭据”，通过密码框
+输入 key，选择凭据及注入目标，点击“绑定凭据”并保存 Profile。
+对于明确的 OpenCode Go 路由，注入目标通常是 `OPENCODE_API_KEY`。
+`native_settings.provider_env` 只填写这个变量名，不能填写 key 本身。
+托管存储依赖稳定的 deployment namespace，不会自动导入全局 OpenCode 登录。
+
+另一种服务端接入方式是明确配置 `SIDERA_PRODUCT_SELECTED_SECRETS`，并通过公共
+`CredentialService.register_env` 登记与所选变量名对应的凭据元数据；只有注入环境变量
+而没有登记、授权和 Profile 引用还不够。见[凭据组件说明](../../packages/model-connections/README.md#credentials-and-resolution)。
+不要将真实 key 放进示例命令、shell 历史、Profile 指令或 Git。
+
+## 启动与连接网页
+
+终端一，使用同一组产品环境：
+
+```bash
+sidera serve --host 127.0.0.1 --port 18080
+```
+
+终端二，在仓库根目录启动 Web：
+
+```bash
+SIDERA_WEB_BACKEND=native \
+SIDERA_WEB_PRODUCT_URL=http://127.0.0.1:18080 \
+npm --prefix apps/web run dev -- --port 5173 --strictPort
+```
+
+终端三，使用同一组产品环境签发一次性本地会话令牌并打开网页：
+
+```bash
+sidera session bootstrap
+sidera open
+```
+
+bootstrap 只打印私有 JSON 文件路径与过期时间，不打印秘密。读取该文件中的 `token`
+字段，在智能体页“本地会话”→“CLI 令牌”中粘贴原始令牌并点击“连接”。不要粘贴文件
+路径或整份 JSON，不要将令牌放入 URL 或 localStorage。默认有效期 300 秒，只能兑换一次。
+文件位于仓库之外的 owned 0700 目录，以独占 0600 文件保存；也可用 `--output` 指定满足
+相同要求的绝对路径。普通刷新使用已建立的本地会话，不需要再次兑换。
+
+`sidera open` 打开配置的 Web origin 下对应工作区的任务页，不是后端 API。
+端口有占用时选择空闲端口，并同时更新后端地址、Web proxy 和产品的 Web origin；
+`localhost`、`127.0.0.1` 及不同端口不是同一个 Origin。
+
+## 配置项目与验证
+
+先在智能体页登记 OpenCode Runtime，创建并启用兼容的 Planner Profile，配置模型与凭据。
+设置 Main/Planner/Worker 默认安排，具体入口见[使用指南](../guide/workspace.md#先配置智能体)。
+Runtime 和 Profile 保存成功不代表 Provider 已经成功回复；测试 Profile 也会产生真实调用。
+
+任务执行需要明确的 Git 项目和验证命令。仓库必须是授权的绝对 Git 根目录，存在 HEAD，
+不能通过 symlink 逃逸。首次设置使用 `--expected-version 0`；将下面的 Profile UUID 和
+修订替换为已启用 Profile 的真实值。示例检查仅适合有对应 Python 测试的项目，必须按
+项目实际命令、依赖与解释器调整，不能用永远返回成功的命令代替验收。
+
+浏览器已消费的 bootstrap 不能用于 CLI 项目设置。再次运行 `sidera session bootstrap`，
+将新返回的文件路径作为下面的 `SIDERA_SETUP_BOOTSTRAP_FILE`，在有效期内执行：
+
+```bash
+export SIDERA_SETUP_BOOTSTRAP_FILE="/absolute/private/path/from-bootstrap-output.json"
+export SIDERA_PLANNER_PROFILE='{"workspace_id":"00000000-0000-4000-8000-000000000102","profile_id":"00000000-0000-4000-8000-000000000103","revision":1}'
+export SIDERA_VERIFICATION_CHECKS='[{"key":"project-tests","version":1,"argv":["python3","-m","pytest","tests","-q"],"cwd":".","environment_ref":"project-tests-v1","prepare_argvs":[],"timeout_seconds":300,"success_exit_codes":[0],"report_paths":[],"required":true}]'
+sidera workspace configure \
+  --workspace "$SIDERA_PRODUCT_WORKSPACE_ID" \
+  --repository /absolute/path/to/your/git-project \
+  --planner-profile "$SIDERA_PLANNER_PROFILE" \
+  --verification-checks "$SIDERA_VERIFICATION_CHECKS" \
+  --expected-version 0 \
+  --bootstrap-file "$SIDERA_SETUP_BOOTSTRAP_FILE"
+```
+
+ProfileRef 恰好包含 `workspace_id`、`profile_id`、`revision`。
+检查对象使用上述完整 CheckSpecV1 字段；key 唯一，所有检查的 `environment_ref` 一致。
+环境标识不会自动安装项目依赖；需要时用实际 `prepare_argvs` 配置准备命令。
+设置只保存配置，不执行测试或修改仓库。后续更新使用已保存的 workspace version；
+省略 Planner/检查可保留原设置，显式空检查列表会被拒绝。已有排队操作仍使用原来固定的版本。
+
+## 开始真实任务与结束使用
+
+与主 Agent 沟通目标，查看规划及负责人并显式确认，再在看板/DAG 跟踪执行。
+WorkerItem 用于查看步骤和局部介入，Trace 是进一步检查的入口。
+项目验证完成后查看候选成果，再由用户验收；接受不会静默应用到原仓库分支。
+细节见[使用指南](../guide/workspace.md)。
+
+先正常停止活动对话，再停止产品服务和 Web。若关闭返回 pending/UNKNOWN，应保留原
+资源并继续查询/正常关闭，不能认为清理已成功。重启复用同一组稳定配置，不重新 seed。
+Knowledge 是独立可选服务；当前默认安装没有自动启用知识库、团队分享或其他 Harness。
+
+## 新版常见问题
+
+### 找不到 `sidera` 命令
+
+核对安装检查的 `native-product` 组合是否通过，并将本次安装目录的
+`native-product-venv/bin` 加回当前终端 PATH。另开终端后需要重新加载安装目录和产品配置；
+不要改用旧 Gateway 命令来代替新版服务。
+
+### preflight 失败或页面提示需要本地会话
+
+先检查四个数据库、URL、角色与迁移结果。`storage_ready` 为 `true` 仅表示存储准备好，
+不是模型已经可用。页面需要会话时重新签发 bootstrap，在五分钟内兑换；过期或已消费的
+令牌不能重复使用。后端、Vite proxy、Web origin 及浏览器实际访问地址必须一致。
+
+### 保存了 Profile，但没有回复或任务没有启动
+
+确认 Profile 和 Runtime 已启用，模型路由和凭据绑定匹配，并检查工作区的项目/Planner/
+验证命令是否已配置。原生 Run 不读取全局 OpenCode 登录，单独运行 CLI 成功不能代替这里的
+凭据配置。主 Agent 回复不等于已提交规划；查看关联规划状态，并显式确认当前方案。
+用“测试已保存 Profile”诊断模型连接也会产生真实费用。
+
+### 任务一直等待，或者 Worker 不能改代码
+
+先查看当前卡点、前置依赖和 Runtime 共享容量；主对话、Planner、Worker 都可能占用容量。
+不要在不了解账户费用的情况下无限提高并发。编码 Worker 的 Profile 需明确选择
+`Native coding tools=write` 并具备对应工作空间授权，保存后的配置只用于新的安排。
+已有执行不会因你编辑默认值自动改变，运行中的调整要走明确的负责人交接。
+
+### 介入不可用、操作结果未知或知识页不可用
+
+会话结束后不自动续作，输入不可用不表示介入消息丢失。结果未知时查询原操作，不重复
+提交或重建任务。知识服务需要独立配置；它不可用不等于任务控制面没有启动。
+
+---
+
+## Legacy：无模型预置 Demo
+
+下面保留旧入口，供浏览样例和维护既有环境，不是新版安装的后续步骤。
+各自使用独立数据库、manifest 和端口，不要混用。无模型演示不需要模型 API key，
+也不会产生模型调用费用；状态和 Trace 不代表真实 Agent 执行。
 
 ## 可以体验什么
 
@@ -125,7 +362,7 @@ Interview Demo 的“运行中”、用量、Worker 输出和 Agent 行为是受
 控制面 API、权限边界、状态变更和页面交互是真实的。它适合展示产品主链路，不代表
 生产环境已经完成认证、租户隔离、真实模型执行或公网部署。
 
-## R6 验收与长期交互 Demo
+## Legacy：R6 验收与长期交互 Demo
 
 R6 basic stack 有两种明确的运行模式。默认的 `acceptance` 模式只用于收集有预算、
 有 route 约束且可审计的真实验收证据；已经完成验收后，如果要继续在同一桌面工作空间
@@ -325,4 +562,4 @@ knowledge-service 都是通过同一个 R6 stack manifest 启动的，不要把�
 ### 可以直接部署到公网吗
 
 不可以。当前版本仅限本机单人使用，尚不具备生产级认证和租户隔离，
-也尚未完成完整真实链路验收。请将服务保持在 `127.0.0.1`。
+不要把模拟演示当成真实执行证据。请将服务保持在 `127.0.0.1`。

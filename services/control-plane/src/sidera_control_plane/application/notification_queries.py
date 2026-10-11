@@ -79,6 +79,7 @@ class NotificationDeliveryView:
     exhausted_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    route_version: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

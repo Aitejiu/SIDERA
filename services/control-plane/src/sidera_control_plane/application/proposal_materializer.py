@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -10,6 +10,7 @@ from sidera_control_plane.application.collaboration_decisions import (
     ComposedActivationGate,
 )
 from sidera_control_plane.application.errors import NotFound
+from sidera_control_plane.application.planning_assignments import PlanningAssignments
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.work_context_commands import (
     WorkContextRevisionFactory,
@@ -20,6 +21,7 @@ from sidera_control_plane.application.worker_item_materializer import (
     MaterializedPlan,
     WorkerItemMaterializer,
 )
+from sidera_control_plane.domain.agent_bindings import AgentBinding
 from sidera_control_plane.domain.collaboration import (
     CollaborationGateMode,
     CollaborationPolicySnapshotV1,
@@ -32,6 +34,7 @@ from sidera_control_plane.domain.errors import (
     InvalidTransition,
     ResultInputsDisabled,
     ValidationError,
+    VersionConflict,
 )
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.execution_requests import (
@@ -73,7 +76,7 @@ from sidera_control_plane.domain.plans import (
     WorkerItemPlanItem,
 )
 from sidera_control_plane.domain.result_operations import TaskResultHead
-from sidera_control_plane.domain.task import Task
+from sidera_control_plane.domain.task import Task, TaskStatus
 from sidera_control_plane.domain.work_context import WorkContextRevisionReason
 
 
@@ -84,6 +87,8 @@ class ProposalMaterializationResult:
     tasks: tuple[Task, ...]
     execution_requests: tuple[ExecutionRequest, ...]
     event_ids: tuple[UUID, ...]
+    pending_events: tuple[EventData, ...] = ()
+    bindings: tuple[AgentBinding, ...] = ()
 
     @property
     def execution_ids(self) -> tuple[UUID, ...]:
@@ -114,9 +119,16 @@ class ProposalMaterializer:
         profile: PlanningProfile,
         envelope: CommandEnvelope,
         now: datetime,
+        assignments: PlanningAssignments | None = None,
+        defer_events: bool = False,
     ) -> ProposalMaterializationResult:
         previous_request_version = request.version
         self._validate_input(request, proposal, profile, envelope)
+        if (
+            request.profile_snapshot.execution_mode == "native_profile"
+            and assignments is None
+        ):
+            raise ValidationError("explicit native responsibilities required")
         collaboration_policy = self._resolve_collaboration_policy(request, proposal)
 
         existing = uow.proposal_materializations.get_by_request(
@@ -171,16 +183,41 @@ class ProposalMaterializer:
         if brief is None:
             raise ValidationError("proposal brief revision is not available")
 
-        root_task_id = uuid4()
-        root_task = Task.create(
-            task_id=root_task_id,
-            workspace_id=request.workspace_id,
-            title=proposal.payload.root_task.title,
-            description=proposal.payload.root_task.goal_summary,
-            acceptance_criteria=proposal.payload.root_task.acceptance_refs,
-            priority=profile.default_priority,
-            requested_by=envelope.actor_id,
+        submitted = (
+            uow.task_goals.get(request.workspace_id, request.id, for_update=True)
+            if request.profile_snapshot.execution_mode == "native_profile"
+            else None
         )
+        root_event_type = "TaskCreated"
+        if submitted is None:
+            root_task = Task.create(
+                task_id=uuid4(),
+                workspace_id=request.workspace_id,
+                title=proposal.payload.root_task.title,
+                description=proposal.payload.root_task.goal_summary,
+                acceptance_criteria=proposal.payload.root_task.acceptance_refs,
+                priority=profile.default_priority,
+                requested_by=envelope.actor_id,
+            )
+            uow.tasks.add(root_task)
+        else:
+            root_task = uow.tasks.get(
+                submitted.root_task_id, request.workspace_id, for_update=True
+            )
+            if root_task is None or root_task.status is not TaskStatus.PENDING:
+                raise ValidationError("submitted planning root is not pending")
+            if root_task.version != submitted.root_task_version:
+                raise VersionConflict(submitted.root_task_version, root_task.version)
+            previous_root_version = root_task.version
+            root_task.update_specification(
+                title=proposal.payload.root_task.title,
+                description=proposal.payload.root_task.goal_summary,
+                acceptance_criteria=proposal.payload.root_task.acceptance_refs,
+            )
+            root_event_type = None
+            if root_task.version != previous_root_version:
+                uow.tasks.save(root_task, previous_root_version)
+                root_event_type = "TaskSpecificationUpdated"
         subtasks = tuple(
             Task.create(
                 task_id=uuid4(),
@@ -193,7 +230,7 @@ class ProposalMaterializer:
             )
             for item in proposal.payload.subtasks
         )
-        for task in (root_task, *subtasks):
+        for task in subtasks:
             uow.tasks.add(task)
 
         subtask_task_mapping = {
@@ -305,6 +342,7 @@ class ProposalMaterializer:
             materialized_plan=materialized_plan,
             execution_requests=execution_requests,
             materialization=materialization,
+            root_event_type=root_event_type,
         )
         events = (
             *events,
@@ -321,8 +359,20 @@ class ProposalMaterializer:
                 root_task_id=root_task.id,
             ),
         )
-        for event in events:
-            uow.events.append_with_outbox(event)
+        bindings = ()
+        if assignments is not None:
+            bindings, binding_events = assignments.apply(
+                uow,
+                workspace_id=request.workspace_id,
+                subtask_mapping=subtask_task_mapping,
+                worker_mapping=resolved_worker_item_mapping,
+                envelope=envelope,
+                now=now,
+            )
+            events = (*events, *binding_events)
+        if not defer_events:
+            for event in events:
+                uow.events.append_with_outbox(event)
 
         return ProposalMaterializationResult(
             materialization=materialization,
@@ -330,6 +380,8 @@ class ProposalMaterializer:
             tasks=(root_task, *subtasks),
             execution_requests=execution_requests,
             event_ids=tuple(event.id for event in events),
+            pending_events=events if defer_events else (),
+            bindings=bindings,
         )
 
     def _assert_result_input_writes_enabled(
@@ -337,10 +389,10 @@ class ProposalMaterializer:
     ) -> None:
         if self._result_inputs_enabled:
             return
-        if (
-            proposal.proposal_schema_version not in {5, 6}
-            and profile.proposal_schema_version not in {5, 6}
-        ):
+        if proposal.proposal_schema_version not in {
+            5,
+            6,
+        } and profile.proposal_schema_version not in {5, 6}:
             return
         raise ResultInputsDisabled(
             proposal_schema_version=max(
@@ -394,6 +446,11 @@ class ProposalMaterializer:
             or snapshot.planner_module_config_version
             != profile.planner_module_config_version
             or snapshot.proposal_schema_version != profile.proposal_schema_version
+            or snapshot.execution_mode != profile.execution_mode
+            or (
+                snapshot.execution_mode != "native_profile"
+                and snapshot.planner_agent_ref != profile.planner_agent_ref
+            )
         ):
             raise ValidationError(
                 "planning profile snapshot does not match confirmation"
@@ -406,6 +463,8 @@ class ProposalMaterializer:
             != snapshot.planner_module_instance_id
             or descriptor.planner_module_config_version
             != snapshot.planner_module_config_version
+            or descriptor.execution_mode != snapshot.execution_mode
+            or descriptor.planner_agent_ref != snapshot.planner_agent_ref
         ):
             raise ValidationError(
                 "proposal profile descriptor does not match confirmation"
@@ -424,6 +483,10 @@ class ProposalMaterializer:
 
         try:
             current_snapshot = profile.snapshot(snapshot.planner_capabilities)
+            if current_snapshot.execution_mode == "native_profile":
+                current_snapshot = replace(
+                    current_snapshot, planner_agent_ref=snapshot.planner_agent_ref
+                )
         except ValidationError as exc:
             raise ValidationError(
                 "planning profile snapshot does not match confirmation"
@@ -769,7 +832,8 @@ class ProposalMaterializer:
             )
             collaboration = (
                 CollaborationGateFact.run_pending()
-                if request.collaboration_gate_mode is CollaborationGateMode.RELEASE_REQUIRED
+                if request.collaboration_gate_mode
+                is CollaborationGateMode.RELEASE_REQUIRED
                 else CollaborationGateFact.unmanaged()
             )
             decision = ComposedActivationGate.evaluate(
@@ -793,19 +857,24 @@ class ProposalMaterializer:
         materialized_plan: MaterializedPlan,
         execution_requests: tuple[ExecutionRequest, ...],
         materialization: ProposalMaterialization,
+        root_event_type: str | None = "TaskCreated",
     ) -> tuple[EventData, ...]:
         events: list[EventData] = []
         for task, task_kind in (
             (root_task, "root"),
             *((task, "subtask") for task in subtasks),
         ):
+            if task_kind == "root" and root_event_type is None:
+                continue
             events.append(
                 _event(
                     envelope,
                     aggregate_type="task",
                     aggregate_id=task.id,
                     aggregate_version=task.version,
-                    event_type="TaskCreated",
+                    event_type=root_event_type
+                    if task_kind == "root"
+                    else "TaskCreated",
                     payload={
                         "title": task.title,
                         "description": task.description,

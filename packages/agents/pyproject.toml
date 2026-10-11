@@ -1,0 +1,26 @@
+[project]
+name = "sidera-agents"
+version = "0.1.0"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["pydantic>=2.11,<3"]
+
+[project.optional-dependencies]
+postgres = ["sqlalchemy>=2.0,<3", "alembic>=1.16,<2", "psycopg[binary]>=3.2,<4"]
+
+[dependency-groups]
+dev = ["pytest>=9,<10", "ruff>=0.12,<1", "pyright>=1.1.403,<2"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sidera_agents"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"alembic.ini" = "sidera_agents/alembic.ini"
+migrations = "sidera_agents/migrations"
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"

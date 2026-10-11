@@ -9,6 +9,11 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+from sidera_agents.contracts import ProfileRef
+
+from sidera_control_plane.application.execution_code_inputs import (
+    execution_code_input_manifest,
+)
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.domain.code_results import CodeInputManifestV1
 from sidera_control_plane.domain.collaboration import (
@@ -188,7 +193,9 @@ def load_execution_context_selection(
         request.id,
     )
     if selection is None or release is None:
-        raise ValueError("selection-bound execution is missing its release or Selection")
+        raise ValueError(
+            "selection-bound execution is missing its release or Selection"
+        )
     validate_execution_context_selection(
         execution_request=request,
         release=release,
@@ -208,12 +215,23 @@ def build_derived_execution_context_assembly_request(
     created_at: datetime,
     request_id: UUID | None = None,
     idempotency_key: str | None = None,
+    idempotency_key_prefix: str | None = None,
     additional_fact_scope_refs: Sequence[str] = (),
     additional_budget: Mapping[str, object] | None = None,
     work_context_revision: WorkContextRevision | None = None,
 ) -> ContextAssemblyRequest | None:
     """Build a new consumer package request for a derived execution."""
 
+    if idempotency_key_prefix is not None:
+        if idempotency_key is not None:
+            raise ValueError("execution context key and prefix are mutually exclusive")
+        if (
+            not isinstance(idempotency_key_prefix, str)
+            or not idempotency_key_prefix
+            or idempotency_key_prefix != idempotency_key_prefix.strip()
+            or re.search(r"[\x00-\x1f\x7f-\x9f]", idempotency_key_prefix)
+        ):
+            raise ValueError("execution context idempotency key prefix is invalid")
     authorization = resolve_execution_context_authorization(uow, execution)
     if authorization is None:
         return None
@@ -281,6 +299,18 @@ def build_derived_execution_context_assembly_request(
             "derived execution WorkContext revision is unavailable"
         )
     selection = load_execution_context_selection(uow, authorization.request)
+    code_input_manifest = execution_code_input_manifest(
+        uow, authorization.request, execution, selection
+    )
+    if idempotency_key_prefix is not None:
+        suffix = (
+            f":v3:input:{code_input_manifest.input_hash}"
+            if code_input_manifest is not None
+            else f":v2:selection:{selection.selection_hash}"
+            if selection is not None
+            else ":v1"
+        )
+        idempotency_key = idempotency_key_prefix + suffix
     inherited_budget: dict[str, object] = {
         "execution_context_inheritance": {
             "kind": clean_kind,
@@ -314,8 +344,11 @@ def build_derived_execution_context_assembly_request(
             *additional_fact_scope_refs,
         ),
         additional_budget=inherited_budget,
-        manifest_schema_version=2 if selection is not None else 1,
+        manifest_schema_version=(
+            3 if code_input_manifest is not None else 2 if selection is not None else 1
+        ),
         input_selection=selection,
+        code_input_manifest=code_input_manifest,
     )
 
 
@@ -428,6 +461,19 @@ def build_planning_context_assembly_request(
         "proposal_schema_version": profile.proposal_schema_version,
         "planning_kind": planning_kind.value,
     }
+    native = profile.execution_mode == "native_profile"
+    if native:
+        if (
+            not isinstance(profile.planner_agent_ref, ProfileRef)
+            or profile.planner_agent_ref.workspace_id != run.workspace_id
+        ):
+            raise ValueError("native planning requires an exact workspace Profile pin")
+        del budget["planner_module_instance_id"]
+        del budget["planner_module_config_version"]
+        budget.update(
+            execution_mode="native_profile",
+            planner_agent_ref=profile.planner_agent_ref.model_dump(mode="json"),
+        )
     if revision_base is not None:
         budget["revision_base"] = {
             "schema_version": revision_base.schema_version,
@@ -448,7 +494,7 @@ def build_planning_context_assembly_request(
         "planning_run",
         "brief",
         "planning_profile",
-        "planner_module",
+        "planner_agent" if native else "planner_module",
     )
     if planning_kind is PlanningRequestKind.REVISION:
         fact_scope_refs += ("revision_base",)
@@ -532,12 +578,18 @@ def build_execution_context_assembly_request(
         )
         result_input_budget = result_input_budget or ResultInputBudgetV1()
         if code_input_manifest is not None or verification_manifest is not None:
-            raise ValueError("v2 execution context cannot carry execution input manifests")
+            raise ValueError(
+                "v2 execution context cannot carry execution input manifests"
+            )
     elif manifest_schema_version == 3:
         if code_input_manifest is None and verification_manifest is None:
-            raise ValueError("v3 execution context requires an execution input manifest")
+            raise ValueError(
+                "v3 execution context requires an execution input manifest"
+            )
         if code_input_manifest is not None and verification_manifest is not None:
-            raise ValueError("v3 execution context cannot mix code and verification inputs")
+            raise ValueError(
+                "v3 execution context cannot mix code and verification inputs"
+            )
         if code_input_manifest is not None:
             if not isinstance(code_input_manifest, CodeInputManifestV1):
                 raise ValueError("v3 code input manifest must be typed")
@@ -547,7 +599,9 @@ def build_execution_context_assembly_request(
                 or code_input_manifest.request_id != execution_request.id
                 or code_input_manifest.execution_id != execution.id
             ):
-                raise ValueError("v3 code input manifest scope does not match execution")
+                raise ValueError(
+                    "v3 code input manifest scope does not match execution"
+                )
             if input_selection is None:
                 if execution_request.result_derivation_kind != "rework":
                     raise ValueError(
@@ -561,9 +615,12 @@ def build_execution_context_assembly_request(
                 )
                 if (
                     code_input_manifest.selection_id != input_selection.id
-                    or code_input_manifest.selection_hash != input_selection.selection_hash
+                    or code_input_manifest.selection_hash
+                    != input_selection.selection_hash
                 ):
-                    raise ValueError("v3 code input manifest selection does not match execution")
+                    raise ValueError(
+                        "v3 code input manifest selection does not match execution"
+                    )
             if execution_request.result_derivation_kind == "verification":
                 raise ValueError(
                     "verification execution context requires a verification manifest"
@@ -571,14 +628,17 @@ def build_execution_context_assembly_request(
             if input_selection is not None:
                 result_input_budget = result_input_budget or ResultInputBudgetV1()
         elif input_selection is not None or result_input_budget is not None:
-            raise ValueError("v3 verification context cannot carry code selection fields")
+            raise ValueError(
+                "v3 verification context cannot carry code selection fields"
+            )
         if verification_manifest is not None and not isinstance(
             verification_manifest, VerificationManifestV1
         ):
             raise ValueError("v3 verification manifest must be typed")
         if verification_manifest is not None and (
             execution_request.result_derivation_kind != "verification"
-            or execution_request.source_candidate_id != verification_manifest.candidate_id
+            or execution_request.source_candidate_id
+            != verification_manifest.candidate_id
         ):
             raise ValueError(
                 "verification manifest scope does not match execution request"
@@ -626,7 +686,9 @@ def build_execution_context_assembly_request(
             "input_selection_plan_content_hash": input_selection.plan_content_hash,
         }
         if set(selection_budget).intersection(additional_budget or {}):
-            raise ValueError("additional context budget cannot replace input selection facts")
+            raise ValueError(
+                "additional context budget cannot replace input selection facts"
+            )
         budget.update(selection_budget)
     snapshot = work_context_revision.snapshot
     search_scope = _search_scope(
@@ -669,7 +731,9 @@ def build_execution_context_assembly_request(
         plan_generation=execution_request.plan_generation,
     )
     if manifest_schema_version == 1:
-        effective_idempotency_key = idempotency_key or f"context:execution:{execution.id}:v1"
+        effective_idempotency_key = (
+            idempotency_key or f"context:execution:{execution.id}:v1"
+        )
     elif manifest_schema_version == 2:
         assert input_selection is not None
         if idempotency_key is not None and (
@@ -720,7 +784,9 @@ def build_execution_context_assembly_request(
         idempotency_key=effective_idempotency_key,
         created_at=created_at,
         manifest_schema_version=manifest_schema_version,
-        input_selection_id=(input_selection.id if input_selection is not None else None),
+        input_selection_id=(
+            input_selection.id if input_selection is not None else None
+        ),
         input_selection_hash=(
             input_selection.selection_hash if input_selection is not None else None
         ),
@@ -869,7 +935,9 @@ def rebind_planning_context_assembly_request(
     )
 
 
-def _search_scope(objective: str, requested_outputs: tuple[str, ...]) -> dict[str, object]:
+def _search_scope(
+    objective: str, requested_outputs: tuple[str, ...]
+) -> dict[str, object]:
     query = _normalize_query((objective, *requested_outputs))
     return {
         "query": query,

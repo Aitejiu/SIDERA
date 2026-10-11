@@ -1,5 +1,8 @@
 import json
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from sidera_control_plane.api.openapi_contract import export_openapi
 
@@ -111,16 +114,23 @@ EXPECTED_TYPED_POST_RESPONSES = {
 }
 
 EXPECTED_PLANNING_COMMAND_PAYLOADS = {
+    "SendExecutionInput": "SendExecutionInputPayload",
+    "SetSubtaskAssignee": "SetAgentAssigneePayload",
+    "SetWorkerItemAssignee": "SetAgentAssigneePayload",
+    "UpdateUnstartedAgentBinding": "UpdateUnstartedAgentBindingPayload",
     "RegisterPlannerModule": "RegisterPlannerModulePayload",
     "RegisterCollaborationRuntimeModule": "RegisterCollaborationRuntimeModulePayload",
     "RegisterPlanningProfile": "RegisterPlanningProfilePayload",
     "SubmitPlanningRequest": "SubmitPlanningRequestPayload",
+    "SubmitTaskGoal": "SubmitTaskGoalPayload",
     "SubmitPlanRevision": "SubmitPlanRevisionPayload",
     "CancelPlanningRequest": "CancelPlanningRequestPayload",
     "AnswerPlanningClarification": "AnswerPlanningClarificationPayload",
     "RequestProposalRevision": "RequestProposalRevisionPayload",
     "RejectPlanningProposal": "RejectPlanningProposalPayload",
     "RetryBlockedPlanningRun": "RetryBlockedPlanningRunPayload",
+    "RepairPlanningContext": "RepairPlanningContextPayload",
+    "ReviseFailedPlanningRequest": "ReviseFailedPlanningRequestPayload",
     "ConfirmPlanningProposal": "ConfirmPlanningProposalPayload",
     "ConfirmPlanRevision": "ConfirmPlanRevisionPayload",
     "ReviseWorkContext": "ReviseWorkContextPayload",
@@ -137,6 +147,8 @@ EXPECTED_PLANNING_COMMAND_PAYLOADS = {
     "RecoverWorkerTransition": "RecoverWorkerTransitionPayload",
     "PrepareWorkerHandoff": "PrepareWorkerHandoffPayload",
     "ConfirmWorkerHandoff": "ConfirmWorkerHandoffPayload",
+    "PrepareProfileHandoff": "PrepareProfileHandoffPayload",
+    "ConfirmProfileHandoff": "ConfirmProfileHandoffPayload",
     "CancelWorkerHandoff": "CancelWorkerHandoffPayload",
     "RecoverWorkerHandoff": "RecoverWorkerHandoffPayload",
     "PauseCollaborationRelease": "PauseCollaborationReleasePayload",
@@ -156,6 +168,7 @@ EXPECTED_PLANNING_RESPONSE_SCHEMAS = {
     "PlanningProfileResponse",
     "PlanningBriefResponse",
     "PlanningRunResponse",
+    "PlanningNativeRunResponse",
     "PlanningClarificationResponse",
     "PlanningRequestSummaryResponse",
     "PlanningRequestDetailResponse",
@@ -210,6 +223,66 @@ EXPECTED_NOTIFICATION_WORKFLOW_SCHEMAS = {
 }
 
 
+def _assert_no_orm_schema_identifiers(document: dict[str, Any]) -> None:
+    schemas = document.get("components", {}).get("schemas", {})
+    for schema_name in schemas:
+        assert not schema_name.endswith("Model"), schema_name
+
+    schema_prefix = "#/components/schemas/"
+
+    def check_references(value: object) -> None:
+        if isinstance(value, dict):
+            reference = value.get("$ref")
+            if isinstance(reference, str) and reference.startswith(schema_prefix):
+                schema_name = reference.removeprefix(schema_prefix).split("/", 1)[0]
+                assert not schema_name.endswith("Model"), reference
+            for nested in value.values():
+                check_references(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                check_references(nested)
+
+    check_references(document)
+
+
+def test_orm_schema_guard_allows_public_model_titles() -> None:
+    document = {
+        "components": {
+            "schemas": {
+                "NativeRunView": {
+                    "type": "object",
+                    "properties": {
+                        "observed_model": {"title": "Observed Model", "type": "string"},
+                        "selected_model": {"title": "Selected Model", "type": "string"},
+                    },
+                }
+            }
+        }
+    }
+
+    _assert_no_orm_schema_identifiers(document)
+
+
+def test_orm_schema_guard_rejects_orm_component_name() -> None:
+    document = {"components": {"schemas": {"TaskModel": {"type": "object"}}}}
+
+    with pytest.raises(AssertionError):
+        _assert_no_orm_schema_identifiers(document)
+
+
+def test_orm_schema_guard_rejects_dangling_orm_reference() -> None:
+    document = {
+        "components": {
+            "schemas": {
+                "TaskResponse": {"allOf": [{"$ref": "#/components/schemas/TaskModel"}]}
+            }
+        }
+    }
+
+    with pytest.raises(AssertionError):
+        _assert_no_orm_schema_identifiers(document)
+
+
 def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) -> None:
     output = tmp_path / "nested" / "openapi.json"
 
@@ -221,19 +294,30 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
     assert first_bytes == output.read_bytes()
     assert first_bytes.endswith(b"\n")
     assert set(first["paths"]) >= EXPECTED_PATHS
-    assert "Model" not in first_bytes.decode("utf-8")
+    _assert_no_orm_schema_identifiers(first)
 
     for path, schema_name in EXPECTED_TYPED_RESPONSES.items():
         response_schema = first["paths"][path]["get"]["responses"]["200"]["content"][
             "application/json"
         ]["schema"]
-        assert response_schema == {"$ref": f"#/components/schemas/{schema_name}"}
+        native_variant = {
+            "HandoffProposalResponse": "NativeHandoffProposalResponse",
+            "HandoffTransitionResponse": "NativeHandoffTransitionResponse",
+        }.get(schema_name)
+        if native_variant is None:
+            assert response_schema == {"$ref": f"#/components/schemas/{schema_name}"}
+        else:
+            assert response_schema["anyOf"] == [
+                {"$ref": f"#/components/schemas/{schema_name}"},
+                {"$ref": f"#/components/schemas/{native_variant}"},
+            ]
+            assert native_variant in first["components"]["schemas"]
         assert schema_name in first["components"]["schemas"]
 
     for path, schema_name in EXPECTED_TYPED_POST_RESPONSES.items():
-        response_schema = first["paths"][path]["post"]["responses"]["200"][
-            "content"
-        ]["application/json"]["schema"]
+        response_schema = first["paths"][path]["post"]["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]
         assert response_schema == {"$ref": f"#/components/schemas/{schema_name}"}
         assert schema_name in first["components"]["schemas"]
 
@@ -257,11 +341,14 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
     graph_node_properties = first["components"]["schemas"][
         "SubtaskNodeProjectionResponse"
     ]["properties"]
-    assert not {
-        "work_item_key",
-        "execution_id",
-        "worker_display_name",
-    } & graph_node_properties.keys()
+    assert (
+        not {
+            "work_item_key",
+            "execution_id",
+            "worker_display_name",
+        }
+        & graph_node_properties.keys()
+    )
 
     schemas = first["components"]["schemas"]
     payload_refs = first["x-sidera-command-payloads"]
@@ -297,9 +384,9 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
 
     assert EXPECTED_RUNTIME_RESPONSE_SCHEMAS <= schemas.keys()
     assert (
-        first["paths"]["/api/v1/modules"]["get"]["responses"]["200"][
-            "content"
-        ]["application/json"]["schema"]["type"]
+        first["paths"]["/api/v1/modules"]["get"]["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]["type"]
         == "array"
     )
     assert EXPECTED_WORK_CONTEXT_RESPONSE_SCHEMAS <= schemas.keys()
@@ -393,9 +480,325 @@ def test_openapi_export_is_canonical_and_contains_r4_contract(tmp_path: Path) ->
     assert json.loads(first_bytes) == first
 
 
+def test_native_assignment_and_planning_policy_export(tmp_path: Path) -> None:
+    document = export_openapi(tmp_path / "openapi.json")
+    schemas = document["components"]["schemas"]
+    assert {
+        "SetAgentAssigneePayload",
+        "UpdateUnstartedAgentBindingPayload",
+        "UnstartedAssignmentTarget",
+    } <= schemas.keys()
+    assignment = schemas["SetAgentAssigneePayload"]
+    fields = {"assignee_kind", "assignee_id", "profile_revision"}
+    assert set(assignment["properties"]) == fields
+    assert set(assignment["required"]) == fields
+    assert assignment["additionalProperties"] is False
+    assert assignment["properties"]["assignee_kind"]["enum"] == ["human", "profile"]
+    assert assignment["properties"]["profile_revision"]["anyOf"] == [
+        {"exclusiveMinimum": 0, "type": "integer"},
+        {"type": "null"},
+    ]
+    update = schemas["UpdateUnstartedAgentBindingPayload"]
+    assert set(update["properties"]) == fields | {"targets"}
+    assert set(update["required"]) == fields | {"targets"}
+    assert update["properties"]["targets"]["minItems"] == 1
+    assert update["properties"]["targets"]["items"] == {
+        "$ref": "#/components/schemas/UnstartedAssignmentTarget"
+    }
+    target = schemas["UnstartedAssignmentTarget"]
+    assert target["additionalProperties"] is False
+    assert set(target["required"]) == {"target_type", "target_id", "expected_version"}
+    assert target["properties"]["target_type"]["enum"] == ["subtask", "worker_item"]
+    assert target["properties"]["expected_version"]["exclusiveMinimum"] == 0
+    planning = schemas["PlanningProfileResponse"]["properties"]
+    assert planning["execution_mode"]["enum"] == ["legacy", "native_profile"]
+    assert planning["execution_mode"]["default"] == "legacy"
+    for name in (
+        "planner_provider",
+        "planner_module_instance_id",
+        "planner_module_config_version",
+        "capabilities",
+        "planner_agent_ref",
+    ):
+        assert {"type": "null"} in planning[name]["anyOf"]
+
+    goal = schemas["SubmitTaskGoalPayload"]
+    goal_required = {
+        "title",
+        "objective",
+        "acceptance_criteria",
+        "requested_outputs",
+        "planning_profile_id",
+        "planning_profile_version",
+        "planner_agent_ref",
+    }
+    assert set(goal["required"]) == goal_required
+    assert set(goal["properties"]) == goal_required | {
+        "constraints",
+        "context_refs",
+        "source_ref",
+    }
+    assert goal["additionalProperties"] is False
+    assert goal["properties"]["planning_profile_id"]["format"] == "uuid"
+    assert goal["properties"]["planning_profile_version"] == {
+        "exclusiveMinimum": 0,
+        "title": "Planning Profile Version",
+        "type": "integer",
+    }
+    assert goal["properties"]["planner_agent_ref"] == {
+        "$ref": "#/components/schemas/ProfileRef"
+    }
+    profile_ref = schemas["ProfileRef"]
+    assert profile_ref["additionalProperties"] is False
+    assert set(profile_ref["properties"]) == {
+        "workspace_id",
+        "profile_id",
+        "revision",
+    }
+    assert set(profile_ref["required"]) == set(profile_ref["properties"])
+    assert profile_ref["properties"]["workspace_id"]["format"] == "uuid"
+    assert profile_ref["properties"]["profile_id"]["format"] == "uuid"
+    assert profile_ref["properties"]["revision"] == {
+        "minimum": 1.0,
+        "title": "Revision",
+        "type": "integer",
+    }
+
+    for schema_name, legacy_fields in (
+        (
+            "ConfirmPlanningProposalPayload",
+            {
+                "proposal_revision",
+                "proposal_content_hash",
+                "profile_id",
+                "profile_version",
+            },
+        ),
+        (
+            "ConfirmPlanRevisionPayload",
+            {
+                "expected_proposal_revision",
+                "expected_proposal_content_hash",
+                "expected_diff_hash",
+                "expected_base_snapshot_id",
+                "expected_base_content_hash",
+                "profile_id",
+                "profile_version",
+            },
+        ),
+    ):
+        confirmation = schemas[schema_name]
+        assert confirmation["additionalProperties"] is False
+        assert set(confirmation["required"]) == legacy_fields
+        assert set(confirmation["properties"]) == legacy_fields | {"assignee_bindings"}
+        assert confirmation["properties"]["assignee_bindings"] == {
+            "default": [],
+            "items": {"$ref": "#/components/schemas/PlanningAssigneeChoice"},
+            "title": "Assignee Bindings",
+            "type": "array",
+        }
+    choice = schemas["PlanningAssigneeChoice"]
+    choice_fields = {
+        "target_type",
+        "target_key",
+        "assignee_kind",
+        "assignee_id",
+        "profile_revision",
+        "expected_binding_version",
+    }
+    assert choice["additionalProperties"] is False
+    assert set(choice["properties"]) == choice_fields
+    assert set(choice["required"]) == choice_fields
+    assert choice["properties"]["target_type"]["enum"] == ["subtask", "worker_item"]
+    assert choice["properties"]["assignee_kind"]["enum"] == ["human", "profile"]
+    for name in ("profile_revision", "expected_binding_version"):
+        assert choice["properties"][name]["anyOf"] == [
+            {"exclusiveMinimum": 0, "type": "integer"},
+            {"type": "null"},
+        ]
+
+    native_history = schemas["PlanningNativeRunResponse"]
+    history_fields = {
+        "start_operation_id",
+        "run_id",
+        "status",
+        "reason_code",
+        "event_cursor",
+        "response_id",
+        "closed",
+    }
+    assert native_history["additionalProperties"] is False
+    assert set(native_history["properties"]) == history_fields
+    assert set(native_history["required"]) == history_fields
+    run = schemas["PlanningRunResponse"]
+    assert run["properties"]["execution_mode"]["enum"] == ["legacy", "native_profile"]
+    assert run["properties"]["execution_mode"]["default"] == "legacy"
+    for name, schema_name in (
+        ("planner_agent_ref", "ProfileRef"),
+        ("native_run", "PlanningNativeRunResponse"),
+        ("capability_snapshot", "PlanningCapabilityResponse"),
+    ):
+        assert run["properties"][name]["anyOf"] == [
+            {"$ref": f"#/components/schemas/{schema_name}"},
+            {"type": "null"},
+        ]
+    public_history = json.dumps({"run": run, "native_run": native_history})
+    for private_name in (
+        "authority_id",
+        "grant_id",
+        "start_request",
+        "start_receipt",
+        "source_bodies",
+        "sources",
+        "instructions",
+        "execution_workspace",
+        "directory",
+        "scratch",
+    ):
+        assert private_name not in public_history
+
+    usage_fields = {
+        "input_tokens",
+        "output_tokens",
+        "cost_microunits",
+        "runtime_seconds",
+        "context_bytes",
+    }
+    for schema_name, names in (
+        ("PlanningUsageResponse", usage_fields),
+        ("PlanningUsageMetricsResponse", usage_fields - {"runtime_seconds"}),
+    ):
+        usage = schemas[schema_name]
+        assert set(usage["properties"]) == names
+        assert set(usage["required"]) == names
+        for name in names:
+            assert usage["properties"][name]["anyOf"] == [
+                {"type": "integer"},
+                {"type": "null"},
+            ]
+
+
+def test_native_input_command_exports_exact_context_variants(tmp_path: Path) -> None:
+    document = export_openapi(tmp_path / "openapi.json")
+    schemas = document["components"]["schemas"]
+    assert document["x-sidera-command-payloads"]["SendExecutionInput"] == {
+        "$ref": "#/components/schemas/SendExecutionInputPayload"
+    }
+    assert schemas["SendExecutionInputPayload"]["properties"]["context"] == {
+        "anyOf": [
+            {"$ref": "#/components/schemas/ExecutionContextAddressPayload"},
+            {"$ref": "#/components/schemas/NativeExecutionContextAddressPayload"},
+        ],
+        "title": "Context",
+    }
+    native = schemas["NativeExecutionContextAddressPayload"]
+    assert native["additionalProperties"] is False
+    assert native["properties"]["execution_mode"]["const"] == "native_profile"
+    assert native["properties"]["binding_version"]["minimum"] == 1
+    assert native["properties"]["run_id"]["format"] == "uuid"
+    assert native["required"] == schemas["ExecutionContextAddressPayload"][
+        "required"
+    ] + [
+        "execution_mode",
+        "binding_version",
+        "run_id",
+    ]
+
+
 def test_committed_openapi_matches_current_export(tmp_path: Path) -> None:
     output = tmp_path / "openapi.json"
     exported = export_openapi(output)
     committed_path = Path(__file__).resolve().parents[4] / "apps/web/openapi.json"
 
     assert json.loads(committed_path.read_text(encoding="utf-8")) == exported
+
+
+def test_repair_planning_context_export_is_exact_and_closed(tmp_path: Path) -> None:
+    exported = export_openapi(tmp_path / "repair-openapi.json")
+    assert exported["x-sidera-command-payloads"]["RepairPlanningContext"] == {
+        "$ref": "#/components/schemas/RepairPlanningContextPayload"
+    }
+    payload = exported["components"]["schemas"]["RepairPlanningContextPayload"]
+    fields = {
+        "expected_planning_request_version",
+        "expected_work_context_version",
+        "work_context_revision_id",
+        "work_context_content_hash",
+    }
+    assert set(payload["required"]) == fields
+    assert set(payload["properties"]) == fields
+    assert payload["additionalProperties"] is False
+    for field in ("expected_planning_request_version", "expected_work_context_version"):
+        assert payload["properties"][field]["type"] == "integer"
+        assert payload["properties"][field]["minimum"] == 1
+    assert payload["properties"]["work_context_revision_id"]["format"] == "uuid"
+    assert (
+        payload["properties"]["work_context_content_hash"]["pattern"]
+        == "^[0-9a-f]{64}$"
+    )
+
+
+def test_failed_planning_feedback_export_is_exact_and_preserves_native_closure(
+    tmp_path: Path,
+) -> None:
+    exported = export_openapi(tmp_path / "failed-feedback-openapi.json")
+    assert exported["x-sidera-command-payloads"]["ReviseFailedPlanningRequest"] == {
+        "$ref": "#/components/schemas/ReviseFailedPlanningRequestPayload"
+    }
+    schemas = exported["components"]["schemas"]
+    payload = schemas["ReviseFailedPlanningRequestPayload"]
+    fields = {
+        "failed_planning_run_id",
+        "expected_failed_planning_run_version",
+        "expected_work_context_version",
+        "work_context_revision_id",
+        "work_context_content_hash",
+        "feedback",
+    }
+    assert set(payload["required"]) == set(payload["properties"]) == fields
+    assert payload["additionalProperties"] is False
+    for field in (
+        "expected_failed_planning_run_version",
+        "expected_work_context_version",
+    ):
+        assert payload["properties"][field]["type"] == "integer"
+        assert payload["properties"][field]["minimum"] == 1
+    for field in ("failed_planning_run_id", "work_context_revision_id"):
+        assert payload["properties"][field]["format"] == "uuid"
+    assert (
+        payload["properties"]["work_context_content_hash"]["pattern"]
+        == "^[0-9a-f]{64}$"
+    )
+    native = schemas["PlanningNativeRunResponse"]
+    assert native["additionalProperties"] is False
+    assert (
+        set(native["required"])
+        == set(native["properties"])
+        == {
+            "start_operation_id",
+            "run_id",
+            "status",
+            "reason_code",
+            "event_cursor",
+            "response_id",
+            "closed",
+        }
+    )
+
+
+def test_active_handoff_export_allows_only_truthful_nullable_target(
+    tmp_path: Path,
+) -> None:
+    schemas = export_openapi(tmp_path / "openapi.json")["components"]["schemas"]
+    summary = schemas["ActiveHandoffProjectionResponse"]
+    assert summary["properties"]["target_worker_id"]["anyOf"] == [
+        {"type": "string", "format": "uuid"},
+        {"type": "null"},
+    ]
+    assert "target_worker_id" in summary["required"]
+    assert schemas["WorkerWorkspaceProjectionResponse"]["properties"]["active_handoff"][
+        "anyOf"
+    ] == [
+        {"$ref": "#/components/schemas/ActiveHandoffProjectionResponse"},
+        {"type": "null"},
+    ]

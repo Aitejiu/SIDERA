@@ -18,6 +18,7 @@ from sidera_control_plane.application.result_verification import (
 from sidera_control_plane.application.worker_completion import (
     trusted_terminal_outcome,
 )
+from sidera_control_plane.domain.agent_bindings import AgentExecutionLink
 from sidera_control_plane.domain.artifacts import (
     Artifact,
     ArtifactCandidate,
@@ -200,26 +201,7 @@ class SessionEventIngestor:
                         f"the Session cursor {session.last_sequence}"
                     )
             else:
-                normalized = ExecutionEvent(
-                    id=uuid4(),
-                    workspace_id=workspace_id,
-                    execution_id=execution_id,
-                    session_id=session.id,
-                    sequence=event.sequence,
-                    event_type=event.event_type,
-                    payload=_redact_payload(event.payload),
-                    occurred_at=event.occurred_at,
-                    raw_ref=_bounded_raw_ref(event.raw_ref),
-                )
-                previous_version = session.version
-                session.record_activity(sequence=event.sequence, now=self._clock())
-                uow.sessions.save(session, previous_version)
-                uow.execution_events.add(normalized)
-                record_verification_observation(
-                    uow,
-                    execution=execution,
-                    event=normalized,
-                )
+                normalized = self._persist_event_in_uow(uow, execution, session, event)
                 return EventIngestionResult(
                     event=normalized,
                     ingested=True,
@@ -228,6 +210,133 @@ class SessionEventIngestor:
         if gap is not None:
             raise gap
         raise EventIngestionError("event ingestion ended without a result")
+
+    def _persist_event_in_uow(
+        self, uow, execution, session, event, *, historical=False
+    ):
+        normalized = ExecutionEvent(
+            id=uuid4(),
+            workspace_id=execution.workspace_id,
+            execution_id=execution.id,
+            session_id=session.id,
+            sequence=event.sequence,
+            event_type=event.event_type,
+            payload=_redact_payload(event.payload),
+            occurred_at=event.occurred_at,
+            raw_ref=_bounded_raw_ref(event.raw_ref),
+        )
+        previous_version = session.version
+        if historical:
+            session.record_historical_observation(
+                sequence=event.sequence, now=self._clock()
+            )
+        else:
+            session.record_activity(sequence=event.sequence, now=self._clock())
+        uow.sessions.save(session, previous_version)
+        uow.execution_events.add(normalized)
+        record_verification_observation(uow, execution=execution, event=normalized)
+        return normalized
+
+    def ingest_original_page(
+        self,
+        *,
+        expected: AgentExecutionLink,
+        principal_id: str,
+        events: Iterable[AdapterEvent],
+    ) -> EventIngestionReport:
+        with self._uow_factory() as uow:
+            return self.ingest_original_page_in_uow(
+                uow, expected=expected, principal_id=principal_id, events=events
+            )
+
+    def ingest_original_page_in_uow(
+        self,
+        uow: ControlPlaneUnitOfWork,
+        *,
+        expected: AgentExecutionLink,
+        principal_id: str,
+        events: Iterable[AdapterEvent],
+    ) -> EventIngestionReport:
+        from sidera_control_plane.application.agent_worker_adapter import (
+            read_native_preparation_receipt,
+        )
+
+        execution, session, link, _ = (
+            uow.execution_authorities.lock_original_observation(
+                expected, principal_id=principal_id
+            )
+        )
+        read_native_preparation_receipt(uow, link)
+        ingested = []
+        duplicates = []
+        observations = []
+        for event in events:
+            if (
+                event.payload.get("run_id") != str(link.run_id)
+                or not isinstance(event.raw_ref, str)
+                or re.fullmatch(r"native-event-sha256:[0-9a-f]{64}", event.raw_ref)
+                is None
+            ):
+                raise EventIngestionError(
+                    "original native event identity is unavailable"
+                )
+            existing = uow.execution_events.get(
+                session.id, event.sequence, link.workspace_id
+            )
+            if existing is not None:
+                if not _same_original_event(existing, event):
+                    raise EventSequenceConflict(
+                        f"event sequence {event.sequence} has different content"
+                    )
+                duplicates.append(event.sequence)
+            elif event.sequence <= link.event_cursor:
+                raise EventIngestionError("original native history is unavailable")
+            if event.sequence > link.event_cursor:
+                if event.sequence != link.event_cursor + 1:
+                    raise EventSequenceGap(link.event_cursor + 1, event.sequence)
+                if existing is None:
+                    if event.sequence != session.last_sequence + 1:
+                        raise EventSequenceGap(
+                            session.last_sequence + 1, event.sequence
+                        )
+                    ingested.append(
+                        self._persist_event_in_uow(
+                            uow,
+                            execution,
+                            session,
+                            event,
+                            historical=session.status.value != "active",
+                        )
+                    )
+                status = {
+                    "session.completed": "succeeded",
+                    "session.failed": "failed",
+                    "session.closed": "stopped",
+                    "native.stop.stopped": "stopped",
+                    "native.run.started": "running",
+                }.get(event.event_type, link.status)
+                if link.status in {"succeeded", "failed", "stopped", "cancelled"}:
+                    if (
+                        event.event_type
+                        in {"session.completed", "session.failed", "session.closed"}
+                        and status != link.status
+                    ):
+                        raise EventSequenceConflict(
+                            "original terminal event contradicts saved history"
+                        )
+                    status = link.status
+                link = uow.execution_authorities.save_original_observation(
+                    link,
+                    principal_id=principal_id,
+                    event_cursor=event.sequence,
+                    status=status,
+                )
+            observation = _terminal_observation(event)
+            if observation is not None:
+                observations.append(observation)
+        return EventIngestionReport(
+            tuple(ingested), tuple(duplicates), tuple(observations)
+        )
 
     def _assert_fence(
         self,
@@ -455,6 +564,17 @@ def _same_event(existing: ExecutionEvent, incoming: AdapterEvent) -> bool:
         existing.event_type == incoming.event_type
         and dict(existing.payload) == _redact_payload(incoming.payload)
         and existing.raw_ref == _bounded_raw_ref(incoming.raw_ref)
+    )
+
+
+def _same_original_event(existing: ExecutionEvent, incoming: AdapterEvent) -> bool:
+    if existing.raw_ref is not None:
+        return _same_event(existing, incoming)
+    # Old facts prove only their persisted redacted content; never invent a hash.
+    return (
+        existing.event_type == incoming.event_type
+        and dict(existing.payload) == _redact_payload(incoming.payload)
+        and existing.occurred_at == incoming.occurred_at
     )
 
 

@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from uuid import UUID
 
+from sidera_agents.contracts import ProfileRef
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
@@ -37,6 +38,7 @@ from sidera_control_plane.domain.handoffs import (
     HandoffTransition,
     HandoffTransitionStatus,
     HandoffWriterState,
+    NativeHandoffProposalPayload,
 )
 from sidera_control_plane.persistence.models import (
     ExecutionWorkspaceTransferModel,
@@ -353,6 +355,11 @@ class HandoffTransitionRepository(HandoffTransitionRepositoryPort):
             allow_target_replacement=allow_target_replacement,
         ):
             raise ValidationError("handoff transition source facts are immutable")
+        if (
+            transition.handoff_schema_version == 2
+            and row.target_worker_id != transition.target_worker_id
+        ):
+            self._validate_native_reservation(transition)
         result = self._session.execute(
             update(HandoffTransitionModel)
             .where(
@@ -362,7 +369,11 @@ class HandoffTransitionRepository(HandoffTransitionRepositoryPort):
             )
             .values(
                 target_worker_id=transition.target_worker_id,
-                target_runtime_snapshot=_json_object(transition.target_runtime_snapshot),
+                target_runtime_snapshot=_json_object(
+                    transition.target_runtime_snapshot
+                ),
+                target_binding_version=transition.target_binding_version,
+                manual_context_facts=_optional_dict(transition.manual_context_facts),
                 target_execution_id=transition.target_execution_id,
                 target_session_id=transition.target_session_id,
                 target_workspace_manifest_id=transition.target_workspace_manifest_id,
@@ -398,6 +409,78 @@ class HandoffTransitionRepository(HandoffTransitionRepositoryPort):
             raise VersionConflict(
                 previous_version,
                 self._current_version(transition.id, transition.workspace_id),
+            )
+
+    def _validate_native_reservation(self, transition):
+        from sidera_control_plane.persistence.agent_binding_repository import (
+            AgentBindingRepository,
+        )
+        from sidera_control_plane.persistence.execution_repository import (
+            ExecutionRepository,
+        )
+        from sidera_control_plane.persistence.lease_store import LeaseStore
+        from sidera_control_plane.persistence.models import WorkerModel
+        from sidera_control_plane.persistence.module_repository import (
+            ExecutionBindingRepository,
+        )
+
+        execution = ExecutionRepository(self._session).get(
+            transition.target_execution_id, transition.workspace_id, for_update=True
+        )
+        runtime = ExecutionBindingRepository(self._session).get_for_execution(
+            transition.target_execution_id, transition.workspace_id, for_update=True
+        )
+        appointment = AgentBindingRepository(self._session).get(
+            transition.workspace_id,
+            "worker_item",
+            transition.worker_item_id,
+            for_update=True,
+        )
+        lease = (
+            None
+            if execution is None or execution.active_lease_id is None
+            else LeaseStore(self._session).get(
+                execution.active_lease_id, transition.workspace_id, for_update=True
+            )
+        )
+        worker = self._session.scalar(
+            select(WorkerModel)
+            .where(
+                WorkerModel.id == transition.target_worker_id,
+                WorkerModel.workspace_id == transition.workspace_id,
+            )
+            .with_for_update()
+        )
+        if (
+            execution is None
+            or runtime is None
+            or appointment is None
+            or lease is None
+            or worker is None
+            or (
+                execution.status.value not in {"leased", "running"}
+                or execution.handoff_transition_id != transition.id
+                or execution.worker_item_id != transition.worker_item_id
+                or execution.assigned_worker_id != transition.target_worker_id
+                or lease.status.value != "active"
+                or lease.execution_id != execution.id
+                or lease.worker_id != transition.target_worker_id
+                or lease.fencing_token != execution.last_fencing_token
+                or lease.assignment_reason.get("policy") != "handoff-native-v2"
+                or lease.assignment_reason.get("handoff_transition_id")
+                != str(transition.id)
+                or runtime.lease_id != lease.id
+                or runtime.worker_id != lease.worker_id
+                or runtime.fencing_token != lease.fencing_token
+                or appointment.version != transition.target_binding_version
+                or appointment.profile_ref
+                != transition.native_payload.target_profile_ref
+                or not appointment.runnable
+                or worker.current_load < 1
+            )
+        ):
+            raise ValidationError(
+                "native target Worker requires its actual reservation"
             )
 
     def _current_version(self, transition_id: UUID, workspace_id: UUID) -> int:
@@ -480,11 +563,18 @@ class HandoffContextBundleRepository(HandoffContextBundleRepositoryPort):
                 target_execution_id=bundle.target_execution_id,
                 target_worker_id=bundle.target_worker_id,
                 target_runtime_snapshot_hash=bundle.target_runtime_snapshot_hash,
+                target_profile_ref=None
+                if bundle.target_profile_ref is None
+                else (bundle.target_profile_ref.model_dump(mode="json")),
+                target_binding_version=bundle.target_binding_version,
+                target_native_metadata=_optional_dict(bundle.target_native_metadata),
                 target_context_version=bundle.target_context_version,
                 source_workspace_manifest_id=bundle.source_workspace_manifest_id,
                 source_workspace_version=bundle.source_workspace_version,
                 workspace_location_ref_hash=bundle.workspace_location_ref_hash,
-                repository_state=[_json_object(item) for item in bundle.repository_state],
+                repository_state=[
+                    _json_object(item) for item in bundle.repository_state
+                ],
                 artifact_refs=list(bundle.artifact_refs),
                 evidence_refs=list(bundle.evidence_refs),
                 handoff_reason=bundle.handoff_reason,
@@ -807,6 +897,12 @@ def _transition_model(transition: HandoffTransition) -> HandoffTransitionModel:
         confirmed_at=transition.confirmed_at,
         started_at=transition.started_at,
         completed_at=transition.completed_at,
+        handoff_schema_version=transition.handoff_schema_version,
+        native_payload=None
+        if transition.native_payload is None
+        else (transition.native_payload.to_mapping()),
+        target_binding_version=transition.target_binding_version,
+        manual_context_facts=_optional_dict(transition.manual_context_facts),
     )
 
 
@@ -832,6 +928,40 @@ def _transition_immutable_matches(
     )
     if not source_matches:
         return False
+    if row.handoff_schema_version != transition.handoff_schema_version:
+        return False
+    if transition.handoff_schema_version == 2:
+        native = transition.native_payload
+        if (
+            native is None
+            or row.native_payload != native.to_mapping()
+            or (row.target_runtime_snapshot != dict(transition.target_runtime_snapshot))
+        ):
+            return False
+        for name in (
+            "source_checkpoint_facts",
+            "source_stop_facts",
+            "source_workspace_freeze_facts",
+            "manual_context_facts",
+        ):
+            previous = getattr(row, name)
+            if previous is not None and previous != _optional_dict(
+                getattr(transition, name)
+            ):
+                return False
+        if row.target_binding_version not in (None, transition.target_binding_version):
+            return False
+        if row.target_worker_id != transition.target_worker_id:
+            return (
+                row.phase == HandoffPhase.START_TARGET_SESSION.value
+                and transition.phase is HandoffPhase.START_TARGET_SESSION
+                and transition.target_execution_id == row.target_execution_id
+                and transition.source_stop_facts is not None
+                and transition.source_workspace_freeze_facts is not None
+                and native.target_assignee.kind == "profile"
+                and transition.target_worker_id is not None
+            )
+        return True
     if allow_target_replacement:
         return True
     return (
@@ -841,6 +971,44 @@ def _transition_immutable_matches(
 
 
 def _to_proposal(row: HandoffProposalModel) -> HandoffProposal:
+    if row.proposal_schema_version == 2:
+        native = NativeHandoffProposalPayload.from_mapping(row.payload)
+        for name in (
+            "workspace_id",
+            "root_task_id",
+            "subtask_id",
+            "worker_item_id",
+            "source_execution_id",
+            "source_execution_version",
+            "source_session_id",
+            "source_session_version",
+            "source_session_last_sequence",
+            "source_worker_id",
+            "source_worker_version",
+            "source_workspace_manifest_id",
+            "source_workspace_manifest_version",
+            "source_context_package_id",
+            "source_context_package_hash",
+            "source_worker_context_version",
+            "observed_plan_snapshot_id",
+            "observed_plan_generation",
+            "observed_plan_head_version",
+            "target_worker_id",
+            "target_worker_version",
+            "target_capability_snapshot_hash",
+        ):
+            if getattr(row, name) != getattr(native, name):
+                raise ValidationError(
+                    "native handoff payload columns do not match immutable pins"
+                )
+        return _proposal_from_payload(row, native)
+    if (
+        row.proposal_schema_version != 1
+        or row.target_worker_id is None
+        or row.target_worker_version is None
+        or row.target_capability_snapshot_hash is None
+    ):
+        raise ValidationError("legacy handoff payload columns are missing")
     payload = HandoffProposalPayload(
         proposal_schema_version=row.proposal_schema_version,
         workspace_id=row.workspace_id,
@@ -875,6 +1043,10 @@ def _to_proposal(row: HandoffProposalModel) -> HandoffProposal:
         input_plan=dict(row.input_plan),
         impact_summary=dict(row.impact_summary),
     )
+    return _proposal_from_payload(row, payload)
+
+
+def _proposal_from_payload(row, payload) -> HandoffProposal:
     return HandoffProposal(
         id=row.id,
         payload=payload,
@@ -933,6 +1105,12 @@ def _to_transition(row: HandoffTransitionModel) -> HandoffTransition:
         confirmed_at=row.confirmed_at,
         started_at=row.started_at,
         completed_at=row.completed_at,
+        handoff_schema_version=row.handoff_schema_version,
+        native_payload=None
+        if row.native_payload is None
+        else (NativeHandoffProposalPayload.from_mapping(row.native_payload)),
+        target_binding_version=row.target_binding_version,
+        manual_context_facts=_optional_dict(row.manual_context_facts),
     )
 
 
@@ -969,6 +1147,11 @@ def _to_bundle(row: HandoffContextBundleModel) -> HandoffContextBundle:
         excluded_input_refs=_uuid_values(row.excluded_input_refs),
         bundle_hash=row.bundle_hash,
         created_at=row.created_at,
+        target_profile_ref=None
+        if row.target_profile_ref is None
+        else (ProfileRef.model_validate(row.target_profile_ref)),
+        target_binding_version=row.target_binding_version,
+        target_native_metadata=_optional_dict(row.target_native_metadata),
     )
 
 

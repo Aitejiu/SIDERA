@@ -14,53 +14,32 @@ export interface ParsedToolResult {
   data: Record<string, JsonValue>;
 }
 
-const OUTCOMES = new Set<ToolOutcome>([
-  "ok",
-  "needs_user",
-  "failed",
-  "unavailable",
-  "conflict",
-  "result_unknown",
-]);
-
 export function parseToolResult(item: MainAgentItem): ParsedToolResult | null {
   if (item.type !== "toolCall") return null;
-  const toolName = stringValue(item.data.name ?? item.data.toolName);
-  const preview = stringValue(item.data.resultPreview ?? item.data.result_preview);
-  if (toolName === null || !toolName.startsWith("sidera_") || preview === null) return null;
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(preview) as unknown;
-  } catch {
-    return null;
-  }
-  if (!isRecord(parsed)) return null;
-  const outcome = parsed.outcome;
-  const summary = parsed.summary;
-  if (!isOutcome(outcome) || typeof summary !== "string" || summary.trim() === "") return null;
-  const resourceRef = parsed.resource_ref;
-  const webUrl = parsed.web_url;
-  if (resourceRef !== undefined && resourceRef !== null && typeof resourceRef !== "string") return null;
-  if (webUrl !== undefined && webUrl !== null && typeof webUrl !== "string") return null;
-  const data = parsed.data === undefined
-    ? {}
-    : isRecord(parsed.data)
-      ? parsed.data
-      : null;
-  if (data === null) return null;
-  const normalizedResourceRef = typeof resourceRef === "string" && resourceRef !== ""
-    ? resourceRef
-    : null;
-  const normalizedWebUrl = typeof webUrl === "string" && webUrl !== ""
-    ? webUrl
-    : null;
+  const data = item.data;
+  const toolName = data.name;
+  const outcome = data.outcome;
+  if (data.receiptSource !== "sidera.product.task-receipt.v1"
+    || (toolName !== "sidera_submit_goal" && toolName !== "sidera_request_revision")
+    || !isUuid(data.receiptId) || item.id !== `product-receipt:${data.receiptId}`
+    || !isUuid(data.logicalRequestId) || !isUuid(data.commandId)
+    || !isUuid(data.runId) || !isUuid(data.responseId)
+    || (outcome !== "applied" && outcome !== "rejected" && outcome !== "unknown")
+    || data.verified !== (outcome === "applied")
+    || typeof data.status !== "string" || !/^[a-z][a-z0-9_]{0,127}$/.test(data.status)
+    || !isUuidOrNull(data.rootTaskId) || !isUuidOrNull(data.planningRequestId)
+    || (data.webUrl !== null && typeof data.webUrl !== "string")
+    || (data.errorCode !== null && typeof data.errorCode !== "string")) return null;
+  if (outcome !== "applied" && (data.rootTaskId !== null || data.planningRequestId !== null || data.webUrl !== null)) return null;
+  const resourceRef = data.rootTaskId !== null ? `task:${data.rootTaskId}`
+    : data.planningRequestId !== null ? `planning_request:${data.planningRequestId}` : null;
   return {
     toolName,
-    outcome,
-    summary,
-    resourceRef: normalizedResourceRef,
-    webUrl: normalizedWebUrl,
+    outcome: outcome === "applied" ? "ok" : outcome === "rejected" ? "failed" : "result_unknown",
+    summary: outcome === "applied" ? `原命令已应用：${data.status}`
+      : outcome === "rejected" ? `原命令已拒绝：${data.errorCode ?? data.status}` : "原命令结果待确认",
+    resourceRef,
+    webUrl: data.webUrl,
     data,
   };
 }
@@ -119,7 +98,7 @@ function OutcomeIcon({ outcome }: { outcome: ToolOutcome }) {
 
 function outcomeLabel(outcome: ToolOutcome): string {
   const labels: Record<ToolOutcome, string> = {
-    ok: "已完成",
+    ok: "已应用",
     needs_user: "需要处理",
     failed: "失败",
     unavailable: "暂不可用",
@@ -129,14 +108,10 @@ function outcomeLabel(outcome: ToolOutcome): string {
   return labels[outcome];
 }
 
-function isOutcome(value: unknown): value is ToolOutcome {
-  return typeof value === "string" && OUTCOMES.has(value as ToolOutcome);
+function isUuid(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
 
-function stringValue(value: JsonValue | undefined): string | null {
-  return typeof value === "string" ? value : null;
-}
-
-function isRecord(value: unknown): value is Record<string, JsonValue> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function isUuidOrNull(value: unknown): value is string | null {
+  return value === null || isUuid(value);
 }

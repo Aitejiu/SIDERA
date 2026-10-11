@@ -44,6 +44,26 @@ class PlanningRunStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+@dataclass(frozen=True, slots=True)
+class TaskGoalSubmission:
+    workspace_id: UUID
+    root_task_id: UUID
+    planning_request_id: UUID
+    root_task_version: int
+    principal_id: str
+    grant_id: UUID
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.root_task_version) is not int
+            or self.root_task_version < 1
+            or not self.principal_id
+        ):
+            raise ValidationError(
+                "submitted task requires an exact version and trusted principal"
+            )
+
+
 class PlanningRunLeaseStatus(StrEnum):
     ACTIVE = "active"
     RELEASED = "released"
@@ -62,11 +82,17 @@ MAX_ERROR_MESSAGE_LENGTH = 2048
 
 @dataclass(frozen=True, slots=True)
 class PlanningUsage:
-    input_tokens: int
-    output_tokens: int
-    cost_microunits: int
-    runtime_seconds: int
-    context_bytes: int
+    input_tokens: int | None
+    output_tokens: int | None
+    cost_microunits: int | None
+    runtime_seconds: int | None
+    context_bytes: int | None
+
+    @classmethod
+    def unknown(
+        cls, *, runtime_seconds: int | None = None, context_bytes: int | None = None
+    ) -> "PlanningUsage":
+        return cls(None, None, None, runtime_seconds, context_bytes)
 
     @classmethod
     def zero(cls) -> "PlanningUsage":
@@ -87,6 +113,8 @@ class PlanningUsage:
             "context_bytes",
         ):
             value = getattr(self, name)
+            if value is None:
+                continue
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise ValidationError(f"{name} cannot be negative")
 
@@ -319,10 +347,16 @@ class PlanningClarification:
             value is not None
             for value in (self.answer, self.answered_by, self.answer_brief_revision)
         ):
-            raise ValidationError("unanswered clarification cannot contain answer facts")
+            raise ValidationError(
+                "unanswered clarification cannot contain answer facts"
+            )
         if self.answered_at is not None:
             _aware(self.answered_at, "clarification answered_at")
-            if not self.answer or not self.answered_by or self.answer_brief_revision is None:
+            if (
+                not self.answer
+                or not self.answered_by
+                or self.answer_brief_revision is None
+            ):
                 raise ValidationError("answered clarification facts are incomplete")
             if self.answer_brief_revision < 1:
                 raise ValidationError("answer_brief_revision must be positive")
@@ -371,9 +405,9 @@ class PlanningRun:
     attempt: int
     operation_id: UUID
     profile_snapshot: PlanningProfileSnapshot
-    planner_module_instance_id: UUID
-    planner_module_config_version: int
-    capability_snapshot: PlannerAdapterCapabilityProfile
+    planner_module_instance_id: UUID | None
+    planner_module_config_version: int | None
+    capability_snapshot: PlannerAdapterCapabilityProfile | None
     status: PlanningRunStatus
     lease_id: UUID | None
     fencing_token: int
@@ -387,6 +421,16 @@ class PlanningRun:
     error_message: str | None
     diagnostic_artifact_ref: str | None
     version: int
+
+    def __post_init__(self) -> None:
+        if (
+            self.planner_module_instance_id
+            != self.profile_snapshot.planner_module_instance_id
+            or self.planner_module_config_version
+            != self.profile_snapshot.planner_module_config_version
+            or self.capability_snapshot != self.profile_snapshot.planner_capabilities
+        ):
+            raise ValidationError("planning run must retain its exact policy snapshot")
 
     @classmethod
     def create(
@@ -403,7 +447,9 @@ class PlanningRun:
         if brief_revision < 1 or attempt < 1:
             raise ValidationError("brief revision and attempt must be positive")
         if profile_snapshot.workspace_id != workspace_id:
-            raise ValidationError("planning profile snapshot belongs to another workspace")
+            raise ValidationError(
+                "planning profile snapshot belongs to another workspace"
+            )
         return cls(
             id=run_id,
             planning_request_id=planning_request_id,
@@ -423,7 +469,11 @@ class PlanningRun:
             finished_at=None,
             provider_ref=None,
             structured_result_type=None,
-            usage=PlanningUsage.zero(),
+            usage=(
+                PlanningUsage.unknown()
+                if profile_snapshot.execution_mode == "native_profile"
+                else PlanningUsage.zero()
+            ),
             error_code=None,
             error_message=None,
             diagnostic_artifact_ref=None,
@@ -530,7 +580,9 @@ class PlanningRun:
 
     def retry_after_context_block(self, *, now: datetime) -> None:
         if self.status is not PlanningRunStatus.BLOCKED:
-            raise InvalidTransition("only a blocked planning run can retry context assembly")
+            raise InvalidTransition(
+                "only a blocked planning run can retry context assembly"
+            )
         if not (self.error_code or "").startswith("context_"):
             raise InvalidTransition("planning run is not blocked by context assembly")
         self.status = PlanningRunStatus.QUEUED
@@ -745,7 +797,9 @@ class PlanningRequest:
         base: RevisionBaseDescriptorV1 | None,
     ) -> "PlanningRequest":
         if profile_snapshot.workspace_id != workspace_id:
-            raise ValidationError("planning profile snapshot belongs to another workspace")
+            raise ValidationError(
+                "planning profile snapshot belongs to another workspace"
+            )
         timestamp = _aware(now, "planning request timestamp")
         brief = PlanningBriefRevision.create(
             planning_request_id=request_id,
@@ -898,15 +952,15 @@ class PlanningRequest:
         if self.status is not PlanningRequestStatus.PLANNING:
             raise InvalidTransition("only a planning request in planning can wait")
         items = tuple(clarifications)
-        if not items or not any(item.blocking and item.answer is None for item in items):
+        if not items or not any(
+            item.blocking and item.answer is None for item in items
+        ):
             raise ValidationError("waiting_for_user requires a blocking clarification")
         for item in items:
             if item.planning_request_id != self.id or item.planning_run_id != run_id:
                 raise ValidationError("clarification belongs to another planning run")
         run = self.run(run_id)
-        run.needs_clarification(
-            lease_id=lease_id, fencing_token=fencing_token, now=now
-        )
+        run.needs_clarification(lease_id=lease_id, fencing_token=fencing_token, now=now)
         self.clarifications = (*self.clarifications, *items)
         self.status = PlanningRequestStatus.WAITING_FOR_USER
         self._touch(now)
@@ -932,7 +986,9 @@ class PlanningRequest:
             if item.planning_run_id == run_id and item.blocking and item.answer is None
         }
         if set(answers) != pending:
-            raise ValidationError("all blocking clarifications must be answered together")
+            raise ValidationError(
+                "all blocking clarifications must be answered together"
+            )
         self._validate_new_brief(brief, actor)
         updated: list[PlanningClarification] = []
         for item in self.clarifications:
@@ -949,7 +1005,9 @@ class PlanningRequest:
             else:
                 updated.append(item)
         self.clarifications = tuple(updated)
-        self._append_brief_and_run(brief=brief, run_id=new_run_id, now=now, attempt=run.attempt + 1)
+        self._append_brief_and_run(
+            brief=brief, run_id=new_run_id, now=now, attempt=run.attempt + 1
+        )
 
     def mark_proposal_ready(
         self,
@@ -1004,6 +1062,39 @@ class PlanningRequest:
             run_id=new_run_id,
             now=now,
             attempt=self.runs[-1].attempt + 1,
+        )
+        self.current_proposal_revision = None
+        self.current_proposal_content_hash = None
+
+    def revise_failed(
+        self,
+        *,
+        failed_run_id: UUID,
+        feedback: str,
+        brief: PlanningBriefRevision,
+        new_run_id: UUID,
+        actor: str,
+        now: datetime,
+    ) -> None:
+        if self.status is not PlanningRequestStatus.FAILED:
+            raise InvalidTransition("only a failed planning request can be revised")
+        previous = self.runs[-1]
+        if (
+            previous.id != failed_run_id
+            or previous.status is not PlanningRunStatus.FAILED
+        ):
+            raise InvalidTransition(
+                "latest planning run is not the specified failed run"
+            )
+        clean_feedback = _required_text(feedback, "revision feedback")
+        if brief.user_feedback != clean_feedback:
+            raise ValidationError("brief user_feedback must match revision feedback")
+        self._validate_new_brief(brief, actor)
+        self._append_brief_and_run(
+            brief=brief,
+            run_id=new_run_id,
+            now=now,
+            attempt=previous.attempt + 1,
         )
         self.current_proposal_revision = None
         self.current_proposal_content_hash = None
@@ -1097,7 +1188,9 @@ class PlanningRequest:
 
     def retry_context_assembly(self, run_id: UUID, *, now: datetime) -> None:
         if self.status is not PlanningRequestStatus.FAILED:
-            raise InvalidTransition("only a failed planning request can retry context assembly")
+            raise InvalidTransition(
+                "only a failed planning request can retry context assembly"
+            )
         run = self.run(run_id)
         run.retry_after_context_block(now=now)
         self.status = PlanningRequestStatus.PLANNING
@@ -1178,7 +1271,9 @@ class PlanningRequest:
             raise ValidationError("proposal revision does not match current proposal")
         _validate_content_hash(content_hash)
         if self.current_proposal_content_hash != content_hash:
-            raise ValidationError("proposal content hash does not match current proposal")
+            raise ValidationError(
+                "proposal content hash does not match current proposal"
+            )
 
     def _cancel_active_runs(self, now: datetime) -> None:
         for run in self.runs:

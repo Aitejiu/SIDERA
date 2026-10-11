@@ -125,4 +125,15 @@ describe("subscribeTurnEvents", () => {
 
     expect(source?.closed).toBe(true);
   });
+
+  it.each([401, 403])("does not reconnect an unauthorized %s stream", (status) => {
+    const denied = vi.fn();
+    const stream = subscribeTurnEvents("thread-1", "turn-1", options({ onPollingRequired: denied }));
+    FakeEventSource.instances[0]?.emitError(status);
+    vi.advanceTimersByTime(1000);
+    expect(denied).toHaveBeenCalledWith(status);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(FakeEventSource.instances[0]?.closed).toBe(true);
+    stream.close();
+  });
 });

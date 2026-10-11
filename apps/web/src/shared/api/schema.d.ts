@@ -480,6 +480,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/agent-executions/{execution_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Agent Execution */
+        get: operations["readAgentExecution"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/artifacts/{artifact_id}/content": {
         parameters: {
             query?: never;
@@ -525,6 +542,23 @@ export interface paths {
         put?: never;
         /** Create Artifact Download Token */
         post: operations["create_artifact_download_token_api_v1_workspaces__workspace_id__artifacts__artifact_id__download_token_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/assignments/{target_type}/{target_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Assignment */
+        get: operations["readAgentAssignment"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -661,6 +695,40 @@ export interface paths {
         put?: never;
         /** Materialize Context Package */
         post: operations["materialize_context_package_owner_audit"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/executions/{execution_id}/agent-context/{operation_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Agent Context */
+        get: operations["get_authorized_agent_context"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/executions/{execution_id}/agent-context/{operation_id}/source": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Read Agent Source */
+        post: operations["read_authorized_agent_source"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1135,6 +1203,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/profile-work/{kind}/{work_id}/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Profile Work Run */
+        get: operations["readAgentProfileWorkRun"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/profiles/{profile_id}/work": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Profile Work */
+        get: operations["listAgentProfileWork"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/projection-changes": {
         parameters: {
             query?: never;
@@ -1407,6 +1509,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/executions/{execution_id}/native-trace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Native Worker Trace */
+        get: operations["readNativeWorkerTrace"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/handoff": {
         parameters: {
             query?: never;
@@ -1450,6 +1569,23 @@ export interface paths {
         };
         /** List Worker Item Knowledge Submissions */
         get: operations["list_worker_item_knowledge_submissions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/worker-items/{worker_item_id}/native-context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Native Worker Context */
+        get: operations["readNativeWorkerContext"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1659,11 +1795,8 @@ export interface components {
             /** Target Session Id */
             target_session_id: string | null;
             target_trace_descriptor: components["schemas"]["TraceDescriptorProjectionResponse"] | null;
-            /**
-             * Target Worker Id
-             * Format: uuid
-             */
-            target_worker_id: string;
+            /** Target Worker Id */
+            target_worker_id: string | null;
             /**
              * Transition Id
              * Format: uuid
@@ -1721,6 +1854,76 @@ export interface components {
             /** Type */
             type: string;
         };
+        /** AgentBindingView */
+        AgentBindingView: {
+            assignee: components["schemas"]["AssigneeView"];
+            /**
+             * Changed At
+             * Format: date-time
+             */
+            changed_at: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Not Runnable Reasons */
+            not_runnable_reasons: string[];
+            profile_ref: components["schemas"]["ProfileRef"] | null;
+            /** Runnable */
+            runnable: boolean;
+            /**
+             * Target Id
+             * Format: uuid
+             */
+            target_id: string;
+            target_type: components["schemas"]["AssignmentKind"];
+            /** Version */
+            version: number;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** AgentExecutionView */
+        AgentExecutionView: {
+            /** Binding Version */
+            binding_version: number | null;
+            /** Event Cursor */
+            event_cursor: number | null;
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /** Link Status */
+            link_status: string | null;
+            profile_ref: components["schemas"]["ProfileRef"] | null;
+            /** Root Task Id */
+            root_task_id: string | null;
+            /** Run Id */
+            run_id: string | null;
+            /** Status */
+            status: string;
+            /**
+             * Subtask Id
+             * Format: uuid
+             */
+            subtask_id: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Worker Item Id */
+            worker_item_id: string | null;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
         /** AnswerPlanningClarificationPayload */
         AnswerPlanningClarificationPayload: {
             /** Answers */
@@ -1732,17 +1935,17 @@ export interface components {
              * Expected Input Selection Hash
              * @default null
              */
-            expected_input_selection_hash: string | null;
+            expected_input_selection_hash?: string | null;
             /**
              * Expected Input Selection Id
              * @default null
              */
-            expected_input_selection_id: string | null;
+            expected_input_selection_id?: string | null;
             /**
              * Reason
              * @default null
              */
-            reason: string | null;
+            reason?: string | null;
             /**
              * Transport
              * @enum {string}
@@ -1848,6 +2051,18 @@ export interface components {
             /** Size Bytes */
             size_bytes: number;
         };
+        /** AssigneeView */
+        AssigneeView: {
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "human" | "profile";
+        };
+        /** @enum {string} */
+        AssignmentKind: "subtask" | "worker_item";
         /** AttachKnowledgeRevisionPayload */
         AttachKnowledgeRevisionPayload: {
             knowledge_ref: components["schemas"]["KnowledgeRevisionRefPayload"];
@@ -2430,6 +2645,11 @@ export interface components {
         };
         /** ConfirmPlanRevisionPayload */
         ConfirmPlanRevisionPayload: {
+            /**
+             * Assignee Bindings
+             * @default []
+             */
+            assignee_bindings?: components["schemas"]["PlanningAssigneeChoice"][];
             /** Expected Base Content Hash */
             expected_base_content_hash: string;
             /**
@@ -2454,6 +2674,11 @@ export interface components {
         /** ConfirmPlanningProposalPayload */
         ConfirmPlanningProposalPayload: {
             /**
+             * Assignee Bindings
+             * @default []
+             */
+            assignee_bindings?: components["schemas"]["PlanningAssigneeChoice"][];
+            /**
              * Profile Id
              * Format: uuid
              */
@@ -2464,6 +2689,20 @@ export interface components {
             proposal_content_hash: string;
             /** Proposal Revision */
             proposal_revision: number;
+        };
+        /** ConfirmProfileHandoffPayload */
+        ConfirmProfileHandoffPayload: {
+            /** Expected Proposal Hash */
+            expected_proposal_hash: string;
+            /** Expected Proposal Version */
+            expected_proposal_version: number;
+            /** Expected Worker Item Version */
+            expected_worker_item_version: number;
+            /**
+             * Proposal Id
+             * Format: uuid
+             */
+            proposal_id: string;
         };
         /** ConfirmWorkerHandoffPayload */
         ConfirmWorkerHandoffPayload: {
@@ -2489,12 +2728,30 @@ export interface components {
              * Source Execution Id
              * @default null
              */
-            source_execution_id: string | null;
+            source_execution_id?: string | null;
             /**
              * Source Session Id
              * @default null
              */
-            source_session_id: string | null;
+            source_session_id?: string | null;
+        };
+        /** ContextItem */
+        ContextItem: {
+            /** Content Hash */
+            content_hash: string;
+            /** Item Id */
+            item_id: string;
+            /** Ordinal */
+            ordinal: number;
+            /** Origin */
+            origin: string;
+            /** Required */
+            required: boolean;
+            source_ref?: components["schemas"]["SourceRef"] | null;
+            /** Text */
+            text?: string | null;
+            /** Version */
+            version: string;
         };
         /** ContextMaterializationResponse */
         ContextMaterializationResponse: {
@@ -4221,6 +4478,427 @@ export interface components {
             /** Provider */
             provider: string;
         };
+        /** NativeExecutionContextAddressPayload */
+        NativeExecutionContextAddressPayload: {
+            /** Binding Version */
+            binding_version: number;
+            /** Context Version */
+            context_version: number;
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /**
+             * Execution Mode
+             * @constant
+             */
+            execution_mode: "native_profile";
+            /** Plan Generation */
+            plan_generation: number;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /**
+             * Session Id
+             * Format: uuid
+             */
+            session_id: string;
+            /** Session Last Sequence */
+            session_last_sequence?: number | null;
+            /** Session Version */
+            session_version: number;
+            /**
+             * Worker Id
+             * Format: uuid
+             */
+            worker_id: string;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+        };
+        /** NativeHandoffAssignee */
+        NativeHandoffAssignee: {
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "human" | "profile";
+        };
+        /** NativeHandoffContextAddressPayload */
+        NativeHandoffContextAddressPayload: {
+            /** Binding Version */
+            binding_version: number;
+            /** Context Version */
+            context_version: number;
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /**
+             * Execution Mode
+             * @constant
+             */
+            execution_mode: "native_profile";
+            /** Plan Generation */
+            plan_generation: number;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /**
+             * Session Id
+             * Format: uuid
+             */
+            session_id: string;
+            /** Session Last Sequence */
+            session_last_sequence?: number | null;
+            /** Session Version */
+            session_version: number;
+            /**
+             * Worker Id
+             * Format: uuid
+             */
+            worker_id: string;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+        };
+        /** NativeHandoffProposalResponse */
+        NativeHandoffProposalResponse: {
+            /** Cancelled At */
+            cancelled_at: string | null;
+            /** Confirmed At */
+            confirmed_at: string | null;
+            context: components["schemas"]["HandoffContextSummaryResponse"];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Handoff Instruction */
+            handoff_instruction: string;
+            /** Handoff Reason */
+            handoff_reason: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            plan_base: components["schemas"]["HandoffPlanBaseResponse"];
+            /** Proposal Hash */
+            proposal_hash: string;
+            /**
+             * Proposal Schema Version
+             * @constant
+             */
+            proposal_schema_version: 2;
+            /**
+             * Root Task Id
+             * Format: uuid
+             */
+            root_task_id: string;
+            /** Source Binding Version */
+            source_binding_version: number;
+            /**
+             * Source Execution Id
+             * Format: uuid
+             */
+            source_execution_id: string;
+            source_profile_ref: components["schemas"]["ProfileRef"];
+            /**
+             * Source Run Id
+             * Format: uuid
+             */
+            source_run_id: string;
+            /**
+             * Source Session Id
+             * Format: uuid
+             */
+            source_session_id: string;
+            /** Source Worker Item Version */
+            source_worker_item_version: number;
+            /** Stale Reason */
+            stale_reason: string | null;
+            /** Status */
+            status: string;
+            /**
+             * Subtask Id
+             * Format: uuid
+             */
+            subtask_id: string;
+            target_assignee: components["schemas"]["NativeHandoffAssignee"];
+            target_profile_ref: components["schemas"]["ProfileRef"] | null;
+            /** Target Worker Id */
+            target_worker_id: null;
+            /** Version */
+            version: number;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** NativeHandoffTransitionResponse */
+        NativeHandoffTransitionResponse: {
+            /** Available Recovery Strategies */
+            available_recovery_strategies: string[];
+            /** Blocked Operation Id */
+            blocked_operation_id: string | null;
+            /** Completed At */
+            completed_at: string | null;
+            /**
+             * Confirmed At
+             * Format: date-time
+             */
+            confirmed_at: string;
+            context: components["schemas"]["HandoffContextSummaryResponse"];
+            /** Failure Code */
+            failure_code: string | null;
+            /**
+             * Handoff Schema Version
+             * @constant
+             */
+            handoff_schema_version: 2;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Logical Attempt */
+            logical_attempt: number;
+            /** Next Attempt At */
+            next_attempt_at: string | null;
+            /** Phase */
+            phase: string;
+            plan_base: components["schemas"]["HandoffPlanBaseResponse"];
+            /**
+             * Proposal Id
+             * Format: uuid
+             */
+            proposal_id: string;
+            /** Source Binding Version */
+            source_binding_version: number;
+            /**
+             * Source Execution Id
+             * Format: uuid
+             */
+            source_execution_id: string;
+            /** Source Input Cutoff Sequence */
+            source_input_cutoff_sequence: number;
+            source_profile_ref: components["schemas"]["ProfileRef"];
+            /**
+             * Source Run Id
+             * Format: uuid
+             */
+            source_run_id: string;
+            /**
+             * Source Session Id
+             * Format: uuid
+             */
+            source_session_id: string;
+            /** Started At */
+            started_at: string | null;
+            /** Status */
+            status: string;
+            target_assignee: components["schemas"]["NativeHandoffAssignee"];
+            /** Target Binding Version */
+            target_binding_version: number | null;
+            /** Target Context Version */
+            target_context_version: number;
+            /** Target Execution Id */
+            target_execution_id: string | null;
+            target_profile_ref: components["schemas"]["ProfileRef"] | null;
+            /** Target Run Id */
+            target_run_id: string | null;
+            /** Target Session Id */
+            target_session_id: string | null;
+            /** Target Worker Id */
+            target_worker_id: string | null;
+            /** Version */
+            version: number;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+            /** Writer State */
+            writer_state: string;
+        };
+        /** NativeRunSummary */
+        NativeRunSummary: {
+            /** Available */
+            available: boolean;
+            kind: components["schemas"]["ProfileWorkKind"];
+            /** Reason Code */
+            reason_code: string | null;
+            run?: components["schemas"]["NativeRunView"] | null;
+            /** Run Id */
+            run_id: string | null;
+            /**
+             * Work Id
+             * Format: uuid
+             */
+            work_id: string;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** NativeRunView */
+        NativeRunView: {
+            /** Actual Runtime Version */
+            actual_runtime_version: string;
+            /** Applied Fields */
+            applied_fields: string[];
+            /** Config Hash */
+            config_hash: string;
+            /** Input Open */
+            input_open: boolean;
+            /** Observed Model */
+            observed_model: string | null;
+            profile_ref: components["schemas"]["ProfileRef"];
+            /** Reason Code */
+            reason_code: string | null;
+            runtime_ref: components["schemas"]["RuntimeRef"];
+            /** Selected Model */
+            selected_model: string | null;
+            state: components["schemas"]["RunState"];
+        };
+        /** NativeWorkerContextAddress */
+        NativeWorkerContextAddress: {
+            /** Binding Version */
+            binding_version: number;
+            /** Context Version */
+            context_version: number;
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /**
+             * Execution Mode
+             * @constant
+             */
+            execution_mode: "native_profile";
+            /** Plan Generation */
+            plan_generation: number;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /**
+             * Session Id
+             * Format: uuid
+             */
+            session_id: string;
+            /** Session Last Sequence */
+            session_last_sequence?: number | null;
+            /** Session Version */
+            session_version: number;
+            /**
+             * Worker Id
+             * Format: uuid
+             */
+            worker_id: string;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+        };
+        /** NativeWorkerContextView */
+        NativeWorkerContextView: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            binding: components["schemas"]["AgentBindingView"] | null;
+            context: components["schemas"]["NativeWorkerContextAddress"] | null;
+            execution: components["schemas"]["AgentExecutionView"] | null;
+            /**
+             * Execution Mode
+             * @enum {string}
+             */
+            execution_mode: "native_profile" | "legacy" | "unassigned";
+            /** Execution Version */
+            execution_version?: number | null;
+            /** Input Enabled */
+            input_enabled: boolean;
+            /** Read Only Reason */
+            read_only_reason: string | null;
+            run: components["schemas"]["NativeRunView"] | null;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+            /** Worker Item Version */
+            worker_item_version: number;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** NativeWorkerTraceView */
+        NativeWorkerTraceView: {
+            /** Events */
+            events: components["schemas"]["RunEvent"][];
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /** Has More */
+            has_more: boolean;
+            /** Next Sequence */
+            next_sequence: number;
+            profile_ref: components["schemas"]["ProfileRef"];
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /**
+             * Worker Item Id
+             * Format: uuid
+             */
+            worker_item_id: string;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
         /** NotificationAttemptPageResponse */
         NotificationAttemptPageResponse: {
             /** Items */
@@ -4412,6 +5090,8 @@ export interface components {
              * Format: uuid
              */
             route_id: string;
+            /** Route Version */
+            route_version?: number | null;
             /** Status */
             status: string;
             /**
@@ -4706,7 +5386,7 @@ export interface components {
              * Reason
              * @default null
              */
-            reason: string | null;
+            reason?: string | null;
             /** Target Plan Generation */
             target_plan_generation: number;
             /**
@@ -4974,6 +5654,27 @@ export interface components {
             structured_output: string;
             /** Usage Reporting */
             usage_reporting: string;
+        };
+        /** PlanningAssigneeChoice */
+        PlanningAssigneeChoice: {
+            /** Assignee Id */
+            assignee_id: string;
+            /**
+             * Assignee Kind
+             * @enum {string}
+             */
+            assignee_kind: "human" | "profile";
+            /** Expected Binding Version */
+            expected_binding_version: number | null;
+            /** Profile Revision */
+            profile_revision: number | null;
+            /** Target Key */
+            target_key: string;
+            /**
+             * Target Type
+             * @enum {string}
+             */
+            target_type: "subtask" | "worker_item";
         };
         /** PlanningBriefPageResponse */
         PlanningBriefPageResponse: {
@@ -5288,6 +5989,26 @@ export interface components {
              */
             workspace_id: string;
         };
+        /** PlanningNativeRunResponse */
+        PlanningNativeRunResponse: {
+            /** Closed */
+            closed: boolean;
+            /** Event Cursor */
+            event_cursor: number;
+            /** Reason Code */
+            reason_code: string | null;
+            /** Response Id */
+            response_id: string | null;
+            /** Run Id */
+            run_id: string | null;
+            /**
+             * Start Operation Id
+             * Format: uuid
+             */
+            start_operation_id: string;
+            /** Status */
+            status: string;
+        };
         /** PlanningOutcomeMetricsResponse */
         PlanningOutcomeMetricsResponse: {
             /** Invalid Output Rate */
@@ -5308,7 +6029,7 @@ export interface components {
         };
         /** PlanningProfileResponse */
         PlanningProfileResponse: {
-            capabilities: components["schemas"]["PlanningCapabilityResponse"];
+            capabilities: components["schemas"]["PlanningCapabilityResponse"] | null;
             /**
              * Created At
              * Format: date-time
@@ -5317,21 +6038,25 @@ export interface components {
             /** Display Name */
             display_name: string;
             /**
+             * Execution Mode
+             * @default legacy
+             * @enum {string}
+             */
+            execution_mode: "legacy" | "native_profile";
+            /**
              * Id
              * Format: uuid
              */
             id: string;
+            planner_agent_ref?: components["schemas"]["ProfileRef"] | null;
             /** Planner Interface Version */
             planner_interface_version: string;
             /** Planner Module Config Version */
-            planner_module_config_version: number;
-            /**
-             * Planner Module Instance Id
-             * Format: uuid
-             */
-            planner_module_instance_id: string;
+            planner_module_config_version: number | null;
+            /** Planner Module Instance Id */
+            planner_module_instance_id: string | null;
             /** Planner Provider */
-            planner_provider: string;
+            planner_provider: string | null;
             /** Profile Key */
             profile_key: string;
             /** Status */
@@ -5566,9 +6291,15 @@ export interface components {
             attempt: number;
             /** Brief Revision */
             brief_revision: number;
-            capability_snapshot: components["schemas"]["PlanningCapabilityResponse"];
+            capability_snapshot: components["schemas"]["PlanningCapabilityResponse"] | null;
             /** Error Code */
             error_code: string | null;
+            /**
+             * Execution Mode
+             * @default legacy
+             * @enum {string}
+             */
+            execution_mode: "legacy" | "native_profile";
             /** Finished At */
             finished_at: string | null;
             /**
@@ -5576,11 +6307,13 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            native_run?: components["schemas"]["PlanningNativeRunResponse"] | null;
             /**
              * Operation Id
              * Format: uuid
              */
             operation_id: string;
+            planner_agent_ref?: components["schemas"]["ProfileRef"] | null;
             /**
              * Planning Request Id
              * Format: uuid
@@ -5611,26 +6344,26 @@ export interface components {
         /** PlanningUsageMetricsResponse */
         PlanningUsageMetricsResponse: {
             /** Context Bytes */
-            context_bytes: number;
+            context_bytes: number | null;
             /** Cost Microunits */
-            cost_microunits: number;
+            cost_microunits: number | null;
             /** Input Tokens */
-            input_tokens: number;
+            input_tokens: number | null;
             /** Output Tokens */
-            output_tokens: number;
+            output_tokens: number | null;
         };
         /** PlanningUsageResponse */
         PlanningUsageResponse: {
             /** Context Bytes */
-            context_bytes: number;
+            context_bytes: number | null;
             /** Cost Microunits */
-            cost_microunits: number;
+            cost_microunits: number | null;
             /** Input Tokens */
-            input_tokens: number;
+            input_tokens: number | null;
             /** Output Tokens */
-            output_tokens: number;
+            output_tokens: number | null;
             /** Runtime Seconds */
-            runtime_seconds: number;
+            runtime_seconds: number | null;
         };
         /** PlanningWorkerTransitionMetricResponse */
         PlanningWorkerTransitionMetricResponse: {
@@ -5640,6 +6373,27 @@ export interface components {
             count: number;
             /** Outcome */
             outcome: string;
+        };
+        /** PrepareProfileHandoffPayload */
+        PrepareProfileHandoffPayload: {
+            context: components["schemas"]["NativeHandoffContextAddressPayload"];
+            /** Handoff Instruction */
+            handoff_instruction: string;
+            /** Handoff Reason */
+            handoff_reason: string;
+            /** Input Plan */
+            input_plan: {
+                [key: string]: unknown;
+            };
+            /**
+             * Proposal Schema Version
+             * @constant
+             */
+            proposal_schema_version: 2;
+            /** Proposal Ttl Seconds */
+            proposal_ttl_seconds: number;
+            target_assignee: components["schemas"]["NativeHandoffAssignee"];
+            target_profile_ref: components["schemas"]["ProfileRef"] | null;
         };
         /** PrepareWorkerHandoffPayload */
         PrepareWorkerHandoffPayload: {
@@ -5659,6 +6413,75 @@ export interface components {
              */
             target_worker_id: string;
         };
+        /** ProfileRef */
+        ProfileRef: {
+            /**
+             * Profile Id
+             * Format: uuid
+             */
+            profile_id: string;
+            /** Revision */
+            revision: number;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** @enum {string} */
+        ProfileWorkKind: "assignment" | "execution" | "planning";
+        /** ProfileWorkPage */
+        ProfileWorkPage: {
+            /** Items */
+            items: components["schemas"]["ProfileWorkRow"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /** ProfileWorkRow */
+        ProfileWorkRow: {
+            /** Binding Version */
+            binding_version?: number | null;
+            /** Event Cursor */
+            event_cursor?: number | null;
+            /** Execution Id */
+            execution_id?: string | null;
+            kind: components["schemas"]["ProfileWorkKind"];
+            /** Link Status */
+            link_status?: string | null;
+            /** Planning Request Id */
+            planning_request_id?: string | null;
+            /** Planning Run Id */
+            planning_run_id?: string | null;
+            profile_ref: components["schemas"]["ProfileRef"];
+            /** Root Task Id */
+            root_task_id?: string | null;
+            /** Run Id */
+            run_id?: string | null;
+            /** Status */
+            status: string;
+            /** Subtask Id */
+            subtask_id?: string | null;
+            target_type?: components["schemas"]["AssignmentKind"] | null;
+            /** Title */
+            title: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /**
+             * Work Id
+             * Format: uuid
+             */
+            work_id: string;
+            /** Worker Item Id */
+            worker_item_id?: string | null;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
         /** ReconcileWorkerTransitionPayload */
         ReconcileWorkerTransitionPayload: {
             /** Evidence Refs */
@@ -5667,12 +6490,12 @@ export interface components {
              * Operation Id
              * @default null
              */
-            operation_id: string | null;
+            operation_id?: string | null;
             /**
              * Patch Hash
              * @default null
              */
-            patch_hash: string | null;
+            patch_hash?: string | null;
             /** Reason */
             reason: string;
         };
@@ -5688,7 +6511,7 @@ export interface components {
              * Replacement Target Worker Id
              * @default null
              */
-            replacement_target_worker_id: string | null;
+            replacement_target_worker_id?: string | null;
             /**
              * Strategy
              * @enum {string}
@@ -5708,12 +6531,12 @@ export interface components {
              * Operation Id
              * @default null
              */
-            operation_id: string | null;
+            operation_id?: string | null;
             /**
              * Patch Hash
              * @default null
              */
-            patch_hash: string | null;
+            patch_hash?: string | null;
             /** Reason */
             reason: string;
             /**
@@ -5775,17 +6598,17 @@ export interface components {
              * Collaboration Runtime Config Version
              * @default null
              */
-            collaboration_runtime_config_version: number | null;
+            collaboration_runtime_config_version?: number | null;
             /**
              * Collaboration Runtime Definition Id
              * @default null
              */
-            collaboration_runtime_definition_id: string | null;
+            collaboration_runtime_definition_id?: string | null;
             /**
              * Collaboration Runtime Instance Id
              * @default null
              */
-            collaboration_runtime_instance_id: string | null;
+            collaboration_runtime_instance_id?: string | null;
             /** Default Priority */
             default_priority: number;
             /** Display Name */
@@ -5820,7 +6643,7 @@ export interface components {
              * User Selectable
              * @default true
              */
-            user_selectable: boolean;
+            user_selectable?: boolean;
             /** Version */
             version: number;
         };
@@ -5848,7 +6671,7 @@ export interface components {
              * Reason
              * @default null
              */
-            reason: string | null;
+            reason?: string | null;
             /**
              * Transport
              * @enum {string}
@@ -5872,6 +6695,20 @@ export interface components {
             subtask_key: string;
             /** Title */
             title: string;
+        };
+        /** RepairPlanningContextPayload */
+        RepairPlanningContextPayload: {
+            /** Expected Planning Request Version */
+            expected_planning_request_version: number;
+            /** Expected Work Context Version */
+            expected_work_context_version: number;
+            /** Work Context Content Hash */
+            work_context_content_hash: string;
+            /**
+             * Work Context Revision Id
+             * Format: uuid
+             */
+            work_context_revision_id: string;
         };
         /** RequestProposalRevisionPayload */
         RequestProposalRevisionPayload: {
@@ -5904,9 +6741,9 @@ export interface components {
              * Reason
              * @default
              */
-            reason: string;
+            reason?: string;
             /** @default null */
-            suggestion: components["schemas"]["ReworkSuggestionPayload"] | null;
+            suggestion?: components["schemas"]["ReworkSuggestionPayload"] | null;
             /** Target Worker Item Ids */
             target_worker_item_ids?: string[];
         };
@@ -6707,7 +7544,7 @@ export interface components {
              * Reason
              * @default null
              */
-            reason: string | null;
+            reason?: string | null;
             /**
              * Transport
              * @enum {string}
@@ -6747,6 +7584,27 @@ export interface components {
              * Format: uuid
              */
             verification_operation_id: string;
+        };
+        /** ReviseFailedPlanningRequestPayload */
+        ReviseFailedPlanningRequestPayload: {
+            /** Expected Failed Planning Run Version */
+            expected_failed_planning_run_version: number;
+            /** Expected Work Context Version */
+            expected_work_context_version: number;
+            /**
+             * Failed Planning Run Id
+             * Format: uuid
+             */
+            failed_planning_run_id: string;
+            /** Feedback */
+            feedback: string;
+            /** Work Context Content Hash */
+            work_context_content_hash: string;
+            /**
+             * Work Context Revision Id
+             * Format: uuid
+             */
+            work_context_revision_id: string;
         };
         /** ReviseWorkContextPayload */
         ReviseWorkContextPayload: {
@@ -7082,6 +7940,36 @@ export interface components {
             /** Waiting Count */
             waiting_count: number;
         };
+        /** RunEvent */
+        RunEvent: {
+            /** Data */
+            data: {
+                [key: string]: components["schemas"]["sidera_agents__contracts__JsonValue"];
+            };
+            /** Kind */
+            kind: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Operation Id */
+            operation_id: string | null;
+            /** Response Id */
+            response_id: string | null;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /** Sequence */
+            sequence: number;
+        };
+        /**
+         * RunState
+         * @enum {string}
+         */
+        RunState: "starting" | "running" | "idle" | "closing" | "completed" | "stopped" | "failed" | "unknown";
         /** RuntimeDurationMetricsResponse */
         RuntimeDurationMetricsResponse: {
             /** Average Seconds */
@@ -7121,6 +8009,42 @@ export interface components {
              */
             workspace_id: string;
         };
+        /** RuntimeRef */
+        RuntimeRef: {
+            /**
+             * Runtime Id
+             * Format: uuid
+             */
+            runtime_id: string;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+        };
+        /** SendExecutionInputPayload */
+        SendExecutionInputPayload: {
+            /** Attachment Refs */
+            attachment_refs?: string[];
+            /** Client Idempotency Key */
+            client_idempotency_key: string;
+            /** Context */
+            context: components["schemas"]["ExecutionContextAddressPayload"] | components["schemas"]["NativeExecutionContextAddressPayload"];
+            /** Text */
+            text: string;
+        };
+        /** SetAgentAssigneePayload */
+        SetAgentAssigneePayload: {
+            /** Assignee Id */
+            assignee_id: string;
+            /**
+             * Assignee Kind
+             * @enum {string}
+             */
+            assignee_kind: "human" | "profile";
+            /** Profile Revision */
+            profile_revision: number | null;
+        };
         /** SetModuleLifecyclePayload */
         SetModuleLifecyclePayload: {
             /**
@@ -7129,12 +8053,32 @@ export interface components {
              */
             lifecycle: "active" | "draining" | "disabled";
         };
+        /** SourceContent */
+        SourceContent: {
+            /** Actual Version */
+            actual_version: string;
+            /** Content Hash */
+            content_hash: string;
+            /** Text */
+            text: string;
+        };
+        /** SourceRef */
+        SourceRef: {
+            /** Key */
+            key: string;
+            /** Provider */
+            provider: string;
+            /** Version */
+            version: string;
+        };
         /** SubmitPlanRevisionPayload */
         SubmitPlanRevisionPayload: {
             /** Acceptance Criteria */
             acceptance_criteria: string[];
             /** Constraints */
             constraints?: string[];
+            /** Context Refs */
+            context_refs?: string[];
             /** Expected Base Content Hash */
             expected_base_content_hash: string;
             /** Expected Base Generation */
@@ -7146,6 +8090,8 @@ export interface components {
             expected_base_snapshot_id: string;
             /** Objective */
             objective: string;
+            /** @default null */
+            planner_agent_ref?: components["schemas"]["ProfileRef"] | null;
             /**
              * Planning Profile Id
              * Format: uuid
@@ -7182,9 +8128,37 @@ export interface components {
              * Source Ref
              * @default null
              */
-            source_ref: string | null;
+            source_ref?: string | null;
             /** Source Type */
             source_type: string;
+        };
+        /** SubmitTaskGoalPayload */
+        SubmitTaskGoalPayload: {
+            /** Acceptance Criteria */
+            acceptance_criteria: string[];
+            /** Constraints */
+            constraints?: string[];
+            /** Context Refs */
+            context_refs?: string[];
+            /** Objective */
+            objective: string;
+            planner_agent_ref: components["schemas"]["ProfileRef"];
+            /**
+             * Planning Profile Id
+             * Format: uuid
+             */
+            planning_profile_id: string;
+            /** Planning Profile Version */
+            planning_profile_version: number;
+            /** Requested Outputs */
+            requested_outputs: string[];
+            /**
+             * Source Ref
+             * @default null
+             */
+            source_ref?: string | null;
+            /** Title */
+            title: string;
         };
         /** SubtaskActivityProjectionResponse */
         SubtaskActivityProjectionResponse: {
@@ -8090,6 +9064,35 @@ export interface components {
             /** Question */
             question: string;
         };
+        /** UnstartedAssignmentTarget */
+        UnstartedAssignmentTarget: {
+            /** Expected Version */
+            expected_version: number;
+            /**
+             * Target Id
+             * Format: uuid
+             */
+            target_id: string;
+            /**
+             * Target Type
+             * @enum {string}
+             */
+            target_type: "subtask" | "worker_item";
+        };
+        /** UpdateUnstartedAgentBindingPayload */
+        UpdateUnstartedAgentBindingPayload: {
+            /** Assignee Id */
+            assignee_id: string;
+            /**
+             * Assignee Kind
+             * @enum {string}
+             */
+            assignee_kind: "human" | "profile";
+            /** Profile Revision */
+            profile_revision: number | null;
+            /** Targets */
+            targets: components["schemas"]["UnstartedAssignmentTarget"][];
+        };
         /** UsageSummaryProjectionResponse */
         UsageSummaryProjectionResponse: {
             /** Cached Tokens */
@@ -8911,6 +9914,53 @@ export interface components {
             /** Writer State */
             writer_state: string;
         };
+        /** WorkerProgressProjectionResponse */
+        WorkerProgressProjectionResponse: {
+            /** Binding Version */
+            binding_version: number;
+            /**
+             * Event Id
+             * Format: uuid
+             */
+            event_id: string;
+            /**
+             * Execution Id
+             * Format: uuid
+             */
+            execution_id: string;
+            /**
+             * Report Id
+             * Format: uuid
+             */
+            report_id: string;
+            /**
+             * Reported At
+             * Format: date-time
+             */
+            reported_at: string;
+            /**
+             * Response Id
+             * Format: uuid
+             */
+            response_id: string;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /** Steps */
+            steps: {
+                [key: string]: components["schemas"]["pydantic__types__JsonValue"];
+            }[];
+            /** Summary */
+            summary: string;
+            /**
+             * Verified
+             * @default false
+             * @constant
+             */
+            verified: false;
+        };
         /** WorkerResponse */
         WorkerResponse: {
             adapter_module_summary: components["schemas"]["ModuleSummaryResponse"] | null;
@@ -9237,6 +10287,7 @@ export interface components {
             can_intervene: boolean;
             collaboration?: components["schemas"]["WorkerItemCollaborationSummaryResponse"] | null;
             current_placement: components["schemas"]["WorkerItemPlacementProjectionResponse"];
+            current_progress?: components["schemas"]["WorkerProgressProjectionResponse"] | null;
             current_runtime: components["schemas"]["WorkerRuntimeProjectionResponse"] | null;
             /** Current Step */
             current_step: string | null;
@@ -9264,6 +10315,10 @@ export interface components {
              */
             workspace_id: string;
         };
+        pydantic__types__JsonValue: unknown;
+        sidera_agents__contracts__JsonValue: boolean | number | string | components["schemas"]["sidera_agents__contracts__JsonValue"][] | {
+            [key: string]: components["schemas"]["sidera_agents__contracts__JsonValue"];
+        } | null;
     };
     responses: never;
     parameters: never;
@@ -10206,6 +11261,38 @@ export interface operations {
             };
         };
     };
+    readAgentExecution: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                execution_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentExecutionView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_artifact_content_api_v1_workspaces__workspace_id__artifacts__artifact_id__content_get: {
         parameters: {
             query?: {
@@ -10295,6 +11382,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DownloadTokenResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readAgentAssignment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                target_type: "subtask" | "worker_item";
+                target_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentBindingView"] | null;
                 };
             };
             /** @description Validation Error */
@@ -10564,6 +11684,76 @@ export interface operations {
             };
         };
     };
+    get_authorized_agent_context: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                execution_id: string;
+                operation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContextItem"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_authorized_agent_source: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                execution_id: string;
+                operation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceRef"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceContent"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_execution_context_package: {
         parameters: {
             query?: {
@@ -10616,7 +11806,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HandoffProposalResponse"];
+                    "application/json": components["schemas"]["HandoffProposalResponse"] | components["schemas"]["NativeHandoffProposalResponse"];
                 };
             };
             /** @description Validation Error */
@@ -10648,7 +11838,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HandoffTransitionResponse"];
+                    "application/json": components["schemas"]["HandoffTransitionResponse"] | components["schemas"]["NativeHandoffTransitionResponse"];
                 };
             };
             /** @description Validation Error */
@@ -11466,6 +12656,76 @@ export interface operations {
             };
         };
     };
+    readAgentProfileWorkRun: {
+        parameters: {
+            query?: {
+                target_type?: components["schemas"]["AssignmentKind"] | null;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                kind: "assignment" | "execution" | "planning";
+                work_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NativeRunSummary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    listAgentProfileWork: {
+        parameters: {
+            query?: {
+                after?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                profile_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProfileWorkPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     projection_changes_api_v1_workspaces__workspace_id__projection_changes_get: {
         parameters: {
             query?: {
@@ -12014,6 +13274,42 @@ export interface operations {
             };
         };
     };
+    readNativeWorkerTrace: {
+        parameters: {
+            query?: {
+                after_sequence?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                worker_item_id: string;
+                execution_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NativeWorkerTraceView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_worker_item_handoff: {
         parameters: {
             query?: never;
@@ -12100,6 +13396,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["KnowledgeSubmissionPageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readNativeWorkerContext: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                worker_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NativeWorkerContextView"];
                 };
             };
             /** @description Validation Error */

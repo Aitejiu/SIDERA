@@ -184,6 +184,18 @@ def create_management_router(
         return principal
 
     @router.get(
+        "/workspaces/{workspace_id}/credentials",
+        response_model=list[CredentialSummarySchema],
+    )
+    def list_credentials(
+        workspace_id: UUID,
+        _principal: Annotated[ManagementPrincipal, Depends(authorize_workspace)],
+    ) -> list[CredentialSummarySchema]:
+        return [
+            _credential_summary(item) for item in catalog.list_credentials(workspace_id)
+        ]
+
+    @router.get(
         "/workspaces/{workspace_id}/connections",
         response_model=list[ConnectionSummarySchema],
     )

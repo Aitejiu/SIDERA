@@ -215,6 +215,32 @@ class PlanRepository:
         ).all()
         return tuple(rows)
 
+    def list_root_scopes_with_snapshots(
+        self, *, after: tuple[UUID, UUID] | None = None, limit: int = 100
+    ) -> tuple[tuple[UUID, UUID], ...]:
+        if not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        query = select(
+            PlanSnapshotModel.workspace_id, PlanSnapshotModel.root_task_id
+        ).distinct()
+        if after is not None:
+            workspace_id, root_task_id = after
+            query = query.where(
+                (PlanSnapshotModel.workspace_id > workspace_id)
+                | (
+                    (PlanSnapshotModel.workspace_id == workspace_id)
+                    & (PlanSnapshotModel.root_task_id > root_task_id)
+                )
+            )
+        rows = self._session.execute(
+            query.order_by(
+                PlanSnapshotModel.workspace_id, PlanSnapshotModel.root_task_id
+            ).limit(limit)
+        ).all()
+        return tuple(
+            (workspace_id, root_task_id) for workspace_id, root_task_id in rows
+        )
+
     @staticmethod
     def _validate_next_snapshot(
         snapshot: TaskPlanSnapshot, head: RootTaskPlanHead

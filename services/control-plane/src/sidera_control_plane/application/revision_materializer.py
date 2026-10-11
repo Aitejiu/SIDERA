@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sidera_control_plane.application.handoff_gate import HandoffInProgress
+from sidera_control_plane.application.planning_assignments import PlanningAssignments
 from sidera_control_plane.application.ports import ControlPlaneUnitOfWork
 from sidera_control_plane.application.result_gate import (
     ResultGateAction,
@@ -19,6 +20,7 @@ from sidera_control_plane.application.transition_execution_requests import (
 from sidera_control_plane.application.worker_item_materializer import (
     WorkerItemMaterializer,
 )
+from sidera_control_plane.domain.agent_bindings import AgentBinding
 from sidera_control_plane.domain.collaboration import (
     CollaborationPolicySnapshotV1,
     CollaborationPolicySnapshotV2,
@@ -108,6 +110,8 @@ class RevisionMaterializationResult:
     tasks: tuple[Task, ...]
     lineages: tuple[PlanEntityLineage, ...]
     event_ids: tuple[UUID, ...]
+    pending_events: tuple[EventData, ...] = ()
+    bindings: tuple[AgentBinding, ...] = ()
 
 
 class RevisionMaterializer:
@@ -138,6 +142,8 @@ class RevisionMaterializer:
         profile: PlanningProfile,
         envelope: CommandEnvelope,
         now: datetime,
+        assignments: PlanningAssignments | None = None,
+        defer_events: bool = False,
     ) -> RevisionMaterializationResult:
         proposal_payload = self._validate_input(
             request=request,
@@ -145,6 +151,11 @@ class RevisionMaterializer:
             profile=profile,
             envelope=envelope,
         )
+        if (
+            request.profile_snapshot.execution_mode == "native_profile"
+            and assignments is None
+        ):
+            raise ValidationError("explicit native responsibilities required")
         collaboration_policy = self._resolve_collaboration_policy(
             request, proposal_payload
         )
@@ -499,8 +510,20 @@ class RevisionMaterializer:
             plan_transition=plan_transition,
             worker_transitions=worker_transitions,
         )
-        for event in events:
-            uow.events.append_with_outbox(event)
+        bindings = ()
+        if assignments is not None:
+            bindings, binding_events = assignments.apply(
+                uow,
+                workspace_id=request.workspace_id,
+                subtask_mapping=target_subtask_ids,
+                worker_mapping=target_worker_ids,
+                envelope=envelope,
+                now=now,
+            )
+            events = (*events, *binding_events)
+        if not defer_events:
+            for event in events:
+                uow.events.append_with_outbox(event)
         return RevisionMaterializationResult(
             root_task_id=root_task.id,
             plan_snapshot_id=target_snapshot.id,
@@ -515,6 +538,8 @@ class RevisionMaterializer:
             tasks=(root_task, *materialized_tasks),
             lineages=lineages,
             event_ids=tuple(event.id for event in events),
+            pending_events=events if defer_events else (),
+            bindings=bindings,
         )
 
     @staticmethod
@@ -602,6 +627,11 @@ class RevisionMaterializer:
             != profile.planner_module_config_version
             or profile_snapshot.proposal_schema_version
             != profile.proposal_schema_version
+            or profile_snapshot.execution_mode != profile.execution_mode
+            or (
+                profile_snapshot.execution_mode != "native_profile"
+                and profile_snapshot.planner_agent_ref != profile.planner_agent_ref
+            )
         ):
             raise ValidationError(
                 "planning profile snapshot does not match confirmation"
@@ -615,11 +645,20 @@ class RevisionMaterializer:
             != profile_snapshot.planner_module_config_version
             or proposal.proposal_schema_version
             != profile_snapshot.proposal_schema_version
+            or proposal.profile_descriptor.execution_mode
+            != profile_snapshot.execution_mode
+            or proposal.profile_descriptor.planner_agent_ref
+            != profile_snapshot.planner_agent_ref
         ):
             raise ValidationError("proposal profile does not match confirmation")
 
         try:
             current_snapshot = profile.snapshot(profile_snapshot.planner_capabilities)
+            if current_snapshot.execution_mode == "native_profile":
+                current_snapshot = replace(
+                    current_snapshot,
+                    planner_agent_ref=profile_snapshot.planner_agent_ref,
+                )
         except ValidationError as exc:
             raise ValidationError(
                 "planning profile snapshot does not match confirmation"
@@ -642,7 +681,8 @@ class RevisionMaterializer:
     ) -> CollaborationPolicySnapshotV1 | CollaborationPolicySnapshotV2 | None:
         subtask_keys = frozenset(item.key for item in payload.subtasks)
         if isinstance(
-            payload, (PlanningRevisionProposalPayloadV5, PlanningRevisionProposalPayloadV6)
+            payload,
+            (PlanningRevisionProposalPayloadV5, PlanningRevisionProposalPayloadV6),
         ):
             return resolve_collaboration_policy_v2(
                 payload.collaboration_policy_request,
@@ -1298,10 +1338,10 @@ class RevisionMaterializer:
     ) -> None:
         if self._result_inputs_enabled:
             return
-        if (
-            proposal.proposal_schema_version not in {5, 6}
-            and profile.proposal_schema_version not in {5, 6}
-        ):
+        if proposal.proposal_schema_version not in {
+            5,
+            6,
+        } and profile.proposal_schema_version not in {5, 6}:
             return
         raise ResultInputsDisabled(
             proposal_schema_version=max(

@@ -3,7 +3,8 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -49,10 +50,8 @@ from sidera_control_plane.application.ports import (
     PlannerAdapter,
 )
 from sidera_control_plane.application.revision_planning_context import (
-    AdapterCapabilitySnapshotV1,
-    ConfirmedContextPackageRefV1,
-    RevisionPlanningContextBuilder,
     RevisionPlanningContextV1,
+    load_revision_planning_context,
 )
 from sidera_control_plane.application.secret_resolution import (
     EnvironmentSecretResolver,
@@ -73,14 +72,12 @@ from sidera_control_plane.domain.context_packages import (
     ContextPackageManifestV1,
     ContextPackageStatus,
     ContextPurpose,
-    context_package_reference,
 )
 from sidera_control_plane.domain.errors import (
     DomainError,
     StaleFencingToken,
 )
 from sidera_control_plane.domain.events import EventData
-from sidera_control_plane.domain.execution import ExecutionSession
 from sidera_control_plane.domain.modules import (
     PLANNER_ADAPTER_MODULE_TYPE,
     IdempotencyCapability,
@@ -101,6 +98,7 @@ from sidera_control_plane.domain.planning import (
     PlanningUsage,
     planning_operation_id,
 )
+from sidera_control_plane.domain.planning_authority import PlanningAgentLink
 from sidera_control_plane.domain.planning_profiles import (
     PlanningProfileSnapshot,
     UnknownOutcomePolicy,
@@ -161,10 +159,30 @@ class RegistryPlannerAdapterFactory:
         *,
         secret_resolver: SecretResolver | None = None,
         temp_root: Path = Path(".sidera/planning"),
+        native_services=None,
+        uow_factory=None,
+        planning_workspace_provider=None,
+        planning_context_materializer=None,
+        planning_authorizer=None,
+        native_clock=None,
+        native_wait=None,
+        native_poll_interval_seconds: float = 1.0,
+        owner_check: Callable[[], bool] | None = None,
     ) -> None:
         self._builders = dict(builders)
         self._secret_resolver = secret_resolver or EnvironmentSecretResolver()
         self._temp_root = temp_root
+        self._native_options = {
+            "services": native_services,
+            "uow_factory": uow_factory,
+            "workspace_provider": planning_workspace_provider,
+            "materializer": planning_context_materializer,
+            "authorizer": planning_authorizer,
+            "clock": native_clock,
+            "wait": native_wait,
+            "poll_interval_seconds": native_poll_interval_seconds,
+            "owner_check": owner_check,
+        }
 
     def create(
         self,
@@ -172,6 +190,21 @@ class RegistryPlannerAdapterFactory:
         instance: ModuleInstance | None,
         profile_snapshot: PlanningProfileSnapshot,
     ) -> PlannerAdapter:
+        if profile_snapshot.execution_mode == "native_profile":
+            if self._native_options["workspace_provider"] is None:
+                raise PlanningAdapterUnavailable(
+                    "planning_workspace_unavailable", blocked=False
+                )
+            if any(
+                self._native_options[key] is None
+                for key in ("services", "uow_factory", "materializer", "authorizer")
+            ):
+                raise PlanningAdapterUnavailable("permission_denied", blocked=True)
+            from sidera_control_plane.application.agent_planner_adapter import (
+                AgentPlannerAdapter,
+            )
+
+            return AgentPlannerAdapter(**self._native_options)
         if definition is None or instance is None:
             raise PlanningAdapterUnavailable(
                 "planning_profile_unavailable", blocked=False
@@ -260,6 +293,8 @@ class _ClaimedRun:
     context_package: ContextPackageManifestV1 | None = None
     context_revision: WorkContextRevision | None = None
     planning_context: RevisionPlanningContextV1 | None = None
+    original_link: PlanningAgentLink | None = None
+    original_request_version: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,6 +426,8 @@ class PlanningRunner:
         context_package_cutover_at: datetime | None = None,
         candidate_submission_service: KnowledgeCandidateSubmissionService | None = None,
         acceptance_guard: RuntimeBudgetGuard | None = None,
+        owner_check: Callable[[], bool] | None = None,
+        native_shutdown_check: Callable[[], bool] | None = None,
     ) -> None:
         if not owner_id.strip():
             raise ValueError("owner_id is required")
@@ -406,6 +443,8 @@ class PlanningRunner:
         self._uow_factory = uow_factory
         self._adapter_factory = adapter_factory
         self._owner_id = owner_id
+        self._owner_check = owner_check
+        self._native_shutdown_check = native_shutdown_check
         self._lease_ttl_seconds = lease_ttl_seconds
         self._lease_renew_interval_seconds = lease_renew_interval_seconds
         self._max_diagnostic_bytes = max_diagnostic_bytes
@@ -415,6 +454,24 @@ class PlanningRunner:
         self._context_package_cutover_at = context_package_cutover_at
         self._candidate_submission_service = candidate_submission_service
         self._acceptance_guard = acceptance_guard
+        self._native_result_lock = threading.Lock()
+        self._native_result_active: set[tuple[UUID, UUID]] = set()
+
+    @contextmanager
+    def _native_result_slot(
+        self, workspace_id: UUID, planning_run_id: UUID
+    ) -> Iterator[bool]:
+        key = (workspace_id, planning_run_id)
+        with self._native_result_lock:
+            acquired = key not in self._native_result_active
+            if acquired:
+                self._native_result_active.add(key)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                with self._native_result_lock:
+                    self._native_result_active.remove(key)
 
     def run_once(self, limit: int = 10) -> PlanningBatchResult:
         if limit <= 0:
@@ -423,29 +480,42 @@ class PlanningRunner:
         outcomes: list[PlanningRunOutcome] = list(claim_batch.preblocked)
         for item in claim_batch.items:
             started_at = self._clock()
-            try:
-                outcome = self._execute(item)
-            except Exception:  # noqa: BLE001
-                logger.error(
-                    "planning run failed outside result boundary",
-                    extra={
-                        "workspace_id": str(item.workspace_id),
-                        "planning_request_id": str(item.request_id),
-                        "planning_run_id": str(item.run_id),
-                        "operation_id": str(item.operation_id),
-                        "lease_id": str(item.lease_id),
-                        "fencing_token": item.fencing_token,
-                    },
-                )
-                outcome = self._persist_failure(
-                    item,
-                    PlannerExplicitFailure(
-                        code="planning_worker_error",
-                        safe_message="planning worker failed before a durable result",
-                        retryable=True,
-                        unknown_outcome=False,
-                    ),
-                )
+            with (
+                self._native_result_slot(item.workspace_id, item.run_id)
+                if item.profile_snapshot.execution_mode == "native_profile"
+                else nullcontext(True)
+            ) as acquired:
+                if not acquired:
+                    outcome = PlanningRunOutcome(
+                        run_id=item.run_id,
+                        status="stale",
+                        attempt=item.attempt,
+                        code="native_original_active",
+                    )
+                else:
+                    try:
+                        outcome = self._execute(item)
+                    except Exception:  # noqa: BLE001
+                        logger.error(
+                            "planning run failed outside result boundary",
+                            extra={
+                                "workspace_id": str(item.workspace_id),
+                                "planning_request_id": str(item.request_id),
+                                "planning_run_id": str(item.run_id),
+                                "operation_id": str(item.operation_id),
+                                "lease_id": str(item.lease_id),
+                                "fencing_token": item.fencing_token,
+                            },
+                        )
+                        outcome = self._persist_failure(
+                            item,
+                            PlannerExplicitFailure(
+                                code="planning_worker_error",
+                                safe_message="planning worker failed before a durable result",
+                                retryable=True,
+                                unknown_outcome=False,
+                            ),
+                        )
             outcomes.append(outcome)
             self._log_outcome(item, outcome, started_at)
         return PlanningBatchResult(
@@ -482,8 +552,9 @@ class PlanningRunner:
                 request_run = request.run(queued_run.id)
                 context_package: ContextPackageManifestV1 | None = None
                 context_revision: WorkContextRevision | None = None
-                if self._context_materializer is not None and not self._legacy_run(
-                    request_run.queued_at
+                if request_run.profile_snapshot.execution_mode == "native_profile" or (
+                    self._context_materializer is not None
+                    and not self._legacy_run(request_run.queued_at)
                 ):
                     gate = self._context_claim_gate(uow, request_run, now=now)
                     if gate == "wait":
@@ -592,8 +663,12 @@ class PlanningRunner:
                         "status": request_run.status.value,
                     },
                 )
-                instance = uow.modules.get_instance(
-                    request_run.planner_module_instance_id, request.workspace_id
+                instance = (
+                    None
+                    if request_run.profile_snapshot.execution_mode == "native_profile"
+                    else uow.modules.get_instance(
+                        request_run.planner_module_instance_id, request.workspace_id
+                    )
                 )
                 definition = (
                     None
@@ -631,69 +706,8 @@ class PlanningRunner:
         *,
         context_package: ContextPackageManifestV1 | None,
     ) -> RevisionPlanningContextV1:
-        base = request.base_descriptor
-        if base is None:
-            raise ValueError("revision request has no exact base descriptor")
-        snapshot = uow.plans.get(base.plan_snapshot_id, request.workspace_id)
-        if snapshot is None:
-            raise ValueError("revision base plan snapshot is unavailable")
-
-        task_ids = tuple(
-            dict.fromkeys(
-                (
-                    snapshot.root_task_id,
-                    *(
-                        item.task_id
-                        for item in snapshot.subtasks
-                        if item.task_id is not None
-                    ),
-                )
-            )
-        )
-        tasks = uow.tasks.get_many(task_ids, request.workspace_id)
-        worker_ids = tuple(
-            dict.fromkeys(
-                item.worker_item_id
-                for item in snapshot.worker_item_plans
-                if item.worker_item_id is not None
-            )
-        )
-        worker_items = tuple(
-            item
-            for item_id in worker_ids
-            for item in (uow.worker_items.get(item_id, request.workspace_id),)
-            if item is not None
-        )
-        executions = uow.executions.list_for_tasks(task_ids, request.workspace_id)
-        sessions = tuple(
-            session
-            for execution in executions
-            for session in (uow.sessions.get_active_for_execution(execution.id),)
-            if session is not None
-        )
-        context_refs: tuple[ConfirmedContextPackageRefV1, ...] = ()
-        if context_package is not None:
-            context_refs = (
-                ConfirmedContextPackageRefV1(
-                    ref=context_package_reference(
-                        context_package.package_id,
-                        context_package.package_hash,
-                    ),
-                    package_hash=context_package.package_hash,
-                    context_version=context_package.context_version,
-                ),
-            )
-        return RevisionPlanningContextBuilder(
-            max_context_bytes=request.profile_snapshot.budget.max_context_bytes,
-        ).build(
-            request=request,
-            snapshot=snapshot,
-            tasks=tasks,
-            worker_items=worker_items,
-            executions=executions,
-            sessions=sessions,
-            context_package_refs=context_refs,
-            adapter_capabilities=_adapter_capability_snapshots(sessions),
+        return load_revision_planning_context(
+            uow, request, context_package=context_package
         )
 
     def _legacy_run(self, queued_at: datetime) -> bool:
@@ -709,7 +723,10 @@ class PlanningRunner:
         *,
         now: datetime,
     ) -> ContextClaimGate:
-        if 1 not in run.capability_snapshot.context_package_versions:
+        if (
+            run.profile_snapshot.execution_mode != "native_profile"
+            and 1 not in run.capability_snapshot.context_package_versions
+        ):
             return "context_adapter_unsupported"
         assembly = uow.context_assemblies.get_for_consumer(
             ContextPurpose.PLANNING_RUN,
@@ -745,6 +762,245 @@ class PlanningRunner:
             return "context_reference_not_found"
         return package, revision
 
+    def reconcile_original_run(
+        self, expected: PlanningAgentLink
+    ) -> PlanningRunOutcome | None:
+        from sidera_control_plane.application.agent_worker_adapter import (
+            require_gateway_owner,
+        )
+
+        require_gateway_owner(self._owner_check)
+        with self._native_result_slot(
+            expected.workspace_id, expected.planning_run_id
+        ) as acquired:
+            if not acquired:
+                return None
+            return self._reconcile_original_run(expected)
+
+    def _reconcile_original_run(
+        self, expected: PlanningAgentLink
+    ) -> PlanningRunOutcome | None:
+        from sidera_control_plane.application.agent_planner_adapter import (
+            AgentPlannerAdapter,
+        )
+        from sidera_control_plane.application.agent_worker_adapter import (
+            require_gateway_owner,
+        )
+
+        if expected.status == "cleanup_pending" or (
+            self._native_shutdown_check is not None and self._native_shutdown_check()
+        ):
+            return None
+        now = self._clock()
+        with self._uow_factory() as uow:
+            authority = uow.planning_authorities.get(
+                expected.authority_id, workspace_id=expected.workspace_id
+            )
+            if authority is None:
+                return None
+            request = uow.planning_requests.get(
+                authority.planning_request_id, expected.workspace_id
+            )
+            lease = uow.planning_leases.get(authority.lease_id, expected.workspace_id)
+            run = None if request is None else request.run(expected.planning_run_id)
+            if (
+                request is None
+                or run is None
+                or lease is None
+                or (
+                    request.current_run_id != run.id
+                    or request.current_brief_revision != run.brief_revision
+                    or request.status is not PlanningRequestStatus.PLANNING
+                    or run.status is not PlanningRunStatus.RUNNING
+                    or authority.revoked
+                    or (
+                        lease.id,
+                        lease.planning_run_id,
+                        lease.owner_id,
+                        lease.fencing_token,
+                    )
+                    != (
+                        authority.lease_id,
+                        run.id,
+                        self._owner_id,
+                        authority.fencing_token,
+                    )
+                    or lease.status is not PlanningRunLeaseStatus.ACTIVE
+                    or lease.expires_at <= now
+                    or (
+                        authority.owner_id,
+                        authority.operation_id,
+                        authority.planning_run_id,
+                        authority.profile_ref,
+                    )
+                    != (
+                        self._owner_id,
+                        run.operation_id,
+                        run.id,
+                        run.profile_snapshot.planner_agent_ref,
+                    )
+                    or request.profile_snapshot != run.profile_snapshot
+                    or (
+                        authority.workspace_id,
+                        authority.planning_request_id,
+                        authority.planning_run_id,
+                        authority.planning_profile_id,
+                        authority.planning_profile_version,
+                        lease.workspace_id,
+                    )
+                    != (
+                        request.workspace_id,
+                        request.id,
+                        run.id,
+                        run.profile_snapshot.profile_id,
+                        run.profile_snapshot.profile_version,
+                        request.workspace_id,
+                    )
+                )
+            ):
+                return None
+            package = uow.context_packages.get_for_consumer(
+                ContextPurpose.PLANNING_RUN, run.id, run.workspace_id
+            )
+            item = _ClaimedRun(
+                run_id=run.id,
+                request_id=request.id,
+                workspace_id=request.workspace_id,
+                operation_id=run.operation_id,
+                lease_id=lease.id,
+                fencing_token=lease.fencing_token,
+                attempt=run.attempt,
+                brief=next(
+                    brief
+                    for brief in request.briefs
+                    if brief.revision == run.brief_revision
+                ),
+                profile_snapshot=run.profile_snapshot,
+                correlation_id=request.correlation_id,
+                definition=None,
+                instance=None,
+                kind=request.kind,
+                planning_context=self._build_revision_context(
+                    uow, request, context_package=package
+                )
+                if request.kind is PlanningRequestKind.REVISION
+                else None,
+                original_link=expected,
+                original_request_version=request.version,
+            )
+        adapter = self._adapter_factory.create(None, None, item.profile_snapshot)
+        if not isinstance(adapter, AgentPlannerAdapter):
+            return None
+        keeper = PlanningLeaseKeeper(
+            uow_factory=self._uow_factory,
+            lease_id=item.lease_id,
+            planning_run_id=item.run_id,
+            workspace_id=item.workspace_id,
+            owner_id=self._owner_id,
+            fencing_token=item.fencing_token,
+            lease_ttl_seconds=self._lease_ttl_seconds,
+            renew_interval_seconds=self._lease_renew_interval_seconds,
+            clock=self._clock,
+        )
+        try:
+            keeper.start()
+            result = adapter.recover_original_result(self._assemble_input(item, now))
+            require_gateway_owner(self._owner_check)
+            if keeper.health_error is not None or keeper.cancel_requested:
+                return None
+            return None if result is None else self._persist_result(item, result)
+        finally:
+            keeper.stop()
+
+    def drain_original_run(self, expected: PlanningAgentLink) -> bool:
+        from sidera_control_plane.application.agent_planner_adapter import (
+            AgentPlannerAdapter,
+        )
+        from sidera_control_plane.application.agent_worker_adapter import (
+            require_gateway_owner,
+        )
+
+        require_gateway_owner(self._owner_check)
+        with self._uow_factory() as uow:
+            authority = uow.planning_authorities.get(
+                expected.authority_id, workspace_id=expected.workspace_id
+            )
+            run = uow.planning_runs.get(expected.planning_run_id, expected.workspace_id)
+            if (
+                authority is None
+                or run is None
+                or (
+                    run.planning_request_id,
+                    run.operation_id,
+                    run.profile_snapshot.execution_mode,
+                    run.profile_snapshot.planner_agent_ref,
+                )
+                != (
+                    authority.planning_request_id,
+                    expected.start_operation_id,
+                    "native_profile",
+                    expected.profile_ref,
+                )
+            ):
+                return False
+            lease = uow.planning_leases.get(authority.lease_id, expected.workspace_id)
+            if (
+                lease is None
+                or (
+                    lease.workspace_id,
+                    lease.id,
+                    lease.planning_run_id,
+                    lease.owner_id,
+                    lease.fencing_token,
+                    run.workspace_id,
+                    run.id,
+                )
+                != (
+                    expected.workspace_id,
+                    authority.lease_id,
+                    authority.planning_run_id,
+                    authority.owner_id,
+                    authority.fencing_token,
+                    expected.workspace_id,
+                    expected.planning_run_id,
+                )
+                or lease.planning_run_id != run.id
+                or lease.status
+                not in (PlanningRunLeaseStatus.ACTIVE, PlanningRunLeaseStatus.RELEASED)
+                or (
+                    lease.status is PlanningRunLeaseStatus.ACTIVE
+                    and lease.expires_at <= self._clock()
+                )
+            ):
+                return False
+        adapter = self._adapter_factory.create(None, None, run.profile_snapshot)
+        if not isinstance(adapter, AgentPlannerAdapter):
+            return False
+        return adapter.drain_original_run(expected)
+
+    @staticmethod
+    def _assemble_input(item: _ClaimedRun, now: datetime, context_materialization=None):
+        return PlannerInputAssembler().assemble(
+            brief=item.brief,
+            profile_snapshot=item.profile_snapshot,
+            capability_catalog=_capability_catalog(item.profile_snapshot, now),
+            policy_constraints=PlannerPolicyConstraints.from_profile_snapshot(
+                item.profile_snapshot
+            ),
+            operation_id=planning_operation_id(item.run_id, item.attempt),
+            planning_request_id=item.request_id,
+            planning_run_id=item.run_id,
+            context_refs=tuple(
+                ContextReference(ref=ref, safe_summary=None)
+                for ref in item.brief.context_refs
+            ),
+            context_materialization=None
+            if item.kind is PlanningRequestKind.REVISION
+            else context_materialization,
+            planning_context=item.planning_context,
+            kind=item.kind,
+        )
+
     def _execute(self, item: _ClaimedRun) -> PlanningRunOutcome:
         try:
             adapter = self._adapter_factory.create(
@@ -756,6 +1012,9 @@ class PlanningRunner:
                 safe_message="planner adapter is unavailable",
                 retryable=not exc.blocked,
                 unknown_outcome=False,
+                usage=PlanningUsage.unknown()
+                if item.profile_snapshot.execution_mode == "native_profile"
+                else PlanningUsage.zero(),
             )
             return self._persist_failure(item, failure, blocked=exc.blocked)
         except Exception:  # noqa: BLE001
@@ -766,12 +1025,19 @@ class PlanningRunner:
                     safe_message="planner profile is unavailable",
                     retryable=False,
                     unknown_outcome=False,
+                    usage=PlanningUsage.unknown()
+                    if item.profile_snapshot.execution_mode == "native_profile"
+                    else PlanningUsage.zero(),
                 ),
             )
 
         now = self._clock()
         context_materialization = None
-        if self._context_materializer is not None and item.context_package is not None:
+        if (
+            item.profile_snapshot.execution_mode != "native_profile"
+            and self._context_materializer is not None
+            and item.context_package is not None
+        ):
             try:
                 context_materialization = self._prepare_context(
                     item,
@@ -817,28 +1083,7 @@ class PlanningRunner:
                         unknown_outcome=False,
                     ),
                 )
-        planner_input = PlannerInputAssembler().assemble(
-            brief=item.brief,
-            profile_snapshot=item.profile_snapshot,
-            capability_catalog=_capability_catalog(item.profile_snapshot, now),
-            policy_constraints=PlannerPolicyConstraints.from_profile_snapshot(
-                item.profile_snapshot
-            ),
-            operation_id=planning_operation_id(item.run_id, item.attempt),
-            planning_request_id=item.request_id,
-            planning_run_id=item.run_id,
-            context_refs=tuple(
-                ContextReference(ref=ref, safe_summary=None)
-                for ref in item.brief.context_refs
-            ),
-            context_materialization=(
-                None
-                if item.kind is PlanningRequestKind.REVISION
-                else context_materialization
-            ),
-            planning_context=item.planning_context,
-            kind=item.kind,
-        )
+        planner_input = self._assemble_input(item, now, context_materialization)
         if (
             self._acceptance_guard is not None
             and self._acceptance_guard.resource_binding_mode == "persisted"
@@ -895,18 +1140,59 @@ class PlanningRunner:
                     started_at=now,
                     deadline_at=deadline,
                     cancel_requested=keeper.cancel_requested,
+                    cancel_check=(
+                        lambda: (
+                            keeper.cancel_requested
+                            or (
+                                self._native_shutdown_check is not None
+                                and self._native_shutdown_check()
+                            )
+                        )
+                    )
+                    if item.profile_snapshot.execution_mode == "native_profile"
+                    else None,
+                    owner_id=self._owner_id
+                    if item.profile_snapshot.execution_mode == "native_profile"
+                    else None,
+                    lease_id=item.lease_id
+                    if item.profile_snapshot.execution_mode == "native_profile"
+                    else None,
+                    fencing_token=item.fencing_token
+                    if item.profile_snapshot.execution_mode == "native_profile"
+                    else None,
                 ),
             )
         except Exception as exc:  # noqa: BLE001
-            result = PlannerExplicitFailure(
-                code="planner_exception",
-                safe_message=f"planner adapter raised {type(exc).__name__}",
-                retryable=False,
-                unknown_outcome=False,
+            result = (
+                adapter.classify_failure(planner_input, "planner_exception")
+                if item.profile_snapshot.execution_mode == "native_profile"
+                else PlannerExplicitFailure(
+                    code="planner_exception",
+                    safe_message=f"planner adapter raised {type(exc).__name__}",
+                    retryable=False,
+                    unknown_outcome=False,
+                )
             )
         finally:
             keeper.stop()
 
+        if item.profile_snapshot.execution_mode == "native_profile":
+            if (
+                keeper.health_error is not None
+                or keeper.cancel_requested
+                or (
+                    self._native_shutdown_check is not None
+                    and self._native_shutdown_check()
+                )
+            ):
+                result = adapter.classify_failure(
+                    planner_input,
+                    "planning_lease_unavailable"
+                    if keeper.health_error is not None
+                    else "native_cancelled",
+                    usage=result.usage,
+                )
+            return self._persist_result(item, result)
         if keeper.cancel_requested:
             try:
                 adapter.cancel(planner_input.operation_id)
@@ -1215,10 +1501,13 @@ class PlanningRunner:
                 )
         if isinstance(result, PlannerFailure):
             blocked = result.unknown_outcome and (
-                item.profile_snapshot.planner_capabilities.idempotency
-                is not IdempotencyCapability.OPERATION_ID
-                or item.profile_snapshot.retry_policy.unknown_outcome_policy
-                is UnknownOutcomePolicy.BLOCK
+                item.profile_snapshot.execution_mode == "native_profile"
+                or (
+                    item.profile_snapshot.planner_capabilities.idempotency
+                    is not IdempotencyCapability.OPERATION_ID
+                    or item.profile_snapshot.retry_policy.unknown_outcome_policy
+                    is UnknownOutcomePolicy.BLOCK
+                )
             )
             return self._persist_failure(
                 item, result, blocked=blocked, usage=result.usage
@@ -1525,6 +1814,62 @@ class PlanningRunner:
         if request is None or lease is None:
             return None
         run = request.run(item.run_id)
+        if item.original_link is not None:
+            original = item.original_link
+            link = uow.planning_authorities.get_link(
+                item.workspace_id, item.run_id, for_update=True
+            )
+            authority = uow.planning_authorities.get(
+                original.authority_id, workspace_id=item.workspace_id
+            )
+            if (
+                link is None
+                or authority is None
+                or authority.revoked
+                or request.version != item.original_request_version
+                or request.current_run_id != item.run_id
+                or request.current_brief_revision != item.brief.revision
+                or request.profile_snapshot != item.profile_snapshot
+                or run.profile_snapshot != item.profile_snapshot
+                or run.operation_id != item.operation_id
+                or request.status is not PlanningRequestStatus.PLANNING
+                or run.brief_revision != item.brief.revision
+                or (
+                    authority.workspace_id,
+                    authority.planning_request_id,
+                    authority.planning_run_id,
+                    authority.planning_profile_id,
+                    authority.planning_profile_version,
+                    lease.workspace_id,
+                    lease.planning_run_id,
+                )
+                != (
+                    item.workspace_id,
+                    item.request_id,
+                    item.run_id,
+                    item.profile_snapshot.profile_id,
+                    item.profile_snapshot.profile_version,
+                    item.workspace_id,
+                    item.run_id,
+                )
+                or (authority.owner_id, authority.lease_id, authority.fencing_token)
+                != (self._owner_id, item.lease_id, item.fencing_token)
+                or (
+                    link.authority_id,
+                    link.start_operation_id,
+                    link.run_id,
+                    link.request_sha256,
+                    link.profile_ref,
+                )
+                != (
+                    original.authority_id,
+                    original.start_operation_id,
+                    original.run_id,
+                    original.request_sha256,
+                    original.profile_ref,
+                )
+            ):
+                return None
         if request.status is PlanningRequestStatus.CANCELLED:
             return None
         if (
@@ -1659,36 +2004,6 @@ def _capability_catalog(
         max_concurrency=profile_snapshot.budget.max_concurrency,
         workspace_providers=(),
     )
-
-
-def _adapter_capability_snapshots(
-    sessions: Sequence[ExecutionSession],
-) -> tuple[AdapterCapabilitySnapshotV1, ...]:
-    snapshots: list[AdapterCapabilitySnapshotV1] = []
-    for session in sessions:
-        profile = session.capability_snapshot
-        if profile is None:
-            continue
-        snapshots.append(
-            AdapterCapabilitySnapshotV1(
-                adapter_ref=f"worker-session:{session.id}",
-                interface_version="sidera.worker.v1",
-                config_version=session.adapter_config_version or 1,
-                capabilities=(
-                    f"input:{profile.input.value}",
-                    f"idempotency:{profile.idempotency.value}",
-                    f"resume:{profile.resume.value}",
-                    f"stop:{profile.stop.value}",
-                    f"sandbox:{profile.sandbox.value}",
-                    f"stability:{profile.stability.value}",
-                    *(
-                        f"context_package:{version}"
-                        for version in profile.context_package_versions
-                    ),
-                ),
-            )
-        )
-    return tuple(snapshots)
 
 
 def _provider_ref(item: _ClaimedRun) -> str:

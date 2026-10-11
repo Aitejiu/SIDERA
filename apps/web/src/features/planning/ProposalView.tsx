@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
 
 import type { PlanningProposal } from "./types";
@@ -19,6 +20,9 @@ export function ProposalView({
   profileVersion,
   onConfirm,
   onRevisit,
+  reviewedBinding,
+  responsibilityContent,
+  disabledReason,
   pending = false,
 }: {
   proposal: PlanningProposal;
@@ -27,6 +31,9 @@ export function ProposalView({
   profileVersion: number;
   onConfirm: (binding: ProposalReviewBinding) => void | Promise<void>;
   onRevisit?: () => void;
+  reviewedBinding?: ProposalReviewBinding;
+  responsibilityContent?: ReactNode;
+  disabledReason?: string;
   pending?: boolean;
 }) {
   const [mode, setMode] = useState<ProposalViewMode>("architecture");
@@ -53,6 +60,7 @@ export function ProposalView({
         proposalSchemaVersion={proposal.proposal_schema_version}
         integrationSpec={model.displayIntegrationSpec}
       />
+      {responsibilityContent === undefined ? null : responsibilityContent}
       <div className="planning-proposal__view-switch" role="tablist" aria-label="方案视图">
         <ViewButton mode="architecture" active={mode === "architecture"} label="执行架构" onClick={() => setMode("architecture")} />
         <ViewButton mode="graph" active={mode === "graph"} label="依赖 DAG" onClick={() => setMode("graph")} />
@@ -76,6 +84,8 @@ export function ProposalView({
       <ProposalActions
         binding={binding}
         onConfirm={onConfirm}
+        {...(reviewedBinding === undefined ? {} : { reviewedBinding })}
+        {...(disabledReason === undefined ? {} : { disabledReason })}
         {...(onRevisit === undefined ? {} : { onRevisit })}
         pending={pending}
       />

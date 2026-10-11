@@ -31,6 +31,7 @@ from sidera_control_plane.domain.handoffs import (
     HandoffTransition,
     HandoffTransitionStatus,
     HandoffWriterState,
+    NativeHandoffProposalPayload,
 )
 from sidera_control_plane.domain.worker import Worker
 from sidera_control_plane.domain.workspace import (
@@ -140,6 +141,7 @@ class HandoffTargetService:
             source_request=source_request,
             source_execution=source_execution,
             source_manifest=source_manifest,
+            uow=uow,
         )
 
         stored_source_request = uow.execution_requests.get(
@@ -161,22 +163,49 @@ class HandoffTargetService:
         if stored_source_execution is None:
             raise HandoffTargetError("source execution was not found")
         if stored_source_execution != source_execution:
-            self._validate_source_execution(stored_source_execution, current_transition)
+            self._validate_source_execution(
+                stored_source_execution,
+                current_transition,
+                uow=uow,
+                source_request=source_request,
+            )
             source_execution = stored_source_execution
 
-        target_worker = uow.workers.get(
-            current_transition.target_worker_id,
-            current_transition.workspace_id,
-            for_update=True,
-        )
-        if target_worker is None:
-            raise HandoffTargetError("handoff target worker was not found")
-        expected_worker_version = proposal.payload.target_worker_version
-        if (
-            current_transition.logical_attempt == 1
-            and target_worker.version < expected_worker_version
-        ):
-            raise HandoffTargetError("handoff target worker version regressed")
+        target_worker = None
+        if current_transition.handoff_schema_version == 2:
+            payload = current_transition.native_payload
+            if payload is None:
+                raise HandoffTargetError("native handoff payload is missing")
+            binding = uow.agent_bindings.get(
+                current_transition.workspace_id,
+                "worker_item",
+                current_transition.worker_item_id,
+                for_update=True,
+            )
+            if binding is None or (
+                binding.profile_ref != payload.target_profile_ref
+                or binding.version != current_transition.target_binding_version
+                or not binding.runnable
+            ):
+                raise HandoffTargetError("native target appointment changed")
+        else:
+            if current_transition.target_worker_id is None:
+                raise HandoffTargetError("handoff target worker was not found")
+            target_worker = uow.workers.get(
+                current_transition.target_worker_id,
+                current_transition.workspace_id,
+                for_update=True,
+            )
+            if target_worker is None:
+                raise HandoffTargetError("handoff target worker was not found")
+            expected_worker_version = proposal.payload.target_worker_version
+            if expected_worker_version is None:
+                raise HandoffTargetError("handoff target worker version is missing")
+            if (
+                current_transition.logical_attempt == 1
+                and target_worker.version < expected_worker_version
+            ):
+                raise HandoffTargetError("handoff target worker version regressed")
 
         request_id, execution_id = _target_ids(
             current_transition.id,
@@ -287,6 +316,7 @@ class HandoffTargetService:
         source_request: ExecutionRequest,
         source_execution: Execution,
         source_manifest: ExecutionWorkspaceManifest,
+        uow: ControlPlaneUnitOfWork | None = None,
     ) -> None:
         if proposal.status is not HandoffProposalStatus.CONFIRMED:
             raise HandoffTargetError("handoff proposal is not confirmed")
@@ -307,14 +337,26 @@ class HandoffTargetService:
             or transition.source_session_id != payload.source_session_id
         ):
             raise HandoffTargetError("handoff transition source identity changed")
-        if transition.target_runtime_snapshot.get("worker_id") != str(
+        if transition.handoff_schema_version == 2:
+            if (
+                not isinstance(payload, NativeHandoffProposalPayload)
+                or transition.native_payload != payload
+                or payload.target_assignee.kind != "profile"
+                or payload.target_profile_ref is None
+                or transition.target_binding_version is None
+                or transition.target_worker_id is not None
+            ):
+                raise HandoffTargetError("native target appointment is invalid")
+        elif transition.target_runtime_snapshot.get("worker_id") != str(
             transition.target_worker_id
         ):
             raise HandoffTargetError(
                 "handoff target runtime worker identity is invalid"
             )
         HandoffTargetService._validate_source_request(source_request, transition)
-        HandoffTargetService._validate_source_execution(source_execution, transition)
+        HandoffTargetService._validate_source_execution(
+            source_execution, transition, uow=uow, source_request=source_request
+        )
         if source_manifest.workspace_id != transition.workspace_id:
             raise HandoffTargetError("source workspace owner does not match transition")
         if source_manifest.id != transition.source_workspace_manifest_id:
@@ -356,6 +398,9 @@ class HandoffTargetService:
     def _validate_source_execution(
         execution: Execution,
         transition: HandoffTransition,
+        *,
+        uow: ControlPlaneUnitOfWork | None = None,
+        source_request: ExecutionRequest | None = None,
     ) -> None:
         if execution.workspace_id != transition.workspace_id:
             raise HandoffTargetError(
@@ -374,7 +419,70 @@ class HandoffTargetService:
         if execution.active_lease_id is not None:
             raise HandoffTargetError("source execution still has an active lease")
         if execution.handoff_transition_id is not None:
-            raise HandoffTargetError("source execution cannot be a handoff target")
+            if (
+                transition.handoff_schema_version != 2
+                or uow is None
+                or source_request is None
+            ):
+                raise HandoffTargetError("source execution cannot be a handoff target")
+            previous = uow.handoff_transitions.get(
+                execution.handoff_transition_id, execution.workspace_id, for_update=True
+            )
+            payload = transition.native_payload
+            session = uow.sessions.get_any(
+                transition.source_session_id, transition.workspace_id, for_update=True
+            )
+            link = uow.execution_authorities.get_link(
+                transition.workspace_id, execution.id
+            )
+            if (
+                previous is None
+                or payload is None
+                or session is None
+                or link is None
+                or (
+                    previous.handoff_schema_version != 2
+                    or previous.native_payload is None
+                    or previous.status is not HandoffTransitionStatus.CONVERGED
+                    or previous.target_execution_id != execution.id
+                    or previous.worker_item_id != transition.worker_item_id
+                    or previous.target_session_id != transition.source_session_id
+                    or previous.target_worker_id != payload.source_worker_id
+                    or previous.target_binding_version != payload.source_binding_version
+                    or previous.native_payload.target_profile_ref
+                    != payload.source_profile_ref
+                    or previous.source_execution_id != execution.source_execution_id
+                    or previous.source_session_id != execution.source_session_id
+                    or session.execution_id != execution.id
+                    or session.worker_id != previous.target_worker_id
+                    or session.adapter_session_id
+                    != f"agent-run:{payload.source_run_id}"
+                    or link.run_id != payload.source_run_id
+                    or link.authority_id != payload.source_authority_id
+                    or link.binding_version != payload.source_binding_version
+                    or link.profile_ref != payload.source_profile_ref
+                    or source_request.handoff_transition_id != previous.id
+                    or source_request.purpose != "handoff"
+                    or source_request.execution_lineage_id != execution.lineage_id
+                    or source_request.first_execution_id != execution.id
+                    or source_request.source_execution_id
+                    != previous.source_execution_id
+                    or source_request.source_session_id != previous.source_session_id
+                    or (source_request.plan_snapshot_id, source_request.plan_generation)
+                    != (
+                        previous.native_payload.observed_plan_snapshot_id,
+                        previous.native_payload.observed_plan_generation,
+                    )
+                    or (source_request.plan_snapshot_id, source_request.plan_generation)
+                    != (
+                        payload.observed_plan_snapshot_id,
+                        payload.observed_plan_generation,
+                    )
+                )
+            ):
+                raise HandoffTargetError(
+                    "native source prior converged lineage changed"
+                )
 
     @staticmethod
     def _validate_target_pair(
@@ -386,7 +494,7 @@ class HandoffTargetService:
         source_request: ExecutionRequest,
         source_execution: Execution,
         source_manifest: ExecutionWorkspaceManifest,
-        target_worker: Worker,
+        target_worker: Worker | None,
     ) -> None:
         expected_execution_id = _target_ids(
             transition.id,
@@ -414,7 +522,8 @@ class HandoffTargetService:
             or execution.lineage_id != expected_execution_id
             or execution.attempt != 1
             or execution.purpose != "handoff"
-            or execution.pinned_worker_id != target_worker.id
+            or execution.pinned_worker_id
+            != (None if target_worker is None else target_worker.id)
             or execution.handoff_transition_id != transition.id
             or execution.source_execution_id != source_execution.id
             or execution.source_session_id != transition.source_session_id
@@ -424,7 +533,9 @@ class HandoffTargetService:
             or execution.status is not ExecutionStatus.QUEUED
         ):
             raise HandoffTargetError("handoff target execution facts changed")
-        if target_worker.id != transition.target_worker_id:
+        if (
+            None if target_worker is None else target_worker.id
+        ) != transition.target_worker_id:
             raise HandoffTargetError("handoff target worker identity changed")
 
 

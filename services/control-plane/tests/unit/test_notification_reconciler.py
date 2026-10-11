@@ -16,6 +16,7 @@ from sidera_control_plane.application.notification_policy import (
 from sidera_control_plane.application.notification_reconciler import (
     NotificationReconciler,
 )
+from sidera_control_plane.domain.errors import ValidationError
 from sidera_control_plane.domain.modules import (
     IdempotencyCapability,
     ModuleDefinition,
@@ -337,6 +338,115 @@ def test_reconciler_deduplicates_subjects_and_creates_one_external_intent() -> N
     assert len(notifications.threads) == 1
     assert len(notifications.intents) == 1
     assert len(projection_changes.changes) == 2
+
+
+def test_reconciler_completion_replay_advances_cursor_without_rewriting_fact() -> None:
+    definition, instance = _module_pair()
+    route = NotificationRoute(
+        id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        recipient_type="workspace_operator",
+        recipient_id="local",
+        channel_type="akashic_private",
+        channel_module_instance_id=instance.id,
+        source_ref="src_" + "a" * 32,
+        status=NotificationRouteStatus.ACTIVE,
+        version=1,
+        registered_at=NOW,
+        updated_at=NOW,
+    )
+    notifications = _Notifications(route)
+    original_add = notifications.add_fact_or_get_existing
+    attempted_facts: list[NotificationFact] = []
+
+    def strict_add(fact: NotificationFact) -> NotificationFact:
+        attempted_facts.append(fact)
+        existing = notifications.facts.get(fact.id)
+        if (
+            existing is not None
+            and existing.canonical_bytes() != fact.canonical_bytes()
+        ):
+            raise ValidationError(
+                "notification fact replay does not match immutable identity"
+            )
+        return original_add(fact)
+
+    notifications.add_fact_or_get_existing = strict_add
+    first_change = _change(1)
+    completion = replace(
+        _observation(first_change),
+        kind="task_completed",
+        topic="task_completed",
+        observed_status="succeeded",
+        transition=NotificationTransition.COMPLETED,
+        requires_operator=False,
+        source_type="sidera_web_chat",
+        origin_route_active=False,
+    )
+    source = _ObservationStore(
+        (first_change,), {first_change.projection_type: completion}
+    )
+    projection_changes = _ProjectionChanges([])
+    uow = _Uow(
+        notifications, source, _Modules(definition, instance), projection_changes
+    )
+    clock_time = NOW
+    service = NotificationReconciler(
+        lambda: uow,
+        policy=NotificationPolicyV1(),
+        clock=lambda: clock_time,
+        owner="completion-replay-test",
+        batch_size=10,
+    )
+
+    first = service.reconcile_workspace(WORKSPACE_ID)
+
+    assert first.acquired is True
+    assert first.diagnostic_code is None
+    assert first.processed_changes == 1
+    assert first.facts_created == 1
+    assert first.threads_changed == 1
+    assert first.intents_created == 0
+    assert first.cursor == 1
+    assert notifications.cursor.last_projection_cursor == 1
+    assert notifications.cursor.lease_owner is None
+    assert len(notifications.facts) == 1
+    assert len(notifications.threads) == 1
+    assert notifications.intents == {}
+    original_fact = next(iter(notifications.facts.values()))
+    original_bytes = original_fact.canonical_bytes()
+    thread_version = next(iter(notifications.threads.values())).version
+    projection_change_count = len(projection_changes.changes)
+
+    second_change = _change(2)
+    source.changes += (second_change,)
+    source.observations[second_change.projection_type] = replace(
+        completion,
+        source_projection_cursor=second_change.cursor,
+        source_resource_version=second_change.resource_version,
+        correlation_id=str(second_change.correlation_id),
+    )
+    clock_time += timedelta(minutes=1)
+
+    replay = service.reconcile_workspace(WORKSPACE_ID)
+
+    assert replay.acquired is True
+    assert replay.diagnostic_code is None
+    assert replay.processed_changes == 1
+    assert replay.facts_created == 0
+    assert replay.threads_changed == 0
+    assert replay.intents_created == 0
+    assert replay.cursor == 2
+    assert notifications.cursor.last_projection_cursor == 2
+    assert notifications.cursor.lease_owner is None
+    assert notifications.cursor.lease_until is None
+    assert len(attempted_facts) == 1
+    assert len(notifications.facts) == 1
+    assert notifications.facts[original_fact.id].canonical_bytes() == original_bytes
+    assert len(notifications.threads) == 1
+    assert next(iter(notifications.threads.values())).version == thread_version
+    assert notifications.intents == {}
+    assert len(projection_changes.changes) == projection_change_count
 
 
 def test_reconciler_does_not_advance_cursor_when_observation_or_write_fails() -> None:

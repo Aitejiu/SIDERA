@@ -1,4 +1,4 @@
-import { BookOpen, Bot, FileText, Folder, GitBranch, Inbox, ListTodo, MessageCircle, Package, Plus, X, type LucideIcon } from "lucide-react";
+import { BookOpen, Bot, FileText, Folder, GitBranch, Inbox, ListTodo, MessageCircle, Package, Plus, ServerCog, X, type LucideIcon } from "lucide-react";
 import {
   createContext,
   useCallback,
@@ -19,8 +19,8 @@ import { WorkspaceViewStateProvider } from "./WorkspaceViewState";
 
 import {
   activateTab,
-  clearNavigation,
   closeTab,
+  commitNavigation,
   loadTabs,
   openTab,
   reduceTabs,
@@ -28,6 +28,7 @@ import {
   saveTabs,
   type WorkspaceTab,
   type WorkspaceTabId,
+  type WorkspaceTabNavigationAction,
   type WorkspaceTabsState,
 } from "./workspaceTabsState";
 
@@ -37,6 +38,7 @@ type WorkspaceTabsContextValue = {
   activate: (id: WorkspaceTabId) => void;
   close: (id: WorkspaceTabId) => void;
   registerDirectRoute: (tab: WorkspaceTab) => void;
+  cancelPendingNavigation: () => void;
 };
 
 const WorkspaceTabsContext = createContext<WorkspaceTabsContextValue | null>(null);
@@ -55,41 +57,72 @@ export function WorkspaceTabsProvider({
     workspaceId,
     loadTabs,
   );
+  const pending = useRef<{
+    action: WorkspaceTabNavigationAction;
+    destinationTab: WorkspaceTab;
+    href: string;
+    sourceKey: string;
+  } | null>(null);
 
   useEffect(() => {
     saveTabs(state);
   }, [state]);
 
   useEffect(() => {
-    if (state.navigationHref === null) {
-      return;
-    }
-    const href = state.navigationHref;
+    const intent = pending.current;
+    if (intent === null) return;
     const currentHref = `${location.pathname}${location.search}`;
-    if (currentHref !== href) {
-      navigate(href, { replace: true });
+    if (currentHref === intent.href) {
+      pending.current = null;
+      dispatch(commitNavigation(intent.action, intent.destinationTab));
+    } else if (location.key !== intent.sourceKey) {
+      pending.current = null;
+      const actual = semanticTabForLocation(workspaceId, location);
+      if (actual !== null) {
+        const existing = state.tabs.find(tab => tab.id === actual.id);
+        dispatch(registerDirectRoute(existing === undefined ? actual : { ...existing, href: actual.href }));
+      }
+    }
+  }, [location, state.tabs, workspaceId]);
+
+  const requestNavigation = useCallback((action: WorkspaceTabNavigationAction, destinationTab: WorkspaceTab, replace = false) => {
+    if (pending.current !== null) return;
+    const href = destinationTab.href;
+    if (`${location.pathname}${location.search}` === href) {
+      dispatch(commitNavigation(action, destinationTab));
       return;
     }
-    dispatch(clearNavigation());
-  }, [location.pathname, location.search, navigate, state.navigationHref]);
+    const intent = { action, destinationTab: { ...destinationTab }, href, sourceKey: location.key };
+    pending.current = intent;
+    void Promise.resolve(navigate(href, { replace })).catch(() => {
+      if (pending.current === intent) pending.current = null;
+    });
+  }, [location.key, location.pathname, location.search, navigate]);
 
   const open = useCallback((tab: WorkspaceTab) => {
-    dispatch(openTab(tab));
-    navigate(tab.href);
-  }, [navigate]);
+    requestNavigation(openTab(tab), tab);
+  }, [requestNavigation]);
   const activate = useCallback((id: WorkspaceTabId) => {
     const tab = state.tabs.find((item) => item.id === id);
-    dispatch(activateTab(id));
     if (tab !== undefined) {
-      navigate(tab.href);
+      requestNavigation(activateTab(id), tab);
     }
-  }, [navigate, state.tabs]);
+  }, [requestNavigation, state.tabs]);
   const close = useCallback((id: WorkspaceTabId) => {
-    dispatch(closeTab(id));
-  }, []);
+    const action = closeTab(id);
+    if (state.activeTabId !== id) {
+      dispatch(action);
+      return;
+    }
+    const next = reduceTabs(state, action);
+    const destinationTab = next.tabs.find(tab => tab.id === next.activeTabId);
+    if (next.navigationHref !== null && destinationTab !== undefined) requestNavigation(action, destinationTab, true);
+  }, [requestNavigation, state]);
   const register = useCallback((tab: WorkspaceTab) => {
+    if (pending.current !== null) return;
     dispatch(registerDirectRoute(tab));
   }, []);
+  const cancelPendingNavigation = useCallback(() => { pending.current = null; }, []);
 
   const value = useMemo<WorkspaceTabsContextValue>(() => ({
     state,
@@ -97,7 +130,8 @@ export function WorkspaceTabsProvider({
     activate,
     close,
     registerDirectRoute: register,
-  }), [activate, close, open, register, state]);
+    cancelPendingNavigation,
+  }), [activate, cancelPendingNavigation, close, open, register, state]);
 
   return (
     <WorkspaceTabsContext.Provider value={value}>
@@ -159,6 +193,7 @@ export function WorkspaceTabs({ workspaceId }: { workspaceId: string }) {
   const existingRoute = state.tabs.find(tab => tab.id === currentRoute?.id);
   const existingTitle = existingRoute?.title;
   const existingDescription = existingRoute?.description;
+  const existingRecovery = existingRoute?.configurationRecovery;
 
   useEffect(() => {
     if (currentRoute === null || state.navigationHref !== null) {
@@ -172,9 +207,16 @@ export function WorkspaceTabs({ workspaceId }: { workspaceId: string }) {
           ? `${tabDetail(currentRoute)} · ${resolvedPath}`
           : existingDescription ?? `${tabDetail(currentRoute)} · ${resolvedTitle ?? existingTitle ?? currentRoute.title}`,
       }
-      : currentRoute;
+      : currentRoute.kind === "agent" || currentRoute.kind === "runtime"
+        ? {
+          ...currentRoute,
+          title: existingTitle ?? currentRoute.title,
+          ...(existingDescription === undefined ? {} : { description: existingDescription }),
+          ...(currentRoute.kind === "agent" && existingRecovery !== undefined ? { configurationRecovery: existingRecovery } : {}),
+        }
+        : currentRoute;
     registerDirectRoute(route);
-  }, [currentRoute, resolvedTitle, resolvedPath, existingTitle, existingDescription, registerDirectRoute, state.navigationHref]);
+  }, [currentRoute, resolvedTitle, resolvedPath, existingTitle, existingDescription, existingRecovery, registerDirectRoute, state.navigationHref]);
 
   useEffect(() => {
     const strip = stripRef.current;
@@ -253,6 +295,21 @@ export function semanticTabForLocation(
   workspaceId: string,
   location: { pathname: string; search: string },
 ): WorkspaceTab | null {
+  const agentsPath = `/workspaces/${workspaceId}/agents`;
+  const runtimesPath = `/workspaces/${workspaceId}/runtimes`;
+  const href = `${location.pathname}${location.search}`;
+  if (location.pathname === agentsPath) return { id: "agents", kind: "agents", title: "智能体", href, closeable: true };
+  if (location.pathname === runtimesPath) return { id: "runtimes", kind: "runtimes", title: "运行环境", href, closeable: true };
+  const agentMatch = location.pathname.match(new RegExp(`^${escapeRegExp(agentsPath)}/([^/]+)$`));
+  if (agentMatch?.[1]) {
+    const id = decodeURIComponent(agentMatch[1]);
+    return { id: `agent:${id}`, kind: "agent", title: id === "new" ? "新建 Profile" : `Profile ${id.slice(0, 8)}`, href, closeable: true };
+  }
+  const runtimeMatch = location.pathname.match(new RegExp(`^${escapeRegExp(runtimesPath)}/([^/]+)$`));
+  if (runtimeMatch?.[1]) {
+    const id = decodeURIComponent(runtimeMatch[1]);
+    return { id: `runtime:${id}`, kind: "runtime", title: `Runtime ${id.slice(0, 8)}`, href, closeable: true };
+  }
   const taskIndexPath = `/workspaces/${workspaceId}/tasks`;
   if (location.pathname === taskIndexPath) {
     return {
@@ -466,6 +523,10 @@ function tabDetail(tab: WorkspaceTab): string {
       return "候选";
     case "context-package":
       return "上下文包";
+    case "agents": return "Profile 目录";
+    case "agent": return "Profile";
+    case "runtimes": return "Runtime 目录";
+    case "runtime": return "Runtime";
   }
 }
 
@@ -475,6 +536,10 @@ function tabIcon(tab: WorkspaceTab): LucideIcon {
     case "root-task": return Folder;
     case "subtask": return GitBranch;
     case "worker-item": return Bot;
+    case "agents":
+    case "agent": return Bot;
+    case "runtimes":
+    case "runtime": return ServerCog;
     case "inbox": return Inbox;
     case "chat": return MessageCircle;
     case "knowledge-page":

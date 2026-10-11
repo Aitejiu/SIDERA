@@ -271,6 +271,97 @@ class FakePlanRepository:
         return self.snapshot if snapshot_id == self.snapshot.id else None
 
 
+def _scope_scanner(monkeypatch, *, scan_all_workspaces=False, limit=1):
+    scopes = [(UUID(int=10), UUID(int=20)), (UUID(int=30), UUID(int=40))]
+    queries, attempts, cursor_reads = [], [], []
+    h = _harness()
+
+    def list_scopes(*, after=None, limit=100):
+        queries.append((after, limit))
+        return tuple(pair for pair in sorted(scopes) if after is None or pair > after)[
+            :limit
+        ]
+
+    h.uow.plans = SimpleNamespace(
+        list_root_scopes_with_snapshots=list_scopes,
+        list_roots_with_snapshots=lambda workspace: tuple(
+            root for ws, root in scopes if ws == workspace
+        ),
+    )
+    reconciler = CollaborationReconciler(
+        uow_factory=lambda: h.uow,
+        fact_store_factory=lambda _: h.facts,
+        runtime_resolver_factory=lambda _: h.resolver,
+        scan_all_workspaces=scan_all_workspaces,
+        recovery_limit=limit,
+    )
+
+    def cursor(workspace, projection_type, root):
+        assert projection_type == "collaboration_runtime"
+        cursor_reads.append((workspace, root))
+        return root.int
+
+    def prepare(uow, *, workspace_id, root_task_id, fact_cursor, **kwargs):
+        assert uow is h.uow
+        assert fact_cursor == root_task_id.int
+        attempts.append((workspace_id, root_task_id))
+        return (workspace_id, root_task_id)
+
+    monkeypatch.setattr(h.uow.projection_changes, "latest_target_cursor", cursor)
+    monkeypatch.setattr(reconciler, "_prepare_root", prepare)
+    return SimpleNamespace(
+        reconciler=reconciler,
+        scopes=scopes,
+        queries=queries,
+        attempts=attempts,
+        cursors=cursor_reads,
+    )
+
+
+def test_owner_wide_discovery_is_opt_in_and_explicit_scope_stays_exact(monkeypatch):
+    h = _scope_scanner(monkeypatch)
+    assert h.reconciler.prepare_next(owner_id="owner", now=NOW) is None
+    assert not h.queries and not h.attempts
+    ws, root = h.scopes[1]
+    assert h.reconciler.prepare_next(
+        owner_id="owner", now=NOW, workspace_id=ws, root_task_id=root
+    ) == (ws, root)
+    assert h.attempts == h.cursors == [(ws, root)] and not h.queries
+
+
+def test_owner_wide_discovery_uses_each_saved_scope_and_wraps_fairly(monkeypatch):
+    h = _scope_scanner(monkeypatch, scan_all_workspaces=True)
+    first, second = h.scopes
+    assert h.reconciler.prepare_next(owner_id="owner", now=NOW) == first
+    assert (
+        h.reconciler.prepare_next(owner_id="owner", now=NOW, workspace_id=first[0])
+        == first
+    )
+    assert h.reconciler.prepare_next(owner_id="owner", now=NOW) == second
+    earlier = (UUID(int=1), UUID(int=2))
+    h.scopes.insert(0, earlier)
+    assert h.reconciler.prepare_next(owner_id="owner", now=NOW) == earlier
+    assert h.attempts == h.cursors == [first, first, second, earlier]
+    assert h.queries == [(None, 1), (first, 1), (second, 1), (None, 1)]
+
+
+def test_owner_wide_discovery_advances_skipped_roots_and_bounds_empty_wrap(monkeypatch):
+    h = _scope_scanner(monkeypatch, scan_all_workspaces=True, limit=201)
+    prepare = h.reconciler._prepare_root
+    monkeypatch.setattr(
+        h.reconciler,
+        "_prepare_root",
+        lambda *args, **kwargs: (prepare(*args, **kwargs), None)[1],
+    )
+    assert h.reconciler.prepare_next(owner_id="owner", now=NOW) is None
+    assert h.attempts == h.scopes
+    assert h.reconciler.prepare_next(owner_id="owner", now=NOW) is None
+    assert h.queries == [(None, 200), (h.scopes[-1], 200), (None, 200)]
+    h.scopes.clear()
+    assert h.reconciler.prepare_next(owner_id="owner", now=NOW) is None
+    assert len(h.queries) == 5
+
+
 class FakePlanTransitionRepository:
     def __init__(self, transition: PlanTransition | None = None) -> None:
         self.transition = transition

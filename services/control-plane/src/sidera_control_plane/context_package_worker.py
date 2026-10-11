@@ -5,17 +5,20 @@ import json
 import logging
 import signal
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from threading import Event
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from sidera_agents.contracts import ProfileRef
+
 from sidera_control_plane.adapters.knowledge_http import (
     KnowledgeAdapterError,
     KnowledgeHttpAdapter,
 )
+from sidera_control_plane.application.agent_worker_adapter import require_gateway_owner
 from sidera_control_plane.application.code_result_delivery import resolve_code_inputs
 from sidera_control_plane.application.command_service import hash_request
 from sidera_control_plane.application.context_assembly import (
@@ -31,6 +34,10 @@ from sidera_control_plane.application.ports import (
     ControlPlaneUnitOfWork,
     KnowledgeCatalogPort,
 )
+from sidera_control_plane.application.revision_planning_context import (
+    encode_native_revision_facts,
+    load_revision_planning_context,
+)
 from sidera_control_plane.application.scheduling_blocks import SchedulingBlockService
 from sidera_control_plane.config import Settings
 from sidera_control_plane.domain.code_results import CodeInputManifestV1
@@ -43,7 +50,7 @@ from sidera_control_plane.domain.context_packages import (
 from sidera_control_plane.domain.events import EventData
 from sidera_control_plane.domain.handoff_evidence import HandoffContextBundle
 from sidera_control_plane.domain.input_selections import CollaborationInputSelectionV1
-from sidera_control_plane.domain.planning import PlanningRunStatus
+from sidera_control_plane.domain.planning import PlanningRequestKind, PlanningRunStatus
 from sidera_control_plane.domain.result_operations import ResultError
 from sidera_control_plane.domain.scheduling import (
     SchedulingBlockReason,
@@ -311,15 +318,20 @@ class ContextPackageWorker:
                 "context_consumer_stale", "PlanningRequest is no longer available"
             )
         brief = next(
-            (item for item in planning_request.briefs if item.revision == run.brief_revision),
+            (
+                item
+                for item in planning_request.briefs
+                if item.revision == run.brief_revision
+            ),
             None,
         )
         if brief is None:
             raise ContextAssemblyError(
-                "context_consumer_stale", "Planning brief revision is no longer available"
+                "context_consumer_stale",
+                "Planning brief revision is no longer available",
             )
         profile = run.profile_snapshot
-        return {
+        facts = {
             "planning_request": {
                 "id": str(planning_request.id),
                 "status": planning_request.status.value,
@@ -359,6 +371,29 @@ class ContextPackageWorker:
                 "interface_version": profile.planner_interface_version,
             },
         }
+        if profile.execution_mode == "native_profile":
+            if (
+                not isinstance(profile.planner_agent_ref, ProfileRef)
+                or profile.planner_agent_ref.workspace_id != request.workspace_id
+            ):
+                raise ContextAssemblyError(
+                    "context_consumer_stale", "Native planning Profile pin is invalid"
+                )
+            pin = profile.planner_agent_ref.model_dump(mode="json")
+            del facts["planning_profile"]["planner_module_instance_id"]
+            del facts["planning_profile"]["planner_module_config_version"]
+            del facts["planner_module"]
+            facts["planning_profile"].update(
+                execution_mode="native_profile", planner_agent_ref=pin
+            )
+            facts["planner_agent"] = pin
+            if planning_request.kind is PlanningRequestKind.REVISION:
+                facts["revision_base"] = encode_native_revision_facts(
+                    load_revision_planning_context(
+                        uow, planning_request, context_package=None
+                    )
+                )
+        return facts
 
     def _execution_facts(
         self,
@@ -381,7 +416,9 @@ class ContextPackageWorker:
             )
         worker_item = uow.worker_items.get(request.worker_item_id, request.workspace_id)
         planning_request_id = (
-            execution_request.planning_request_id if execution_request is not None else None
+            execution_request.planning_request_id
+            if execution_request is not None
+            else None
         )
         planning_request = (
             None
@@ -390,7 +427,8 @@ class ContextPackageWorker:
         )
         if execution_request is None or execution is None or worker_item is None:
             raise ContextAssemblyError(
-                "context_consumer_stale", "Execution context consumer is no longer available"
+                "context_consumer_stale",
+                "Execution context consumer is no longer available",
             )
         if worker_item.context_version != request.context_version:
             raise ContextAssemblyError(
@@ -630,7 +668,9 @@ class ContextPackageWorker:
             isinstance(error, KnowledgeAdapterError) and error.temporary
         )
         if temporary and request.attempt < self._max_attempts:
-            delay = _RETRY_BACKOFF_SECONDS[min(request.attempt - 1, len(_RETRY_BACKOFF_SECONDS) - 1)]
+            delay = _RETRY_BACKOFF_SECONDS[
+                min(request.attempt - 1, len(_RETRY_BACKOFF_SECONDS) - 1)
+            ]
             with self._uow_factory() as uow:
                 uow.context_assemblies.save_retry(
                     request,
@@ -745,7 +785,10 @@ class ContextPackageWorker:
         if execution is None:
             return
         envelope = CommandEnvelope(
-            id=uuid5(_PACKAGE_NAMESPACE, f"context-block-command:{request.request_id}:{request.version}"),
+            id=uuid5(
+                _PACKAGE_NAMESPACE,
+                f"context-block-command:{request.request_id}:{request.version}",
+            ),
             workspace_id=execution.workspace_id,
             command_type="ContextAssemblyBlocked",
             target_type="execution",
@@ -831,8 +874,7 @@ def _validate_inheritance_budget(
         if (
             source_execution_id != authorization.source_execution_id
             or source_execution_id != execution.source_execution_id
-            or str(raw.get("source_session_id"))
-            != str(authorization.source_session_id)
+            or str(raw.get("source_session_id")) != str(authorization.source_session_id)
             or str(raw.get("source_session_id")) != str(execution.source_session_id)
         ):
             raise ExecutionContextAuthorizationError(
@@ -874,7 +916,7 @@ def _safe_handoff_facts(bundle: HandoffContextBundle) -> Mapping[str, object]:
     def ids(values: Sequence[UUID]) -> tuple[str, ...]:
         return tuple(str(value) for value in values)
 
-    return {
+    facts: dict[str, object] = {
         "bundle_id": str(bundle.id),
         "bundle_hash": bundle.bundle_hash,
         "transition_id": str(bundle.handoff_transition_id),
@@ -906,6 +948,19 @@ def _safe_handoff_facts(bundle: HandoffContextBundle) -> Mapping[str, object]:
         "reason": bundle.handoff_reason,
         "instruction": bundle.handoff_instruction,
     }
+    if bundle.schema_version == 2:
+        if bundle.target_profile_ref is None or bundle.target_native_metadata is None:
+            raise ContextAssemblyError(
+                "context_consumer_stale", "native handoff bundle appointment is missing"
+            )
+        facts["target"] = {
+            "execution_id": str(bundle.target_execution_id),
+            "profile_ref": bundle.target_profile_ref.model_dump(mode="json"),
+            "binding_version": bundle.target_binding_version,
+            "native_metadata": dict(bundle.target_native_metadata),
+            "context_version": bundle.target_context_version,
+        }
+    return facts
 
 
 def _system_command(
@@ -971,6 +1026,7 @@ def build_context_package_worker(
     settings: Settings,
     *,
     owner_id: str | None = None,
+    owner_check: Callable[[], bool] | None = None,
 ) -> ContextPackageWorkerRuntime:
     database = Database(settings.database_url)
     catalog = KnowledgeHttpAdapter(
@@ -979,12 +1035,20 @@ def build_context_package_worker(
         metadata_timeout_seconds=settings.knowledge_metadata_timeout_seconds,
         materialization_timeout_seconds=settings.knowledge_materialization_timeout_seconds,
     )
+
+    def uow_factory() -> SqlAlchemyUnitOfWork:
+        require_gateway_owner(owner_check)
+        return SqlAlchemyUnitOfWork(
+            database,
+            projection_change_retention_seconds=settings.projection_change_retention_seconds,
+            before_commit=None
+            if owner_check is None
+            else lambda: require_gateway_owner(owner_check),
+        )
+
     try:
         worker = ContextPackageWorker(
-            uow_factory=lambda: SqlAlchemyUnitOfWork(
-                database,
-                projection_change_retention_seconds=settings.projection_change_retention_seconds,
-            ),
+            uow_factory=uow_factory,
             catalog=catalog,
             owner_id=owner_id or f"context-worker:{settings.local_actor_id}",
             lease_seconds=settings.context_assembly_lease_seconds,
@@ -994,11 +1058,15 @@ def build_context_package_worker(
         catalog.close()
         database.dispose()
         raise
-    return ContextPackageWorkerRuntime(worker=worker, database=database, catalog=catalog)
+    return ContextPackageWorkerRuntime(
+        worker=worker, database=database, catalog=catalog
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run the SIDERA Context Package Worker")
+    parser = argparse.ArgumentParser(
+        description="Run the SIDERA Context Package Worker"
+    )
     parser.add_argument("--owner-id", default="context-worker-local")
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--batch-size", type=int, default=10)

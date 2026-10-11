@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowDown, ArrowRight, ArrowUp, ChevronDown, CircleAlert, Clock3, FileCheck2, GitBranch, Info, List, MessageSquareText, PackageCheck } from "lucide-react";
 import { useRef } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
@@ -9,7 +9,10 @@ import { StatusMark, type StatusMarkKind } from "@/shared/ui/StatusMark";
 
 import { collaborationStrategyLabel } from "../collaboration/types";
 import { TaskKnowledgeSummary } from "../context/TaskKnowledgeSummary";
+import { assignmentQueryKey } from "../assignments/api";
+import { AssigneeAppointment } from "../assignments/AssigneeAppointment";
 import { PlanConvergenceStrip } from "../tasks/PlanConvergenceStrip";
+import { taskQueryKey } from "../tasks/api";
 import { getSubtaskWorkspace, subtaskWorkspaceQueryKey } from "./api";
 import { WorkerBoard } from "./WorkerBoard";
 import { WorkerGraph } from "./WorkerGraph";
@@ -108,6 +111,7 @@ function SubtaskContent({
   workspaceId: string;
   rootTaskId: string;
 }) {
+  const queryClient = useQueryClient();
   const detailsRef = useRef<HTMLDetailsElement>(null);
   const [detailsOpen, setDetailsOpen] = useSubtaskDetailsState(rootTaskId, workspace.subtask.key);
   const status = subtaskStatus(workspace.subtask.state);
@@ -135,6 +139,18 @@ function SubtaskContent({
     if (!details) return;
     details.open = !details.open;
     if (details.open) details.querySelector("summary")?.focus();
+  };
+  const refreshAppointmentFacts = async () => {
+    const keys: Array<readonly unknown[]> = [
+      subtaskWorkspaceQueryKey(workspaceId, rootTaskId, workspace.subtask.key),
+    ];
+    if (workspace.subtask.task_id !== null && workspace.subtask.task_id !== undefined) {
+      keys.push(
+        assignmentQueryKey(workspaceId, "subtask", workspace.subtask.task_id),
+        taskQueryKey(workspaceId, workspace.subtask.task_id),
+      );
+    }
+    await Promise.all(keys.map((queryKey) => queryClient.invalidateQueries({ queryKey })));
   };
   return (
     <>
@@ -249,6 +265,12 @@ function SubtaskContent({
         <div className="subtask-details__content">
           <div className="subtask-details__main">
             <span className="mono-label">GEN {workspace.plan_generation} · CURSOR {workspace.last_change_cursor}</span>
+            <AssigneeAppointment
+              workspaceId={workspaceId}
+              targetKind="subtask"
+              targetId={workspace.subtask.task_id ?? null}
+              onRefresh={refreshAppointmentFacts}
+            />
             <SubtaskRelations upstream={workspace.upstream_subtasks} downstream={workspace.downstream_subtasks} onOpen={onOpenSubtask} />
             {!collaborationNeedsAttention ? collaboration : null}
             {!convergenceNeedsAttention ? convergence : null}

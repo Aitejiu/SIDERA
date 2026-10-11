@@ -78,7 +78,7 @@ export async function executeResultInputAction(
   if (action.expected_version === null) {
     throw new Error("当前结果输入操作缺少目标版本，请刷新后重试");
   }
-  const payload = payloadForAction(action, reason);
+  const payload = resultInputActionPayload(action, reason);
   const identity = createCommandIdentity();
   const command: CommandRequest = {
     command_id: identity.commandId,
@@ -99,7 +99,7 @@ export async function executeResultInputAction(
   });
 }
 
-function payloadForAction(
+export function resultInputActionPayload(
   action: ResultInputAction,
   reason: string | null,
 ): CommandRequest["payload"] {

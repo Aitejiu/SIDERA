@@ -1,4 +1,7 @@
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
+from threading import RLock
 from uuid import UUID
 
 from pydantic import SecretStr
@@ -26,6 +29,7 @@ class MemoryCatalog:
         self.credentials: dict[CredentialRef, CredentialMetadata] = {}
         self.credential_writes: dict[tuple[UUID, UUID], CredentialWrite] = {}
         self.events: list[tuple[str, CredentialRef, UUID | None]] = []
+        self._credential_lock = RLock()
 
     def get_connection(self, ref: ConnectionRef) -> ModelConnectionRevision:
         try:
@@ -34,10 +38,16 @@ class MemoryCatalog:
             raise ConfigurationError("configuration_not_found") from None
 
     def get_credential(self, ref: CredentialRef) -> CredentialMetadata:
-        try:
-            return self.credentials[ref]
-        except KeyError:
-            raise ConfigurationError("credential_not_found") from None
+        with self._credential_lock:
+            try:
+                return self.credentials[ref]
+            except KeyError:
+                raise ConfigurationError("credential_not_found") from None
+
+    @contextmanager
+    def credential_read_lease(self, ref: CredentialRef) -> Iterator[CredentialMetadata]:
+        with self._credential_lock:
+            yield self.get_credential(ref)
 
     def list_connections(self, workspace_id: UUID) -> tuple[ModelConnectionRevision, ...]:
         heads: dict[UUID, ModelConnectionRevision] = {}
@@ -174,16 +184,17 @@ class MemoryCatalog:
         *,
         expected_version: int,
     ) -> CredentialMetadata:
-        try:
-            current = self.credentials[ref]
-        except KeyError:
-            raise ConfigurationError("credential_not_found") from None
-        if current.version != expected_version or current.status != "active":
-            raise ConfigurationError("configuration_version_conflict")
-        updated = replace(current, status="revoked", version=current.version + 1)
-        self.credentials[ref] = updated
-        self.events.append(("revoked", ref, None))
-        return updated
+        with self._credential_lock:
+            try:
+                current = self.credentials[ref]
+            except KeyError:
+                raise ConfigurationError("credential_not_found") from None
+            if current.version != expected_version or current.status != "active":
+                raise ConfigurationError("configuration_version_conflict")
+            updated = replace(current, status="revoked", version=current.version + 1)
+            self.credentials[ref] = updated
+            self.events.append(("revoked", ref, None))
+            return updated
 
 
 class FakeSecretStore:
