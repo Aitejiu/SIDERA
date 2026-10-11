@@ -3,6 +3,11 @@
 `sidera-product==0.1.0` composes the public agents and control-plane owners in
 one process. It does not use Akashic, Docker or the legacy main-agent gateway.
 
+For end-user installation, Web startup and first project setup, use the
+[native product guide](../../docs/deployment/initial-demo.md#安装新版). Six local
+packages install as wheels; Web still requires a source checkout. Legacy ACP
+entrypoints remain separate, with their migration deferred.
+
 ## Explicit Configuration
 
 Product settings use `SIDERA_PRODUCT_`. Required selections are
@@ -12,6 +17,9 @@ Product settings use `SIDERA_PRODUCT_`. Required selections are
 Each target must be an explicit `postgresql+psycopg` URL with a database, user
 and host or Unix socket. There is no inference from legacy `SIDERA_*` targets.
 The targets need not share a server. Each schema remains owned by its component.
+Settings come from the invoking process, not automatically from a project `.env`.
+Keep identities, databases and roots stable across restarts; do not seed/reset
+an existing workspace to recover it.
 
 Defaults: loopback `127.0.0.1:18080`, one worker, no reload, Web origin
 `http://127.0.0.1:5173`, close grace 30 seconds, migration timeout 60 seconds.
@@ -24,6 +32,10 @@ with `MANAGED_CREDENTIALS_ENABLED=true`, scoped to the stable deployment namespa
 No constructor, health or preflight resolves a secret or invokes a native CLI.
 
 ## Commands
+
+After wheel installation, invoke `sidera` directly. For source development,
+run the following from `apps/server` with the same explicit environment in each
+terminal:
 
 ```sh
 uv sync
@@ -38,11 +50,18 @@ and owned required tables without migration or example data. Credential migratio
 uses the installed model-connections Alembic resources in a bounded child with
 only the selected target; raw driver output is not relayed.
 
+`sidera open` opens the configured Web origin's workspace tasks route, not the
+backend. Start Vite separately with `SIDERA_WEB_BACKEND=native` and the explicit
+`SIDERA_WEB_PRODUCT_URL`; browser origin and product settings must agree.
+
 After migration, `sidera session bootstrap --output <absolute-private-file>`
 creates a one-use local bootstrap without starting native owners. The output
 must be outside repositories, in an owned 0700 directory; the exclusive file is
 0600. Omitting `--output` creates a private temporary directory. Only its safe
 path and expiry are printed. The default bootstrap lifetime is 300 seconds.
+In the Web agents page, use 本地会话 and paste the file's raw `token` into
+CLI 令牌, not the path or JSON object. Browser exchange consumes the token;
+workspace CLI setup needs a separately issued unused bootstrap file.
 
 With the product server running, `sidera workspace configure --workspace <UUID>
 --repository <absolute-path> --planner-profile '<ProfileRef JSON>'
@@ -52,6 +71,8 @@ It does not start another owner. `ProfileRef` has exactly `workspace_id`,
 `profile_id` and positive `revision`; checks use CP's existing `CheckSpecV1`
 codec. Omitting profile/checks can retain saved setup, while a new setup needs
 explicit pins/policy. Missing or consumed bootstrap authority is denied.
+First setup uses `--expected-version 0`; updates use the saved workspace version.
+See the complete [CheckSpecV1 setup example](../../docs/deployment/initial-demo.md#配置项目与验证).
 
 ## Local And Task-Tool Authority
 
@@ -88,7 +109,15 @@ advance native sequence or accept a result. Stored tokens are digests only.
 Original retained bearers can still be verified against durable metadata while
 their current Run authority is valid. Raw bearer reprojection after cache loss
 returns `tool_connection_unavailable`; it never rotates a live bearer or starts
-another Run. Bootstrap UI and directory/default route work remain N20/N21.
+another Run. Web exposes local-session connection, Runtime registration, Profile
+creation/settings/capabilities/work history and default appointments. The same
+Profile may serve Main, Planner and Worker; saved defaults do not rebind old Runs.
+
+Managed credential UI is opt-in: install `sidera-model-connections[macos]` on a
+supported macOS host and enable `MANAGED_CREDENTIALS_ENABLED`. Otherwise explicit
+selected server-side secret sources and registered credential metadata are
+required. Profile `secret_refs` bind authorized references; native Runs never
+inherit global CLI auth. Knowledge remains independently configured.
 
 ## Persistent Native Chat
 
@@ -145,13 +174,13 @@ uv run ruff format --check .
 uv run pyright --pythonpath .venv/bin/python
 ```
 
-The accepted N18 nineteen-source baseline reports 55 public-foundation boundary
-diagnostics: 54 missing type-marker sites and the agents factory's unannotated
-clock parameter, with no product-owned diagnostics. The accepted N17
-nine-file baseline remains 31 (30 missing markers plus that clock parameter);
-new imports expose additional marker sites. This is not a globally clean type
-result. Installed typing metadata remains an N22/N24 follow-up; this delivery
-does not suppress or modify foundation debt.
+Public packages ship typing metadata for installed consumers. The isolated
+native-product installation checker verifies the six-wheel composition,
+resource provenance and inert boundaries without calling a Provider. Installed
+consumer typing checks are separate from whole-foundation strict checking;
+their success does not establish globally clean Control Plane typing.
+Developer checks above are not a claim that every historical real adapter or
+acceptance scenario passes.
 
 Integration requires all 19 explicit `SIDERA_PRODUCT_TEST_*` selectors: shared
 allocation ID/socket/port and each of PRODUCT/AGENTS/CP/CREDENTIALS' database URL,

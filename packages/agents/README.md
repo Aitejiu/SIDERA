@@ -5,6 +5,12 @@ capabilities, execution contracts, and run observations. Its public API uses
 serializable contracts and generic authorization, context, secret, and tool
 connection ports; it does not depend on SIDERA task or product internals.
 
+For the assembled desktop product, start with the
+[native installation guide](../../docs/deployment/initial-demo.md#安装新版).
+This package can also be embedded independently. There is no Worker-only
+profile type: the host appoints a Profile and supplies a scoped Run grant.
+The same Profile may fill multiple roles without sharing Run authority.
+
 ## Install and Compose
 
 Python 3.12 or newer is required. From the repository root, install into your
@@ -90,7 +96,10 @@ OpenCode without probing, spawning or reading authentication.
 
 Adapters are trusted Python implementations, not sandboxed third-party plugins.
 There is no dynamic plugin download/installer or automatic global registration.
-Only OpenCode is built in; Codex, Hermes and DSH adapters are not implemented.
+Only OpenCode is built in; Codex, Hermes, OpenClaw and DSH adapters are not
+implemented. Legacy ACP consumers elsewhere in the repository are separate
+implementations, not aliases of this public Run engine. Their migration is
+deferred; a host must not use them as an implicit native fallback.
 
 The provider-free [standalone example](examples/standalone.py) uses only public
 imports. Its test-only `fixture-harness` creates/revises a Profile and Resource,
@@ -132,6 +141,11 @@ directory permissions stay denied. Native permissions are not an OS sandbox;
 in particular bash is native execution authority, not filesystem confinement.
 Managed or ancestor project configuration causes explicit preflight rejection.
 Thinking and undeclared native settings remain unsupported.
+
+Instructions and supported Skills/MCP/integration resources remain explicit
+revision-pinned references. Runtime declarations are not proof of a Provider
+response. Product task tools come from the host's authorized Run connection,
+not from giving every Profile an owner token.
 
 The default trusted registry uses independent host deadlines: setup RPC 30s,
 prompt 900s, cancel confirmation 1s, close RPC 1s and process stop grace 1s.

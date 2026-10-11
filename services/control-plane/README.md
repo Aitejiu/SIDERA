@@ -3,12 +3,13 @@
 The SIDERA control plane is a deterministic FastAPI service for Task commands,
 normalized operational queries, immutable Events, transactional Outbox
 delivery, modular Workers, Execution leases, scheduling, and Gateway recovery.
-PostgreSQL is its only authoritative store. The legacy R3 Gateway launches one
-OpenCode ACP child process per Execution through a replaceable Adapter; it does
-not own the Main Agent, collaboration topology, user memory, or knowledge
-content.
+PostgreSQL is its only authoritative store. Native composition consumes public
+Agents execution/catalog/observation ports to manage task dependencies,
+concurrency, leases, intervention and results. It does not maintain another
+Harness engine or select Provider credentials and models.
 
-For a provider-free local preview, follow the [quick start](../../docs/deployment/initial-demo.md).
+For the native product or a separate provider-free preview, follow the
+[quick start](../../docs/deployment/initial-demo.md).
 Public HTTP contracts are documented in the [API guide](../../docs/api/README.md).
 This component README covers Control Plane-specific preflight, migrations,
 planning profile payloads, WorkContext backfill, ContextPackage assembly, and
@@ -115,8 +116,14 @@ background service running and repeat close. `True` confirms CP consumers/stores
 are closed. Repeated completed close is idempotent. CP never closes the externally
 supplied agents service or an unrelated conversation.
 
-The standalone `create_app`/worker CLI material below describes explicit legacy
-consumers; it is not the authenticated native composition entrypoint.
+## Legacy Standalone Consumers
+
+The standalone `create_app`/worker CLI material below describes retained legacy
+consumers, not the authenticated native composition entrypoint. The old R3
+Gateway starts OpenCode ACP per Execution. Its transport and Planner still have
+callers; they have not been removed or converted to thin shims. Their migration
+is separate and is not required to use the native product. Never run a second
+scheduler/Gateway over the native product's store.
 
 ## Prerequisites
 
@@ -150,10 +157,14 @@ export SIDERA_WORKSPACE_ROOT="$PWD/.sidera/workspaces"
 mkdir -p "$SIDERA_WORKSPACE_ROOT"
 ```
 
-OpenCode credentials remain in the OpenCode credential store. SIDERA module
+In this legacy path, credentials remain in the OpenCode credential store. SIDERA module
 instances record only opaque references such as
 `opencode.default-credential`; API keys must not be placed in module JSON,
 Events, Outbox payloads, or logs.
+
+This is not native authentication: native Runs isolate HOME/XDG and use authorized
+Profile secret references, never global-login inheritance. See
+[Agents prerequisites](../../packages/agents/README.md#opencode-prerequisites-and-limits).
 
 Run the explicit executable and ACP preflight before starting a real Gateway:
 
@@ -676,7 +687,8 @@ workspace, ACP process, Session, Artifact, and Evidence path.
 
 ## Verification
 
-Run these commands from the repository root with PostgreSQL running and
+The following commands exercise the retained standalone/legacy service. Use an
+explicitly owned test database, from the repository root with PostgreSQL running and
 `SIDERA_DATABASE_URL` exported:
 
 ```bash
