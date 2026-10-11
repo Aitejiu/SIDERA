@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from sidera_agents.contracts import ExecutionWorkspace
+from sidera_agents.contracts import ExecutionWorkspace, StartStatus
 from sidera_agents.errors import AgentError
 from sidera_runtime_guard import RuntimeBudgetGuard, RuntimeGuardError
 from sqlalchemy.exc import OperationalError
@@ -2434,19 +2434,41 @@ class WorkerGateway:
             )
             if (
                 current.lease_owner != transition.lease_owner
+                or current.lease_expires_at != transition.lease_expires_at
                 or current.lease_expires_at is None
                 or current.lease_expires_at <= self._clock()
             ):
                 raise GatewayRecoveryRequired(
                     "native target claim changed during admission"
                 )
+            self._load_handoff_target_context_in_uow(
+                uow,
+                transition=current,
+                workspace_id=workspace_id,
+                require_session=False,
+                require_acknowledgement=False,
+                allow_active_manifest=True,
+            )
             link = uow.execution_authorities.get_link(workspace_id, result.execution_id)
             session = uow.sessions.get_any(result.session_id, workspace_id)
             if (
                 link is None
                 or session is None
                 or current.native_payload is None
+                or result.workspace_id != workspace_id
+                or result.execution_id != current.target_execution_id
+                or link.workspace_id != workspace_id
+                or link.execution_id != current.target_execution_id
+                or not isinstance(link.run_id, UUID)
+                or link.start_receipt is None
+                or link.start_receipt.status is not StartStatus.ACCEPTED
+                or link.start_receipt.operation_id != link.start_operation_id
+                or link.start_receipt.run_id != link.run_id
+                or session.id != uuid5(
+                    NAMESPACE_URL, f"sidera.native.session:{link.run_id}"
+                )
                 or session.execution_id != current.target_execution_id
+                or session.worker_id != current.target_worker_id
                 or (
                     link.profile_ref != current.native_payload.target_profile_ref
                     or link.binding_version != current.target_binding_version
@@ -2456,6 +2478,70 @@ class WorkerGateway:
             ):
                 raise GatewayRecoveryRequired("native target start evidence changed")
             self._native_preparation_receipt(link)
+            if current.target_session_id not in (None, session.id):
+                raise GatewayRecoveryRequired("native target Session changed")
+        services = self._native_services
+        if services is None:
+            raise GatewayRecoveryRequired("native target start result is unconfirmed")
+        try:
+            snapshot = services.execution.get_run(
+                workspace_id, link.run_id, grant_id=link.authority_id
+            )
+        except Exception:  # noqa: BLE001 - an unavailable read cannot confirm activation
+            raise GatewayRecoveryRequired(
+                "native target start result is unconfirmed"
+            ) from None
+        if (
+            snapshot.workspace_id != workspace_id
+            or snapshot.run_id != link.run_id
+            or snapshot.profile_ref != link.profile_ref
+            or snapshot.effective_config.profile_ref != link.profile_ref
+        ):
+            raise GatewayRecoveryRequired("native target Run identity changed")
+        if snapshot.state.value in {"starting", "unknown", "closing"}:
+            return NativeDeferredResult(
+                workspace_id, link.execution_id,
+                snapshot.state.value, link.start_operation_id,
+            )
+        if snapshot.state.value in {"failed", "stopped", "completed"}:
+            raise GatewayMessageError(
+                "Native handoff target terminated before activation.",
+                code="native_handoff_target_terminal",
+            )
+        if snapshot.state.value not in {"running", "idle"}:
+            raise GatewayRecoveryRequired("native target start result is unconfirmed")
+        with self._uow_factory() as uow:
+            current = self._load_handoff_transition_for_operation(
+                uow,
+                workspace_id=workspace_id,
+                transition_id=transition_id,
+                expected_transition_version=expected_version,
+                operation=HandoffGateOperation.COORDINATOR_START_TARGET,
+                phase=HandoffPhase.START_TARGET_SESSION,
+            )
+            self._load_handoff_target_context_in_uow(
+                uow,
+                transition=current,
+                workspace_id=workspace_id,
+                require_session=False,
+                require_acknowledgement=False,
+                allow_active_manifest=True,
+            )
+            latest_link = uow.execution_authorities.get_link(workspace_id, link.execution_id)
+            latest_session = uow.sessions.get_any(session.id, workspace_id)
+            if (
+                current.lease_owner != transition.lease_owner
+                or current.lease_expires_at != transition.lease_expires_at
+                or current.lease_expires_at is None
+                or current.lease_expires_at <= self._clock()
+                or not _native_handoff_link_is_current(latest_link, link)
+                or latest_session is None
+                or latest_session.execution_id != link.execution_id
+                or latest_session.worker_id != current.target_worker_id
+                or latest_session.adapter_session_id != session.adapter_session_id
+                or latest_session.status is not ExecutionSessionStatus.ACTIVE
+            ):
+                raise GatewayRecoveryRequired("native target start evidence changed")
             previous = current.version
             if current.target_session_id not in (None, session.id):
                 raise GatewayRecoveryRequired("native target Session changed")
@@ -2831,7 +2917,7 @@ class WorkerGateway:
                 current, target, current_link, current_receipt = load(uow)
                 if (
                     current.lease_owner != transition.lease_owner
-                    or current_link != link
+                    or not _native_handoff_link_is_current(current_link, link)
                     or current_receipt != receipt
                     or target.session is None
                     or started.sequence > target.session.last_sequence
@@ -2996,6 +3082,15 @@ class WorkerGateway:
             raise GatewayMessageError(
                 "handoff target worker does not match Transition",
                 code="handoff_target_worker_mismatch",
+            )
+        if transition.handoff_schema_version == 2 and execution.status in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELED,
+        }:
+            raise GatewayMessageError(
+                "Native handoff target terminated before activation.",
+                code="native_handoff_target_terminal",
             )
         if execution.active_lease_id is None:
             raise GatewayMessageError(
@@ -8899,6 +8994,19 @@ class GatewayAssignmentRunner:
             message.event_id,
             message.topic,
         )
+
+
+def _native_handoff_link_is_current(
+    current: AgentExecutionLink | None, observed: AgentExecutionLink
+) -> bool:
+    return (
+        current is not None
+        and current.status in {"starting", "running", "waiting"}
+        and current.event_cursor >= observed.event_cursor
+        and replace(
+            current, event_cursor=observed.event_cursor, status=observed.status
+        ) == observed
+    )
 
 
 def _load_module(

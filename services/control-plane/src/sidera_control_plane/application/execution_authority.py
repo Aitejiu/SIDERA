@@ -11,6 +11,7 @@ from sidera_agents.contracts import (
     RuntimeRef,
     SecretBinding,
     SourceRef,
+    StartStatus,
     ToolBinding,
 )
 from sidera_agents.errors import AgentError
@@ -317,13 +318,42 @@ class ExecutionAuthorityReader:
             transition_id=transition.id,
             target_execution_id=execution.id,
         )
-        if not gate.allowed or (
-            not transition.lease_owner
-            or transition.lease_expires_at is None
-            or transition.lease_expires_at <= self._clock()
-            or transition.source_workspace_freeze_facts is None
-        ):
+        if not gate.allowed or transition.source_workspace_freeze_facts is None:
             return False
+        claimed = (
+            bool(transition.lease_owner)
+            and transition.lease_expires_at is not None
+            and transition.lease_expires_at > self._clock()
+        )
+        if not claimed:
+            # Admission outlives the short dispatch claim. Only the exact saved
+            # Run and active Session may finish projecting under its live Lease.
+            receipt = link.start_receipt
+            if (
+                transition.phase is not HandoffPhase.START_TARGET_SESSION
+                or action not in {
+                    "workspace.execute", "source.read", "tool.execute",
+                    "secret.read", "resource.read",
+                }
+                or not isinstance(link.run_id, UUID)
+                or link.status not in {"starting", "running", "waiting"}
+                or receipt is None
+                or receipt.status is not StartStatus.ACCEPTED
+                or receipt.operation_id != link.start_operation_id
+                or receipt.run_id != link.run_id
+            ):
+                return False
+            session_id = uuid5(NAMESPACE_URL, f"sidera.native.session:{link.run_id}")
+            session = uow.sessions.get_any(session_id, execution.workspace_id)
+            if (
+                session is None
+                or session.id != session_id
+                or session.execution_id != execution.id
+                or session.status.value != "active"
+                or session.adapter_session_id != f"agent-run:{link.run_id}"
+                or transition.target_session_id not in (None, session_id)
+            ):
+                return False
         WorkspaceHandoffService._validate_native_cleanup(uow, transition)
         return True
 

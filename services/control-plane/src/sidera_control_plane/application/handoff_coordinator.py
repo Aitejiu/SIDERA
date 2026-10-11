@@ -71,6 +71,7 @@ from sidera_control_plane.domain.handoffs import (
     HandoffProposal,
     HandoffTransition,
     HandoffTransitionStatus,
+    HandoffWriterState,
 )
 from sidera_control_plane.domain.inputs import ExecutionInputStatus
 from sidera_control_plane.domain.lease import LeaseStatus
@@ -432,13 +433,26 @@ class HandoffCoordinator:
             InvalidTransition,
             HandoffCoordinatorError,
         ) as exc:
+            code = _error_code(exc, "handoff_phase_blocked")
+            terminal = (
+                isinstance(exc, GatewayMessageError)
+                and code == "native_handoff_target_terminal"
+                and claimed.handoff_schema_version == 2
+                and claimed.phase in {
+                    HandoffPhase.START_TARGET_SESSION,
+                    HandoffPhase.ACKNOWLEDGE_CONTEXT,
+                }
+            )
             self._record_failure(
                 claimed,
-                code=_error_code(exc, "handoff_phase_blocked"),
-                status=HandoffTransitionStatus.BLOCKED,
+                code=code,
+                status=(
+                    HandoffTransitionStatus.FAILED
+                    if terminal else HandoffTransitionStatus.BLOCKED
+                ),
                 operation_id=None,
             )
-            return "blocked"
+            return "failed" if terminal else "blocked"
         except Exception:
             logger.exception(
                 "handoff_coordinator_phase_failed",
@@ -1045,6 +1059,17 @@ class HandoffCoordinator:
                         }
                     ),
                 )
+                if (
+                    status is HandoffTransitionStatus.FAILED
+                    and code == "native_handoff_target_terminal"
+                    and current.handoff_schema_version == 2
+                    and current.phase in {
+                        HandoffPhase.START_TARGET_SESSION,
+                        HandoffPhase.ACKNOWLEDGE_CONTEXT,
+                    }
+                ):
+                    current.writer_state = HandoffWriterState.WRITER_NONE
+                    current.next_attempt_at = None
                 uow.handoff_transitions.save(current, previous_version)
                 self._append_milestone(
                     uow,
