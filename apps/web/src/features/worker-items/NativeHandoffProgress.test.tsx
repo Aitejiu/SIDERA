@@ -59,6 +59,28 @@ const transition = {
   plan_base: { snapshot_id: "10000000-0000-0000-0000-000000000001", generation: 2, head_version: 6 },
   available_recovery_strategies: [],
 } as NativeHandoffTransition;
+const convergedTransition: NativeHandoffTransition = {
+  ...transition,
+  version: 12,
+  status: "converged",
+  phase: "complete",
+  writer_state: "target_active",
+  started_at: "2026-10-07T00:02:30Z",
+  completed_at: "2026-10-07T00:05:00Z",
+  failure_code: "target_start_unconfirmed",
+  target_assignee: { kind: "profile", id: "target-profile" },
+  target_profile_ref: { workspace_id: workspaceId, profile_id: "target-profile", revision: 2 },
+  target_worker_id: "80000000-0000-0000-0000-000000000002",
+  target_execution_id: "60000000-0000-0000-0000-000000000002",
+  target_session_id: "70000000-0000-0000-0000-000000000002",
+  target_run_id: "90000000-0000-0000-0000-000000000002",
+  target_binding_version: 3,
+  context: {
+    ...transition.context,
+    target_package_id: "package-target",
+    target_package_hash: "b".repeat(64),
+  },
+};
 
 describe("NativeHandoffProgress", () => {
   it("shows source-stop state and keeps an unadmitted human target distinct from failure", async () => {
@@ -128,6 +150,62 @@ describe("NativeHandoffProgress", () => {
     expect(progress).toHaveTextContent("目标 Runtime 尚未接入");
     expect(screen.queryByText("目标 Agent 启动结果未知")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /恢复|Recover/ })).not.toBeInTheDocument();
+  });
+
+  it("shows historical converged target facts without treating a stored reason as a current freeze", () => {
+    const historical = structuredClone(convergedTransition);
+    const before = structuredClone(historical);
+    render(
+      <MemoryRouter>
+        <NativeHandoffProgress
+          workspaceId={workspaceId}
+          transition={historical}
+          onRefresh={async () => undefined}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("converged")).toBeInTheDocument();
+    expect(screen.getByText("当前阶段：complete")).toBeInTheDocument();
+    expect(screen.getByText("complete")).toBeInTheDocument();
+    expect(screen.getByText("target_active")).toBeInTheDocument();
+    expect(screen.getByText("target-profile · R2")).toBeInTheDocument();
+    expect(screen.getByText(`Worker · ${historical.target_worker_id}`)).toBeInTheDocument();
+    expect(screen.getByText(`Execution · ${historical.target_execution_id}`)).toBeInTheDocument();
+    expect(screen.getByText(`Session · ${historical.target_session_id}`)).toBeInTheDocument();
+    expect(screen.getByText(`Run · ${historical.target_run_id}`)).toBeInTheDocument();
+    expect(screen.getByText("Binding · V3")).toBeInTheDocument();
+    expect(screen.queryByText(/冻结原因：/)).not.toBeInTheDocument();
+    expect(historical).toEqual(before);
+    expect(historical.failure_code).toBe("target_start_unconfirmed");
+  });
+
+  it.each([
+    { status: "blocked", writer_state: "target_starting", failure_code: "target_start_unconfirmed", blocked_operation_id: null },
+    { status: "failed", writer_state: "target_starting", failure_code: "native_handoff_target_terminal", blocked_operation_id: null },
+    { status: "blocked_unknown", writer_state: "unknown", failure_code: "handoff_external_result_unknown", blocked_operation_id: "c0000000-0000-0000-0000-000000000001" },
+  ] as const)("keeps the current reason visible for $status", ({ status, writer_state, failure_code, blocked_operation_id }) => {
+    const failed: NativeHandoffTransition = {
+      ...convergedTransition,
+      status,
+      phase: "start_target_session",
+      writer_state,
+      completed_at: null,
+      failure_code,
+      blocked_operation_id,
+    };
+    render(
+      <MemoryRouter>
+        <NativeHandoffProgress
+          workspaceId={workspaceId}
+          transition={failed}
+          onRefresh={async () => undefined}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText(status)).toBeInTheDocument();
+    expect(screen.getByText(`冻结原因：${failure_code}`)).toBeInTheDocument();
   });
 
   it("does not attach a source Trace descriptor when its execution pin differs", () => {

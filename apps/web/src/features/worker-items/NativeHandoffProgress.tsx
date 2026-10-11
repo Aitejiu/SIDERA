@@ -105,7 +105,7 @@ export function NativeHandoffProgress({
             : sourceStopPending ? "等待源 Agent 停止" : `当前阶段：${transition.phase}`}</strong>
           <span>Transition V{transition.version} · {transition.writer_state} · 第 {transition.logical_attempt} 次逻辑尝试</span>
           {targetRunNotAdmitted ? <small>目标 Runtime 尚未接入；这不表示目标已启动或启动失败。</small> : null}
-          {transition.failure_code ? <small>冻结原因：{transition.failure_code}</small> : null}
+          {transition.status !== "converged" && transition.failure_code ? <small>冻结原因：{transition.failure_code}</small> : null}
         </div>
       </div>
 

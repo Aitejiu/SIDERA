@@ -160,17 +160,54 @@ def test_handoff_phase_order_is_exact() -> None:
 def test_transition_rejects_phase_skip() -> None:
     current = transition()
     current.start(now=NOW)
-    before = (current.phase, current.status, current.writer_state, current.version)
+    current.failure_code = "target_start_unconfirmed"
+    before = replace(current)
 
     with pytest.raises(InvalidTransition):
         current.advance(HandoffPhase.FREEZE_SOURCE_WORKSPACE, now=NOW)
 
-    assert (
-        current.phase,
-        current.status,
-        current.writer_state,
-        current.version,
-    ) == before
+    assert current == before
+
+
+def test_successful_phase_advance_clears_current_failure_reason() -> None:
+    current = replace(
+        transition(
+            status=HandoffTransitionStatus.RUNNING,
+            phase=HandoffPhase.START_TARGET_SESSION,
+            writer_state=HandoffWriterState.TARGET_STARTING,
+        ),
+        failure_code="target_start_unconfirmed",
+    )
+
+    current.advance(HandoffPhase.ACKNOWLEDGE_CONTEXT, now=NOW)
+
+    assert current.failure_code is None
+    assert current.phase is HandoffPhase.ACKNOWLEDGE_CONTEXT
+    assert current.status is HandoffTransitionStatus.RUNNING
+    assert current.writer_state is HandoffWriterState.TARGET_STARTING
+    assert current.logical_attempt == 1
+    assert current.version == 2
+
+
+def test_successful_convergence_clears_persisted_failure_reason() -> None:
+    current = replace(
+        transition(
+            status=HandoffTransitionStatus.RUNNING,
+            phase=HandoffPhase.COMPLETE,
+            writer_state=HandoffWriterState.TARGET_ACTIVE,
+        ),
+        failure_code="target_start_unconfirmed",
+    )
+
+    current.converge(now=NOW)
+
+    assert current.failure_code is None
+    assert current.status is HandoffTransitionStatus.CONVERGED
+    assert current.phase is HandoffPhase.COMPLETE
+    assert current.writer_state is HandoffWriterState.TARGET_ACTIVE
+    assert current.completed_at == NOW
+    assert current.logical_attempt == 1
+    assert current.version == 2
 
 
 def test_converged_transition_cannot_change() -> None:

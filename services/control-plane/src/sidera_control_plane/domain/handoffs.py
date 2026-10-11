@@ -1150,6 +1150,7 @@ class HandoffTransition:
         _aware(now, "handoff phase timestamp")
         self.phase = requested
         self.writer_state = _PHASE_WRITERS[requested]
+        self.failure_code = None
         self.lease_owner = None
         self.lease_expires_at = None
         self.version += 1
@@ -1267,6 +1268,7 @@ class HandoffTransition:
         _aware(now, "handoff transition completed_at")
         self.status = HandoffTransitionStatus.CONVERGED
         self.completed_at = now
+        self.failure_code = None
         self.lease_owner = None
         self.lease_expires_at = None
         self.version += 1

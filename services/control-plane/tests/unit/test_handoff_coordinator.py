@@ -328,3 +328,99 @@ def test_coordinator_waits_without_advancing_and_restarts_without_duplicate_even
         "HandoffCheckpointCaptured",
         "HandoffSourceStopped",
     ]
+
+
+def test_coordinator_clears_target_start_wait_reason_after_restart_and_progress() -> None:
+    state = _State()
+
+    class WaitingCoordinator(_ScriptedCoordinator):
+        def _dispatch_phase(self, transition: HandoffTransition) -> HandoffStepResult:
+            if transition.phase is HandoffPhase.START_TARGET_SESSION:
+                return HandoffStepResult.wait(pending_reason="target_start_unconfirmed")
+            return super()._dispatch_phase(transition)
+
+    coordinator = WaitingCoordinator(
+        uow_factory=state.uow,
+        clock=lambda: NOW,
+        owner_id="test-coordinator",
+        lease_ttl_seconds=30,
+        backoff_max_seconds=60,
+    )
+    for phase in (
+        HandoffPhase.STOP_SOURCE,
+        HandoffPhase.FREEZE_SOURCE_WORKSPACE,
+        HandoffPhase.CREATE_TARGET_EXECUTION,
+        HandoffPhase.ASSEMBLE_BUNDLE,
+        HandoffPhase.TRANSFER_WORKSPACE,
+        HandoffPhase.START_TARGET_SESSION,
+    ):
+        assert coordinator.run_once(limit=1).progressed == 1
+        assert state.repository.item.phase is phase
+
+    milestones_before_wait = tuple(state.events.items)
+    waiting = coordinator.run_once(limit=1)
+
+    assert waiting == HandoffRunResult(
+        claimed=1,
+        progressed=0,
+        waiting=1,
+        converged=0,
+        blocked=0,
+        failed=0,
+        unknown=0,
+    )
+    assert state.repository.item.phase is HandoffPhase.START_TARGET_SESSION
+    assert state.repository.item.status is HandoffTransitionStatus.RUNNING
+    assert state.repository.item.writer_state is HandoffWriterState.TARGET_STARTING
+    assert state.repository.item.failure_code == "target_start_unconfirmed"
+    assert state.repository.item.logical_attempt == 1
+    assert state.repository.item.lease_owner is None
+    assert state.repository.item.lease_expires_at is None
+    assert state.repository.item.next_attempt_at == NOW
+    assert tuple(state.events.items) == milestones_before_wait
+
+    restarted = _ScriptedCoordinator(
+        uow_factory=state.uow,
+        clock=lambda: NOW,
+        owner_id="test-coordinator-restarted",
+        lease_ttl_seconds=30,
+        backoff_max_seconds=60,
+    )
+    assert restarted.run_once(limit=1).progressed == 1
+    assert state.repository.item.phase is HandoffPhase.ACKNOWLEDGE_CONTEXT
+    assert state.repository.item.status is HandoffTransitionStatus.RUNNING
+    assert state.repository.item.writer_state is HandoffWriterState.TARGET_STARTING
+    assert state.repository.item.failure_code is None
+    assert state.repository.item.logical_attempt == 1
+
+    for phase in (
+        HandoffPhase.TRANSFER_SAFE_INPUTS,
+        HandoffPhase.ACTIVATE_TARGET,
+        HandoffPhase.COMPLETE,
+    ):
+        assert restarted.run_once(limit=1).progressed == 1
+        assert state.repository.item.phase is phase
+        assert state.repository.item.failure_code is None
+        assert state.repository.item.logical_attempt == 1
+
+    assert restarted.run_once(limit=1).converged == 1
+    assert state.repository.item.status is HandoffTransitionStatus.CONVERGED
+    assert state.repository.item.phase is HandoffPhase.COMPLETE
+    assert state.repository.item.writer_state is HandoffWriterState.TARGET_ACTIVE
+    assert state.repository.item.completed_at == NOW
+    assert state.repository.item.failure_code is None
+    assert state.repository.item.logical_attempt == 1
+    assert restarted.run_once(limit=1).claimed == 0
+    assert [event.event_type for event in state.events.items] == [
+        "HandoffCheckpointCaptured",
+        "HandoffSourceStopped",
+        "HandoffWorkspaceFrozen",
+        "HandoffTargetExecutionCreated",
+        "HandoffContextBundleCreated",
+        "HandoffWorkspaceTransferred",
+        "HandoffTargetSessionStarted",
+        "HandoffContextAcknowledged",
+        "HandoffInputTransferred",
+        "HandoffTargetActivated",
+        "HandoffConverged",
+    ]
