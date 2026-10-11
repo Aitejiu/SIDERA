@@ -1,5 +1,5 @@
-import type { QueryClient } from "@tanstack/react-query";
-import { describe, expect, it, vi } from "vitest";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   createInvalidationQueue,
@@ -79,6 +79,41 @@ async function flushAsyncNotifications(): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function controlAnimationFrames() {
+  const callbacks = new Map<number, FrameRequestCallback>();
+  let nextHandle = 0;
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    const handle = ++nextHandle;
+    callbacks.set(handle, callback);
+    return handle;
+  });
+  vi.stubGlobal("cancelAnimationFrame", (handle: number) => callbacks.delete(handle));
+  return {
+    callbacks,
+    drain() {
+      const scheduled = [...callbacks.values()];
+      callbacks.clear();
+      scheduled.forEach((callback) => callback(0));
+    },
+  };
+}
+
+async function flushQueueMicrotasks(): Promise<void> {
+  for (let turn = 0; turn < 20; turn += 1) {
+    await Promise.resolve();
+  }
+}
+
 describe("WorkspaceStreamProvider projection matching", () => {
   it("invalidates only the matching root task result query", () => {
     const resultChange = change("result_overview", ROOT_TASK_ID);
@@ -119,7 +154,10 @@ describe("WorkspaceStreamProvider projection matching", () => {
   });
 
   it("coalesces duplicate and replayed cursors into one invalidation", async () => {
-    const queryClient = { invalidateQueries: vi.fn() } as unknown as QueryClient;
+    const queryClient = new QueryClient();
+    const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
+    const queryKey = ["notifications", WORKSPACE_ID, "thread", THREAD_ID];
+    queryClient.setQueryData(queryKey, { sequence: 0 });
     const queue = createInvalidationQueue(queryClient, WORKSPACE_ID);
     const current = change("notification_thread", THREAD_ID, { cursor: 21 });
 
@@ -128,8 +166,10 @@ describe("WorkspaceStreamProvider projection matching", () => {
     queue.enqueue({ ...current, cursor: 20 });
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
 
-    expect(queryClient.invalidateQueries).toHaveBeenCalledTimes(1);
+    expect(invalidateQueries).toHaveBeenCalledTimes(1);
+    expect(queryClient.getQueryState(queryKey)?.isInvalidated).toBe(true);
     queue.close();
+    queryClient.clear();
   });
 
   it("invalidates only the affected resource for worker and subtask workspaces", () => {
@@ -460,6 +500,317 @@ describe("WorkspaceStreamProvider projection matching", () => {
         submissionChange,
       ),
     ).toBe(false);
+  });
+});
+
+describe("WorkspaceStreamProvider invalidation queue", () => {
+  let client: QueryClient;
+  let queue: ReturnType<typeof createInvalidationQueue>;
+  let frames: ReturnType<typeof controlAnimationFrames>;
+  let subscriptions: (() => void)[];
+
+  beforeEach(() => {
+    client = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: Infinity } },
+    });
+    frames = controlAnimationFrames();
+    queue = createInvalidationQueue(client, WORKSPACE_ID);
+    subscriptions = [];
+  });
+
+  afterEach(() => {
+    queue.close();
+    subscriptions.forEach((unsubscribe) => unsubscribe());
+    client.clear();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function observe(
+    queryKey: readonly unknown[],
+    options: { enabled?: boolean; staleTime?: number | "static" } = {},
+  ) {
+    const responses: ReturnType<typeof deferred<{ sequence: number }>>[] = [];
+    const observedSequences: number[] = [];
+    let aborts = 0;
+    client.setQueryData(queryKey, { sequence: 0 });
+    const observer = new QueryObserver(client, {
+      queryKey,
+      ...options,
+      queryFn: ({ signal }) => {
+        const response = deferred<{ sequence: number }>();
+        responses.push(response);
+        signal.addEventListener("abort", () => {
+          aborts += 1;
+          response.reject(new DOMException("Query aborted", "AbortError"));
+        }, { once: true });
+        return response.promise;
+      },
+    });
+    const unsubscribe = observer.subscribe((result) => {
+      if (result.data !== undefined) {
+        observedSequences.push(result.data.sequence);
+      }
+    });
+    subscriptions.push(unsubscribe);
+    return {
+      observer,
+      unsubscribe,
+      responses,
+      observedSequences,
+      get starts() { return responses.length; },
+      get aborts() { return aborts; },
+    };
+  }
+
+  it("finishes an in-flight read before refreshing the latest streamed state", async () => {
+    const queryKey = ["worker-item-activity", WORKSPACE_ID, WORKER_ITEM_ID];
+    const query = observe(queryKey);
+    expect(query.starts).toBe(0);
+
+    queue.enqueue(change("worker_item_activity", WORKER_ITEM_ID, { cursor: 1 }));
+    frames.drain();
+    for (let cursor = 2; cursor <= 6; cursor += 1) {
+      queue.enqueue(change("worker_item_activity", WORKER_ITEM_ID, { cursor }));
+      frames.drain();
+    }
+
+    expect.soft(query.starts).toBe(1);
+    expect(query.aborts).toBe(0);
+    expect(client.getQueryData(queryKey)).toEqual({ sequence: 0 });
+    expect(frames.callbacks.size).toBe(0);
+
+    query.responses[0]!.resolve({ sequence: 1 });
+    await flushQueueMicrotasks();
+    expect(query.observedSequences).toContain(1);
+    expect(client.getQueryData(queryKey)).toEqual({ sequence: 1 });
+    expect(frames.callbacks.size).toBe(1);
+    frames.drain();
+    expect(query.starts).toBe(2);
+    expect(query.aborts).toBe(0);
+
+    query.responses[1]!.resolve({ sequence: 6 });
+    await flushQueueMicrotasks();
+    expect(query.observedSequences).toContain(6);
+    expect(client.getQueryData(queryKey)).toEqual({ sequence: 6 });
+    expect(frames.callbacks.size).toBe(0);
+    frames.drain();
+    expect(query.starts).toBe(2);
+    expect(query.aborts).toBe(0);
+  });
+
+  it("refreshes the sole stream event after joining an older external read", async () => {
+    const queryKey = ["worker-item-activity", WORKSPACE_ID, WORKER_ITEM_ID];
+    const query = observe(queryKey);
+    const externalRead = query.observer.refetch();
+    expect(query.starts).toBe(1);
+    queue.enqueue(change("worker_item_activity", WORKER_ITEM_ID, { cursor: 1 }));
+    frames.drain();
+    expect(query.starts).toBe(1);
+    expect(query.aborts).toBe(0);
+    expect(frames.callbacks.size).toBe(0);
+
+    query.responses[0]!.resolve({ sequence: 0 });
+    await externalRead;
+    await flushQueueMicrotasks();
+    expect(client.getQueryData(queryKey)).toEqual({ sequence: 0 });
+    expect(frames.callbacks.size).toBe(1);
+    frames.drain();
+    expect(query.starts).toBe(2);
+    expect(query.aborts).toBe(0);
+    query.responses[1]!.resolve({ sequence: 1 });
+    await flushQueueMicrotasks();
+    expect(query.observedSequences).toContain(1);
+    expect(client.getQueryData(queryKey)).toEqual({ sequence: 1 });
+    expect(query.starts).toBe(2);
+    expect(query.aborts).toBe(0);
+    expect(frames.callbacks.size).toBe(0);
+  });
+
+  it.each(["inactive", "static", "disabled"])(
+    "does not loop over an already pending %s query that active invalidation cannot await",
+    async (kind) => {
+      const queryKey = ["worker-item-activity", WORKSPACE_ID, WORKER_ITEM_ID];
+      const query = observe(queryKey, {
+        enabled: kind !== "disabled",
+        staleTime: kind === "static" ? "static" : Infinity,
+      });
+      if (kind === "inactive") {
+        query.unsubscribe();
+      }
+      const externalRead = query.observer.refetch();
+      expect(query.starts).toBe(1);
+      expect(client.getQueryState(queryKey)?.fetchStatus).toBe("fetching");
+      queue.enqueue(change("worker_item_activity", WORKER_ITEM_ID, { cursor: 1 }));
+      frames.drain();
+      await flushQueueMicrotasks();
+      expect(frames.callbacks.size).toBe(0);
+      frames.drain();
+      await flushQueueMicrotasks();
+      expect(frames.callbacks.size).toBe(0);
+      expect(query.starts).toBe(1);
+      expect(query.aborts).toBe(0);
+
+      query.responses[0]!.resolve({ sequence: 0 });
+      await externalRead;
+      await flushQueueMicrotasks();
+      expect(client.getQueryData(queryKey)).toEqual({ sequence: 0 });
+      expect(query.starts).toBe(1);
+      expect(query.aborts).toBe(0);
+      expect(frames.callbacks.size).toBe(0);
+    },
+  );
+
+  it("refetches overlapping notification queries once without dropping either change", async () => {
+    const invalidateQueries = vi.spyOn(client, "invalidateQueries");
+    const summaryKey = ["notifications", WORKSPACE_ID, "summary"];
+    const threadKey = ["notifications", WORKSPACE_ID, "thread", THREAD_ID];
+    const deliveryKey = ["notifications", WORKSPACE_ID, "delivery", DELIVERY_ID, "attempts"];
+    const summary = observe(summaryKey);
+    const thread = observe(threadKey);
+    const delivery = observe(deliveryKey);
+
+    queue.enqueue(change("notification_thread", THREAD_ID, { cursor: 1 }));
+    queue.enqueue(change("notification_delivery", DELIVERY_ID, { cursor: 2 }));
+    frames.drain();
+
+    expect(summary.starts).toBe(1);
+    expect(summary.aborts).toBe(0);
+    expect(thread.starts).toBe(1);
+    expect(delivery.starts).toBe(1);
+    expect(invalidateQueries).toHaveBeenCalledTimes(1);
+    summary.responses[0]!.resolve({ sequence: 2 });
+    thread.responses[0]!.resolve({ sequence: 1 });
+    delivery.responses[0]!.resolve({ sequence: 2 });
+    await flushQueueMicrotasks();
+    expect(client.getQueryData(summaryKey)).toEqual({ sequence: 2 });
+    expect(client.getQueryData(threadKey)).toEqual({ sequence: 1 });
+    expect(client.getQueryData(deliveryKey)).toEqual({ sequence: 2 });
+    expect(frames.callbacks.size).toBe(0);
+  });
+
+  it("drains latest pending resources together while excluding other resources and replayed cursors", async () => {
+    const invalidateQueries = vi.spyOn(client, "invalidateQueries");
+    const firstKey = ["worker-item-activity", WORKSPACE_ID, WORKER_ITEM_ID];
+    const secondKey = ["worker-item-activity", WORKSPACE_ID, "worker-item-2"];
+    const replayedKey = ["worker-item-activity", WORKSPACE_ID, "replayed-item"];
+    const otherResourceKey = ["worker-item-activity", WORKSPACE_ID, "other-item"];
+    const otherWorkspaceKey = ["worker-item-activity", "other-workspace", WORKER_ITEM_ID];
+    const otherProjectionKey = ["worker-item-workspace", WORKSPACE_ID, WORKER_ITEM_ID];
+    const first = observe(firstKey);
+    const second = observe(secondKey);
+    const excluded = [replayedKey, otherResourceKey, otherWorkspaceKey, otherProjectionKey]
+      .map((queryKey) => ({ queryKey, query: observe(queryKey) }));
+
+    queue.enqueue(change("worker_item_activity", WORKER_ITEM_ID, { cursor: 1 }));
+    frames.drain();
+    queue.enqueue(change("worker_item_activity", "worker-item-2", { cursor: 2 }));
+    frames.drain();
+    queue.enqueue(change("worker_item_activity", WORKER_ITEM_ID, { cursor: 3 }));
+    frames.drain();
+    queue.enqueue(change("worker_item_activity", "replayed-item", { cursor: 2 }));
+    queue.enqueue(change("worker_item_activity", WORKER_ITEM_ID, { cursor: 3 }));
+    frames.drain();
+
+    expect(first.starts).toBe(1);
+    expect(second.starts).toBe(0);
+    expect(first.aborts).toBe(0);
+    first.responses[0]!.resolve({ sequence: 1 });
+    await flushQueueMicrotasks();
+    expect(client.getQueryData(firstKey)).toEqual({ sequence: 1 });
+    expect(frames.callbacks.size).toBe(1);
+    frames.drain();
+
+    expect(invalidateQueries).toHaveBeenCalledTimes(2);
+    expect(first.starts).toBe(2);
+    expect(second.starts).toBe(1);
+    expect(first.aborts).toBe(0);
+    first.responses[1]!.resolve({ sequence: 3 });
+    second.responses[0]!.resolve({ sequence: 2 });
+    await flushQueueMicrotasks();
+    expect(client.getQueryData(firstKey)).toEqual({ sequence: 3 });
+    expect(client.getQueryData(secondKey)).toEqual({ sequence: 2 });
+    for (const { queryKey, query } of excluded) {
+      expect(query.starts).toBe(0);
+      expect(client.getQueryData(queryKey)).toEqual({ sequence: 0 });
+    }
+    expect(frames.callbacks.size).toBe(0);
+  });
+
+  it("cancels a scheduled frame and ignores late callbacks and enqueues after close", () => {
+    const query = observe(["worker-item-activity", WORKSPACE_ID, WORKER_ITEM_ID]);
+    queue.enqueue(change("worker_item_activity", WORKER_ITEM_ID, { cursor: 1 }));
+    const lateCallback = [...frames.callbacks.values()][0]!;
+    queue.close();
+    expect(frames.callbacks.size).toBe(0);
+    queue.enqueue(change("worker_item_activity", WORKER_ITEM_ID, { cursor: 2 }));
+    lateCallback(0);
+    frames.drain();
+
+    expect(query.starts).toBe(0);
+    expect(frames.callbacks.size).toBe(0);
+  });
+
+  it.each(["fulfilled", "rejected"])(
+    "keeps the pending read client-owned when closed before it is %s",
+    async (outcome) => {
+      const queryKey = ["worker-item-activity", WORKSPACE_ID, WORKER_ITEM_ID];
+      const query = observe(queryKey);
+      queue.enqueue(change("worker_item_activity", WORKER_ITEM_ID, { cursor: 1 }));
+      frames.drain();
+      queue.enqueue(change("worker_item_activity", WORKER_ITEM_ID, { cursor: 2 }));
+      queue.close();
+      queue.enqueue(change("worker_item_activity", WORKER_ITEM_ID, { cursor: 3 }));
+      expect(query.aborts).toBe(0);
+      if (outcome === "fulfilled") {
+        query.responses[0]!.resolve({ sequence: 1 });
+      } else {
+        query.responses[0]!.reject(new Error("Projection read failed"));
+      }
+      await flushQueueMicrotasks();
+      frames.drain();
+      queue.enqueue(change("worker_item_activity", WORKER_ITEM_ID, { cursor: 4 }));
+      frames.drain();
+
+      expect(query.starts).toBe(1);
+      expect(query.aborts).toBe(0);
+      expect(client.getQueryData(queryKey)).toEqual({
+        sequence: outcome === "fulfilled" ? 1 : 0,
+      });
+      expect(frames.callbacks.size).toBe(0);
+    },
+  );
+
+  it("releases a rejected invalidation and drains its pending tail without retrying an empty queue", async () => {
+    const invalidateQueries = client.invalidateQueries.bind(client);
+    // QueryClient normally absorbs query errors; expose one real failed read at this boundary.
+    let invalidations = 0;
+    client.invalidateQueries = (filters, options) => {
+      invalidations += 1;
+      return invalidateQueries(filters, { ...options, throwOnError: true });
+    };
+    const queryKey = ["worker-item-activity", WORKSPACE_ID, WORKER_ITEM_ID];
+    const query = observe(queryKey);
+    queue.enqueue(change("worker_item_activity", WORKER_ITEM_ID, { cursor: 1 }));
+    frames.drain();
+    queue.enqueue(change("worker_item_activity", WORKER_ITEM_ID, { cursor: 2 }));
+    expect.soft(frames.callbacks.size).toBe(0);
+    query.responses[0]!.reject(new Error("Projection invalidation failed"));
+    await flushQueueMicrotasks();
+    expect(client.getQueryData(queryKey)).toEqual({ sequence: 0 });
+    expect(frames.callbacks.size).toBe(1);
+    frames.drain();
+    expect(query.starts).toBe(2);
+    expect(query.aborts).toBe(0);
+    query.responses[1]!.resolve({ sequence: 2 });
+    await flushQueueMicrotasks();
+    expect(client.getQueryData(queryKey)).toEqual({ sequence: 2 });
+    expect(frames.callbacks.size).toBe(0);
+    frames.drain();
+    await flushQueueMicrotasks();
+    expect(query.starts).toBe(2);
+    expect(invalidations).toBe(2);
+    expect(frames.callbacks.size).toBe(0);
   });
 });
 
