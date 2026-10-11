@@ -340,7 +340,9 @@ def main(
             else ProductSettings.model_validate({})
         )
         if arguments.command == "open":
-            if not webbrowser.open(selected.local_url):
+            if not webbrowser.open(
+                f"{selected.web_origin}/workspaces/{selected.workspace_id}/tasks"
+            ):
                 raise ProductCLIError("browser_unavailable")
             return 0
         if arguments.command == "session":

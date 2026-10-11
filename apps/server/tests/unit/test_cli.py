@@ -13,8 +13,36 @@ def cli_module():
     return cli
 
 
-def test_open_uses_selected_local_url_without_constructing_an_owner(
-    settings_values, monkeypatch
+@pytest.mark.parametrize(
+    "web_origin",
+    ["http://127.0.0.1:5173", "http://localhost:55950/", "http://[::1]:55950"],
+)
+def test_open_uses_selected_web_workspace_without_constructing_an_owner(
+    settings_values, no_database_connections, monkeypatch, web_origin
+):
+    cli = cli_module()
+    from sidera_product.config import ProductSettings
+
+    settings = ProductSettings.model_validate(
+        {**settings_values, "web_origin": web_origin}
+    )
+    opened = []
+    monkeypatch.setattr(cli.webbrowser, "open", lambda url: opened.append(url) or True)
+    monkeypatch.setattr(
+        cli,
+        "build_product_runtime",
+        lambda *_: pytest.fail("open constructed an owner"),
+    )
+    monkeypatch.setattr(
+        cli.httpx, "Client", lambda **_: pytest.fail("open attempted HTTP")
+    )
+    assert cli.main(["open"], settings=settings) == 0
+    assert opened == [f"{settings.web_origin}/workspaces/{settings.workspace_id}/tasks"]
+    assert settings.local_url == "http://127.0.0.1:18080"
+
+
+def test_open_uses_default_web_origin_and_selected_workspace(
+    settings_values, no_database_connections, monkeypatch
 ):
     cli = cli_module()
     from sidera_product.config import ProductSettings
@@ -27,8 +55,98 @@ def test_open_uses_selected_local_url_without_constructing_an_owner(
         "build_product_runtime",
         lambda *_: pytest.fail("open constructed an owner"),
     )
+    monkeypatch.setattr(
+        cli.httpx, "Client", lambda **_: pytest.fail("open attempted HTTP")
+    )
     assert cli.main(["open"], settings=settings) == 0
-    assert opened == ["http://127.0.0.1:18080"]
+    assert opened == [
+        f"http://127.0.0.1:5173/workspaces/{settings_values['workspace_id']}/tasks"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "error_code"),
+    [("false", "browser_unavailable"), ("raises", "product_operation_failed")],
+    ids=["browser-unavailable", "browser-oserror"],
+)
+def test_open_browser_failure_is_safe_without_owner_or_io(
+    settings_values, no_database_connections, monkeypatch, capsys, outcome, error_code
+):
+    cli = cli_module()
+    from sidera_product.config import ProductSettings
+
+    settings = ProductSettings.model_validate(
+        {**settings_values, "web_origin": "http://localhost:55950/"}
+    )
+    opened = []
+
+    def open_browser(url):
+        opened.append(url)
+        if outcome == "raises":
+            raise OSError("RAW_BROWSER_SECRET_SENTINEL")
+        return False
+
+    monkeypatch.setattr(cli.webbrowser, "open", open_browser)
+    monkeypatch.setattr(
+        cli,
+        "build_product_runtime",
+        lambda *_: pytest.fail("open constructed an owner"),
+    )
+    monkeypatch.setattr(
+        cli.httpx, "Client", lambda **_: pytest.fail("open attempted HTTP")
+    )
+    assert cli.main(["open"], settings=settings) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert json.loads(output.err) == {"error": {"code": error_code}}
+    assert "RAW_BROWSER_SECRET_SENTINEL" not in output.err
+    assert opened == [
+        f"http://localhost:55950/workspaces/{settings_values['workspace_id']}/tasks"
+    ]
+
+
+def test_open_uses_caller_runtime_settings_without_lifecycle_operations(
+    settings_values, no_database_connections, monkeypatch
+):
+    cli = cli_module()
+    from sidera_product.config import ProductSettings
+
+    class CallerOwnedRuntime:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def inspect_readiness(self):
+            pytest.fail("open inspected caller runtime readiness")
+
+        def start(self):
+            pytest.fail("open started caller runtime")
+
+        def close(self):
+            pytest.fail("open closed caller runtime")
+
+    runtime = CallerOwnedRuntime(
+        ProductSettings.model_validate(
+            {
+                **settings_values,
+                "web_origin": "http://localhost:55950/",
+                "workspace_id": "00000000-0000-0000-0000-000000000789",
+            }
+        )
+    )
+    opened = []
+    monkeypatch.setattr(cli.webbrowser, "open", lambda url: opened.append(url) or True)
+    monkeypatch.setattr(
+        cli,
+        "build_product_runtime",
+        lambda *_: pytest.fail("open constructed an owner"),
+    )
+    monkeypatch.setattr(
+        cli.httpx, "Client", lambda **_: pytest.fail("open attempted HTTP")
+    )
+    assert cli.main(["open"], runtime=runtime) == 0
+    assert opened == [
+        "http://localhost:55950/workspaces/00000000-0000-0000-0000-000000000789/tasks"
+    ]
 
 
 @pytest.mark.parametrize(
