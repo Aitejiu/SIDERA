@@ -15,6 +15,8 @@ PROJECT_PATHS = {
     "sidera-control-plane": "services/control-plane",
     "sidera-akashic-task-bridge": "integrations/akashic",
     "sidera-main-agent-gateway": "services/main-agent-gateway",
+    "sidera-product": "apps/server",
+    "sidera-model-connections": "packages/model-connections",
 }
 CLOSURES = {
     "agents-core": ("sidera-agents",),
@@ -35,6 +37,14 @@ CLOSURES = {
         "sidera-main-agent-gateway",
         "sidera-akashic-task-bridge",
         "sidera-control-plane-client",
+        "sidera-runtime-guard",
+    ),
+    "native-product": (
+        "sidera-product",
+        "sidera-agents",
+        "sidera-control-plane",
+        "sidera-control-plane-client",
+        "sidera-model-connections",
         "sidera-runtime-guard",
     ),
 }
@@ -160,6 +170,56 @@ def test_selection_precedes_validation_fingerprint_build_and_aggregation(
     assert json.loads((output / "evidence.json").read_text()) == report
 
 
+@pytest.mark.parametrize("failed", [False, True])
+def test_native_product_selection_has_exact_closure_without_legacy_projects(
+    script, tmp_path, monkeypatch, capsys, failed
+):
+    expected = (
+        "sidera-product",
+        "sidera-agents",
+        "sidera-control-plane",
+        "sidera-control-plane-client",
+        "sidera-model-connections",
+        "sidera-runtime-guard",
+    )
+    repository = _repository(tmp_path, expected)
+    output = tmp_path / "evidence"
+    commands = _process_boundary(script, monkeypatch, repository, failed=failed)
+    assert script.main(
+        [
+            "--repository",
+            str(repository),
+            "--output-root",
+            str(output),
+            "--combination",
+            "native-product",
+        ]
+    ) == int(failed)
+    report = json.loads(capsys.readouterr().out)
+    selected = report["combinations"]["native-product"]
+    assert report["status"] == selected["status"] == ("FAIL" if failed else "PASS")
+    assert set(selected["source_fingerprint"]) == set(expected)
+    assert set(selected["packages"]) == set(expected)
+    assert all(
+        row == {"status": "NOT_RUN"}
+        for name, row in report["combinations"].items()
+        if name != "native-product"
+    )
+    assert [
+        Path(argv[2]).relative_to(repository).as_posix()
+        for argv in commands
+        if argv[:2] == ["uv", "build"]
+    ] == [PROJECT_PATHS[package] for package in expected]
+    probes = [argv for argv in commands if "-I" in argv]
+    assert len(probes) == 1 and set(json.loads(probes[0][5])) == set(expected)
+    assert not any("--editable" in argv for argv in commands)
+    assert [argv[-1] for argv in commands if argv[:3] == ["uv", "pip", "install"]] == [
+        "sidera-product==0.1.0"
+    ]
+    assert report["provider_calls"] == 0
+    assert json.loads((output / "evidence.json").read_text()) == report
+
+
 def test_omitted_selection_retains_all_combinations(
     script, tmp_path, monkeypatch, capsys
 ):
@@ -180,7 +240,7 @@ def test_omitted_selection_retains_all_combinations(
     assert report["status"] == "PASS"
     assert set(report["combinations"]) == set(CLOSURES)
     assert all(item["status"] == "PASS" for item in report["combinations"].values())
-    assert len([argv for argv in commands if argv[:2] == ["uv", "build"]]) == 6
+    assert len([argv for argv in commands if argv[:2] == ["uv", "build"]]) == 8
     assert {argv[argv.index("-c") + 2] for argv in commands if "-I" in argv} == set(
         CLOSURES
     )
@@ -567,4 +627,286 @@ def test_native_cp_probe_uses_public_inert_composition_and_packaged_resources(sc
         item.module for item in ast.walk(function) if isinstance(item, ast.ImportFrom)
     }
     assert "sidera_control_plane.composition.native_runtime" in imported
-    assert not any(name and (".persistence" in name or ".harnesses" in name or ".adapters" in name) for name in imported)
+    assert not any(
+        name and (".persistence" in name or ".harnesses" in name or ".adapters" in name)
+        for name in imported
+    )
+
+
+@pytest.mark.parametrize("combination", CLOSURES)
+def test_probe_argv_supplies_public_consumer_only_for_agents_and_native_product(
+    script, tmp_path, combination
+):
+    consumes_example = combination in {"agents-core", "native-product"}
+    repository = _repository(tmp_path, CLOSURES[combination])
+    wheels = {package: tmp_path / f"{package}.whl" for package in PROJECT_PATHS}
+    argv = script._probe_argv(
+        combination,
+        wheels,
+        tmp_path / "evidence",
+        repository if consumes_example else None,
+    )
+    assert argv[1:3] == ["-I", "-c"]
+    assert argv[4] == combination
+    assert json.loads(argv[5]) == {
+        package: str(wheels[package]) for package in CLOSURES[combination]
+    }
+    assert len(argv) == (7 if consumes_example else 6)
+    if consumes_example:
+        assert (
+            argv[6]
+            == (repository / "packages/agents/examples/standalone.py").read_text()
+        )
+
+
+@pytest.mark.parametrize("combination", ("agents-core", "native-product"))
+def test_consumer_probe_argv_requires_explicit_repository(
+    script, tmp_path, combination
+):
+    wheels = {package: tmp_path / f"{package}.whl" for package in PROJECT_PATHS}
+    with pytest.raises(script.CheckFailure, match="invalid_repository"):
+        script._probe_argv(combination, wheels, tmp_path / "evidence")
+
+
+def _native_product_dispatch(script, tmp_path, monkeypatch):
+    namespace = _probe_namespace(script)
+    wheels = {}
+    for package in CLOSURES["native-product"]:
+        artifact = tmp_path / f"{package}-0.1.0.whl"
+        artifact.write_bytes(b"controlled native-product wheel boundary")
+        wheels[package] = str(artifact)
+    namespace["sys"] = SimpleNamespace(
+        argv=["probe", "native-product", json.dumps(wheels), "public consumer source"]
+    )
+    namespace["_module_available"] = lambda module: False
+    namespace["wheel_record_matches"] = lambda wheel, root: True
+    monkeypatch.setattr(namespace["metadata"], "distributions", list)
+    monkeypatch.setattr(
+        namespace["metadata"],
+        "distribution",
+        lambda package: SimpleNamespace(
+            version="0.1.0", locate_file=lambda relative: tmp_path
+        ),
+    )
+    called = []
+
+    async def smoke():
+        called.append("native-product")
+
+    namespace["_probe_native_product"] = smoke
+    return namespace, called
+
+
+def test_native_product_dispatch_verifies_all_records_then_runs_async_smoke(
+    script, tmp_path, monkeypatch
+):
+    namespace, called = _native_product_dispatch(script, tmp_path, monkeypatch)
+    packages = namespace["_run_probe"]()
+    assert called == ["native-product"]
+    assert set(packages) == set(CLOSURES["native-product"])
+    assert all(
+        row["version"] == "0.1.0" and row["record_match"] is True
+        for row in packages.values()
+    )
+
+
+@pytest.mark.parametrize("package", CLOSURES["native-product"])
+def test_native_product_dispatch_rejects_any_failed_wheel_record_before_smoke(
+    script, tmp_path, monkeypatch, package
+):
+    namespace, called = _native_product_dispatch(script, tmp_path, monkeypatch)
+    namespace["wheel_record_matches"] = lambda wheel, root: (
+        Path(wheel).name != f"{package}-0.1.0.whl"
+    )
+    with pytest.raises(namespace["ProbeFailure"]) as failure:
+        namespace["_run_probe"]()
+    assert failure.value.code == "dependency_boundary_failed"
+    assert failure.value.packages[package]["record_match"] is False
+    assert called == []
+
+
+@pytest.mark.parametrize(
+    "kind,name",
+    [
+        ("module", "akashic_sdk"),
+        ("module", "sidera_task_bridge"),
+        ("module", "sidera_main_agent_gateway"),
+        ("distribution", "akashic-agent-sdk"),
+        ("distribution", "sidera-akashic-task-bridge"),
+        ("distribution", "sidera-main-agent-gateway"),
+    ],
+)
+def test_native_product_dispatch_rejects_legacy_modules_and_distributions(
+    script, tmp_path, monkeypatch, kind, name
+):
+    namespace, called = _native_product_dispatch(script, tmp_path, monkeypatch)
+    if kind == "module":
+        namespace["_module_available"] = lambda module: module == name
+    else:
+        monkeypatch.setattr(
+            namespace["metadata"],
+            "distributions",
+            lambda: [SimpleNamespace(metadata={"Name": name.replace("-", "_")})],
+        )
+    with pytest.raises(namespace["ProbeFailure"]):
+        namespace["_run_probe"]()
+    assert called == []
+
+
+def test_native_product_probe_uses_installed_resources_and_actual_public_interfaces(
+    script,
+):
+    namespace = _probe_namespace(script)
+    assert callable(namespace.get("_probe_native_product")), (
+        "Native product smoke is missing"
+    )
+    assert namespace["PROJECTS"] == CLOSURES == script.COMBINATION_PROJECTS
+    assert script.PROJECTS == PROJECT_PATHS
+    assert (
+        namespace["ABSENT_MODULES"]["native-product"]
+        == script.ABSENT_MODULES["native-product"]
+        == ("akashic_sdk", "sidera_task_bridge", "sidera_main_agent_gateway")
+    )
+    assert (
+        namespace["ABSENT_DISTRIBUTIONS"]["native-product"]
+        == script.ABSENT_DISTRIBUTIONS["native-product"]
+        == (
+            "akashic-agent-sdk",
+            "sidera-akashic-task-bridge",
+            "sidera-main-agent-gateway",
+        )
+    )
+    function = next(
+        node
+        for node in ast.parse(script.PROBE_SOURCE).body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_probe_native_product"
+    )
+    imported = {
+        (node.module, alias.name)
+        for node in ast.walk(function)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    assert {
+        ("sidera_product.app", "create_app"),
+        ("sidera_product.composition", "build_product_runtime"),
+        ("sidera_product.config", "ProductSettings"),
+        ("sidera_product", "cli"),
+    } <= imported
+    constants = {
+        node.value
+        for node in ast.walk(function)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    assert {
+        "sidera_product",
+        "sidera_product.app",
+        "sidera_product.composition",
+        "sidera_product.config",
+        "sidera_product.cli",
+        "sidera_agents",
+        "sidera_agents.api",
+        "sidera_agents.contracts",
+        "sidera_agents.ports",
+        "sidera_control_plane",
+        "sidera_control_plane.composition.native_runtime",
+        "sidera_control_plane_client",
+        "sidera_model_connections",
+        "sidera_model_connections.contracts",
+        "sidera_model_connections.postgres",
+        "sidera_runtime_guard",
+        "alembic.ini",
+        "script_location",
+        "env.py",
+        "*.py",
+        "sidera_product.cli:main",
+        "console_scripts",
+        "sidera",
+    } <= constants
+    calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)]
+    call_names = {ast.unparse(node.func) for node in calls}
+    assert {
+        "files",
+        "ConfigParser",
+        "metadata.distribution",
+        "build_product_runtime",
+        "create_app",
+    } <= call_names
+    assert any(
+        ast.unparse(node.func) == "ConfigParser"
+        and any(keyword.arg == "defaults" for keyword in node.keywords)
+        for node in calls
+    )
+    assert (
+        sum(
+            isinstance(node.func, ast.Attribute) and node.func.attr == "is_relative_to"
+            for node in calls
+        )
+        >= 4
+    )
+
+
+def test_native_product_probe_keeps_inert_guards_around_runtime_and_public_consumer(
+    script,
+):
+    function = next(
+        (
+            node
+            for node in ast.parse(script.PROBE_SOURCE).body
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "_probe_native_product"
+        ),
+        None,
+    )
+    assert function is not None, "Native product smoke is missing"
+    guard = next(
+        (
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.With)
+            and {
+                (
+                    ast.unparse(item.context_expr.args[0]),
+                    item.context_expr.args[1].value,
+                )
+                for item in node.items
+                if isinstance(item.context_expr, ast.Call)
+                and ast.unparse(item.context_expr.func) == "patch.object"
+            }
+            >= {("Engine", "connect"), ("subprocess", "Popen")}
+        ),
+        None,
+    )
+    assert guard is not None, "DB and native process guards must surround the smoke"
+    calls = [node for node in ast.walk(guard) if isinstance(node, ast.Call)]
+    call_names = {ast.unparse(node.func) for node in calls}
+    assert {
+        "build_product_runtime",
+        "create_app",
+        "httpx.AsyncClient",
+        "httpx.ASGITransport",
+        "cli.main",
+        "exec",
+        "runtime.close",
+    } <= call_names
+    assert not any(
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"start", "start_background", "bootstrap", "migrate"}
+        for node in calls
+    )
+    assert any(
+        ast.unparse(node.func) == "runtime.close"
+        and [
+            (keyword.arg, ast.literal_eval(keyword.value)) for keyword in node.keywords
+        ]
+        == [("grace_seconds", 0)]
+        for node in calls
+    )
+    assert (
+        sum(
+            isinstance(node, ast.Attribute) and node.attr == "modules"
+            for node in ast.walk(function)
+        )
+        >= 2
+    )

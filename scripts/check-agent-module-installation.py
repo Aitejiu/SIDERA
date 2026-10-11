@@ -16,6 +16,8 @@ PROJECTS = {
     "sidera-control-plane": "services/control-plane",
     "sidera-akashic-task-bridge": "integrations/akashic",
     "sidera-main-agent-gateway": "services/main-agent-gateway",
+    "sidera-product": "apps/server",
+    "sidera-model-connections": "packages/model-connections",
 }
 REQUIREMENTS = {
     "agents-core": "sidera-agents==0.1.0",
@@ -25,6 +27,7 @@ REQUIREMENTS = {
     "gateway-core": "sidera-main-agent-gateway==0.1.0",
     "bridge-client": "sidera-akashic-task-bridge==0.1.0",
     "gateway-demo": "sidera-main-agent-gateway[demo]==0.1.0",
+    "native-product": "sidera-product==0.1.0",
 }
 COMBINATION_PROJECTS = {
     "agents-core": ("sidera-agents",),
@@ -53,6 +56,14 @@ COMBINATION_PROJECTS = {
         "sidera-control-plane-client",
         "sidera-runtime-guard",
     ),
+    "native-product": (
+        "sidera-product",
+        "sidera-agents",
+        "sidera-control-plane",
+        "sidera-control-plane-client",
+        "sidera-model-connections",
+        "sidera-runtime-guard",
+    ),
 }
 SOURCE_ROOTS = {
     "sidera-agents": "packages/agents/src",
@@ -61,6 +72,8 @@ SOURCE_ROOTS = {
     "sidera-control-plane": "services/control-plane/src",
     "sidera-akashic-task-bridge": "integrations/akashic/sidera_task_bridge",
     "sidera-main-agent-gateway": "services/main-agent-gateway/src",
+    "sidera-product": "apps/server/src",
+    "sidera-model-connections": "packages/model-connections/src",
 }
 ABSENT_MODULES = {
     "agents-core": (
@@ -110,6 +123,11 @@ ABSENT_MODULES = {
         "sidera_main_agent_gateway",
     ),
     "gateway-demo": ("akashic_sdk", "sidera_control_plane"),
+    "native-product": (
+        "akashic_sdk",
+        "sidera_task_bridge",
+        "sidera_main_agent_gateway",
+    ),
 }
 ABSENT_DISTRIBUTIONS = {
     "agents-core": (
@@ -161,6 +179,11 @@ ABSENT_DISTRIBUTIONS = {
         "sidera-main-agent-gateway",
     ),
     "gateway-demo": ("akashic-agent-sdk", "sidera-control-plane"),
+    "native-product": (
+        "akashic-agent-sdk",
+        "sidera-akashic-task-bridge",
+        "sidera-main-agent-gateway",
+    ),
 }
 
 
@@ -253,6 +276,10 @@ PROJECTS = {
         "sidera-control-plane-client",
         "sidera-runtime-guard",
     ),
+    "native-product": (
+        "sidera-product", "sidera-agents", "sidera-control-plane",
+        "sidera-control-plane-client", "sidera-model-connections", "sidera-runtime-guard",
+    ),
 }
 ABSENT_MODULES = {
     "agents-core": (
@@ -279,6 +306,9 @@ ABSENT_MODULES = {
         "akashic_sdk", "sidera_control_plane", "sidera_main_agent_gateway",
     ),
     "gateway-demo": ("akashic_sdk", "sidera_control_plane"),
+    "native-product": (
+        "akashic_sdk", "sidera_task_bridge", "sidera_main_agent_gateway",
+    ),
 }
 ABSENT_DISTRIBUTIONS = {
     "agents-core": (
@@ -307,6 +337,9 @@ ABSENT_DISTRIBUTIONS = {
         "akashic-agent-sdk", "sidera-control-plane", "sidera-main-agent-gateway",
     ),
     "gateway-demo": ("akashic-agent-sdk", "sidera-control-plane"),
+    "native-product": (
+        "akashic-agent-sdk", "sidera-akashic-task-bridge", "sidera-main-agent-gateway",
+    ),
 }
 
 class ProbeFailure(Exception):
@@ -452,6 +485,184 @@ def _probe_control_plane_agents():
             raise ProbeFailure("probe_failed")
     if any(module == prefix or module.startswith(prefix + ".") for module in sys.modules for prefix in forbidden):
         raise ProbeFailure("dependency_boundary_failed")
+
+async def _probe_native_product():
+    import httpx
+    import subprocess
+    from sqlalchemy.engine import Engine, URL
+    from tempfile import TemporaryDirectory
+    from unittest.mock import patch
+    from uuid import UUID
+
+    forbidden = (
+        "sidera_control_plane.adapters.opencode_acp",
+        "sidera_control_plane.adapters.opencode_planner",
+        "sidera_control_plane.adapters.dsh_acp",
+        "sidera_control_plane.adapters.acp_process",
+    )
+    if any(
+        module == prefix or module.startswith(prefix + ".")
+        for module in sys.modules for prefix in forbidden
+    ):
+        raise ProbeFailure("dependency_boundary_failed")
+
+    def reject_external_action(*args, **kwargs):
+        raise ProbeFailure("probe_failed")
+
+    with (
+        patch.object(Engine, "connect", side_effect=reject_external_action),
+        patch.object(subprocess, "Popen", side_effect=reject_external_action),
+    ):
+        installed_roots = {}
+        for distribution, modules in (
+            ("sidera-product", (
+                "sidera_product", "sidera_product.app", "sidera_product.composition",
+                "sidera_product.config", "sidera_product.cli",
+            )),
+            ("sidera-agents", (
+                "sidera_agents", "sidera_agents.api", "sidera_agents.contracts",
+                "sidera_agents.ports",
+            )),
+            ("sidera-control-plane", (
+                "sidera_control_plane", "sidera_control_plane.composition.native_runtime",
+            )),
+            ("sidera-control-plane-client", ("sidera_control_plane_client",)),
+            ("sidera-model-connections", (
+                "sidera_model_connections", "sidera_model_connections.contracts",
+                "sidera_model_connections.postgres",
+            )),
+            ("sidera-runtime-guard", ("sidera_runtime_guard",)),
+        ):
+            installed = Path(metadata.distribution(distribution).locate_file("")).resolve()
+            if not installed.is_relative_to(Path(sys.prefix).resolve()):
+                raise ProbeFailure("dependency_boundary_failed")
+            installed_roots[distribution] = installed
+            for name in modules:
+                origin = getattr(importlib.import_module(name), "__file__", None)
+                if not origin or not Path(origin).resolve().is_relative_to(installed):
+                    raise ProbeFailure("dependency_boundary_failed")
+        for distribution, name in (
+            ("sidera-product", "sidera_product"),
+            ("sidera-agents", "sidera_agents"),
+            ("sidera-control-plane", "sidera_control_plane"),
+            ("sidera-model-connections", "sidera_model_connections"),
+        ):
+            package = Path(str(files(name))).resolve()
+            if not package.is_relative_to(installed_roots[distribution]):
+                raise ProbeFailure("dependency_boundary_failed")
+            config = ConfigParser(defaults={"here": str(package)})
+            config.read_string((package / "alembic.ini").read_text(encoding="utf-8"))
+            migrations = Path(config.get("alembic", "script_location")).resolve()
+            if (
+                not migrations.is_relative_to(package)
+                or not (migrations / "env.py").is_file()
+                or not any(path.is_file() for path in (migrations / "versions").glob("*.py"))
+            ):
+                raise ProbeFailure("dependency_boundary_failed")
+
+        from sidera_product import cli
+        from sidera_product.app import create_app
+        from sidera_product.composition import build_product_runtime
+        from sidera_product.config import ProductSettings
+
+        with TemporaryDirectory(prefix="sidera-installed-product-") as temporary:
+            scratch = Path(temporary).resolve()
+            targets = {
+                component: URL.create(
+                    "postgresql+psycopg",
+                    username=f"unused_{component}",
+                    database=f"unused_{component}",
+                    query={"host": str(scratch / "missing-db-socket"), "port": "5432"},
+                ).render_as_string(hide_password=False)
+                for component in ("product", "agents", "cp", "credentials")
+            }
+            settings = ProductSettings(
+                _env_file=None,
+                product_database_url=targets["product"],
+                agent_database_url=targets["agents"],
+                cp_database_url=targets["cp"],
+                credential_database_url=targets["credentials"],
+                deployment_namespace=UUID("40000000-0000-0000-0000-000000000001"),
+                workspace_id=UUID("40000000-0000-0000-0000-000000000002"),
+                local_principal_id="installed-product-user",
+                workspace_root=scratch / "workspaces",
+                artifact_root=scratch / "artifacts",
+                bind_host="127.0.0.1",
+                port=18080,
+                web_origin="http://127.0.0.1:5173",
+                managed_credentials_enabled=False,
+                selected_secrets={},
+                knowledge_base_url=None,
+                knowledge_token=None,
+            )
+            runtime = build_product_runtime(settings)
+            try:
+                if (
+                    runtime.execution is not runtime.agents.execution
+                    or runtime.authority.control_plane is not runtime.control_plane.execution_authorizer
+                    or runtime.sources.control_plane is not runtime.control_plane.context_source_reader
+                ):
+                    raise ProbeFailure("probe_failed")
+                app = create_app(runtime=runtime)
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url=settings.local_url
+                ) as client:
+                    if (await client.get("/healthz")).status_code != 200:
+                        raise ProbeFailure("probe_failed")
+                    if (await client.get("/api/v1/tasks")).status_code != 401:
+                        raise ProbeFailure("probe_failed")
+                    profiles = await client.get(
+                        f"/agents/v1/workspaces/{settings.workspace_id}/profiles"
+                    )
+                    if (
+                        profiles.status_code != 401
+                        or profiles.json().get("detail", {}).get("code") != "local_session_required"
+                    ):
+                        raise ProbeFailure("probe_failed")
+                    response = await client.get("/product/v1/status")
+                    if response.status_code != 200:
+                        raise ProbeFailure("probe_failed")
+                    status = response.json()
+                    if (
+                        status.get("execution", {}).get("ready") is not False
+                        or status.get("main_agent", {}).get("available") is not False
+                        or status.get("knowledge", {}).get("available") is not False
+                    ):
+                        raise ProbeFailure("probe_failed")
+                entry_points = [
+                    entry for entry in metadata.distribution("sidera-product").entry_points
+                    if entry.group == "console_scripts" and entry.name == "sidera"
+                ]
+                if len(entry_points) != 1 or entry_points[0].value != "sidera_product.cli:main":
+                    raise ProbeFailure("probe_failed")
+                opened = []
+                with (
+                    patch.object(cli.webbrowser, "open", side_effect=lambda url: opened.append(url) or True),
+                    patch.object(cli, "build_product_runtime", side_effect=reject_external_action) as owner,
+                ):
+                    if (
+                        cli.main(["open"], settings=settings) != 0
+                        or opened != [f"{settings.web_origin}/workspaces/{settings.workspace_id}/tasks"]
+                        or owner.call_count != 0
+                    ):
+                        raise ProbeFailure("probe_failed")
+                consumer = {"__name__": "installed_agents_consumer"}
+                exec(compile(sys.argv[3], "standalone-public-consumer", "exec"), consumer)
+                if consumer["main"]() != {
+                    "harness_id": "fixture-harness", "state": "completed",
+                    "messages": ["Fixture response."], "closed": True,
+                    "profile_status": {"enabled": False, "version": 2},
+                    "resource_status": {"enabled": False, "version": 2},
+                }:
+                    raise ProbeFailure("probe_failed")
+            finally:
+                if runtime.close(grace_seconds=0) is not True:
+                    raise ProbeFailure("probe_failed")
+        if any(
+            module == prefix or module.startswith(prefix + ".")
+            for module in sys.modules for prefix in forbidden
+        ):
+            raise ProbeFailure("dependency_boundary_failed")
 
 async def _probe_public_client():
     import httpx
@@ -630,6 +841,8 @@ def _run_probe():
             _probe_bridge_client()
         elif name == "gateway-demo":
             _probe_gateway_demo()
+        elif name == "native-product":
+            asyncio.run(_probe_native_product())
         else:
             raise ProbeFailure("probe_failed")
     except ProbeFailure as failure:
@@ -880,7 +1093,7 @@ def _probe_argv(
         name,
         json.dumps(selected, sort_keys=True, separators=(",", ":")),
     ]
-    if name == "agents-core":
+    if name in {"agents-core", "native-product"}:
         if repository is None:
             raise CheckFailure("invalid_repository", name)
         example = repository / PROJECTS["sidera-agents"] / "examples" / "standalone.py"
