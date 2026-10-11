@@ -4,6 +4,14 @@
 文末保留无模型演示和 legacy 运行栈，两者不是新版的必需依赖。
 当前范围是桌面、本机单人和内置 OpenCode，不支持公网部署。
 
+> **版本选择：** 本页的新版步骤对应 `feat/native-harness-modularity` 分支，不是旧版
+> `main` 的安装方法。请从下面的 clone 命令开始，不要将新版命令、旧数据库和演示 seed 混用。
+
+真实执行按顺序完成：[安装](#安装新版) → [数据库与环境](#配置产品环境) →
+[凭据](#配置模型凭据) → [启动与登录](#启动与连接网页) →
+[项目配置](#配置项目与验证) → [首次任务](../guide/workspace.md#试一个有依赖的小任务)。
+不准备配置模型的用户可直接选[无模型演示](#可操作的网页版演示)，不必执行真实运行步骤。
+
 ## 新版环境要求
 
 - Node.js 24、npm、Python 3.12、`uv`、Git，以及浏览器。
@@ -20,7 +28,7 @@ Web 当前仍从仓库运行，尚无打包的前端安装器或已发布的 PyP
 已有仓库可跳过 clone。在项目根目录执行：
 
 ```bash
-git clone https://github.com/Aitejiu/SIDERA.git
+git clone --branch feat/native-harness-modularity https://github.com/Aitejiu/SIDERA.git
 cd SIDERA
 npm --prefix apps/web ci
 SIDERA_INSTALL_ROOT="$(mktemp -d /private/tmp/sidera-install.XXXXXX)"
@@ -34,12 +42,31 @@ export PATH="$SIDERA_INSTALL_ROOT/native-product-venv/bin:$PATH"
 不调用模型，也不迁移你的业务库。需要 `uv` 在 PATH 中，构建和下载依赖需要网络。
 只选择 `native-product`；其他 legacy 组合显示 `NOT_RUN` 是预期结果，不应补跑全部组合。
 确认该组合通过后再继续。临时安装目录适合首次体验；重新安装时使用新的空目录。
+已有仓库先用 `git branch --show-current` 核对分支；若本地有未提交修改，保留原目录，
+另行 clone 到新目录体验，不要为切分支清空自己的改动。
+
+记下 `SIDERA_INSTALL_ROOT` 的实际值。新终端不会继承上一个终端里的变量和 PATH；
+后续运行 CLI 的终端都需要重新设置安装目录和上述 PATH。
 
 ## 配置产品环境
 
 以下是占位配置。先由本机数据库管理员创建四个专用数据库并授予应用角色所需权限，
 再替换数据库名、角色、端口和目录。连接需要密码时使用受保护的本地配置，不要提交
 带密码的 URL。PostgreSQL 本机安装可参考[数据库说明](../../services/control-plane/README.md#native-postgresql)。
+
+以下示例假定 PostgreSQL 已监听本机 `55432`，`sidera` 角色已创建且当前用户有创建库
+并指定 owner 的权限；数据库工具需要在 PATH 中。只在首次安装时创建：
+
+```bash
+pg_isready -h 127.0.0.1 -p 55432
+createdb -h 127.0.0.1 -p 55432 -O sidera sidera_native_product
+createdb -h 127.0.0.1 -p 55432 -O sidera sidera_native_agents
+createdb -h 127.0.0.1 -p 55432 -O sidera sidera_native_cp
+createdb -h 127.0.0.1 -p 55432 -O sidera sidera_native_credentials
+```
+
+遇到同名库已存在时，先确认归属和用途，不要删除或重置它们。使用其他端口、角色或
+数据库名时，要同步替换下面的四条 URL。安装在别处的 PostgreSQL 不必改成示例端口。
 
 ```bash
 export SIDERA_PRODUCT_PRODUCT_DATABASE_URL="postgresql+psycopg://sidera@127.0.0.1:55432/sidera_native_product"
@@ -58,6 +85,9 @@ export SIDERA_PRODUCT_WEB_ORIGIN="http://127.0.0.1:5173"
 principal、数据库和存储目录稳定。`AGENT_DATABASE_URL` 是单数。
 配置从启动进程环境读取，不会自动发现项目中的 `.env`，也不继承旧 `SIDERA_DATABASE_URL`。
 在后续每个终端加载同一组受保护的配置。
+建议将这些非密钥环境设置及安装目录保存在仓库外的私有 shell 配置文件中，限制为
+本人可读，并在每个相关终端手动 `source`；模型 key 仍通过下方的凭据入口管理。
+重启要复用原配置，不要每次生成新 UUID。
 
 默认后端 `127.0.0.1:18080`、单进程、无 reload；结果输入和集成默认开启。
 显式迁移并检查，不要运行演示 seed：
@@ -168,6 +198,39 @@ WorkerItem 用于查看步骤和局部介入，Trace 是进一步检查的入口
 先正常停止活动对话，再停止产品服务和 Web。若关闭返回 pending/UNKNOWN，应保留原
 资源并继续查询/正常关闭，不能认为清理已成功。重启复用同一组稳定配置，不重新 seed。
 Knowledge 是独立可选服务；当前默认安装没有自动启用知识库、团队分享或其他 Harness。
+
+## 新版常见问题
+
+### 找不到 `sidera` 命令
+
+核对安装检查的 `native-product` 组合是否通过，并将本次安装目录的
+`native-product-venv/bin` 加回当前终端 PATH。另开终端后需要重新加载安装目录和产品配置；
+不要改用旧 Gateway 命令来代替新版服务。
+
+### preflight 失败或页面提示需要本地会话
+
+先检查四个数据库、URL、角色与迁移结果。`storage_ready` 为 `true` 仅表示存储准备好，
+不是模型已经可用。页面需要会话时重新签发 bootstrap，在五分钟内兑换；过期或已消费的
+令牌不能重复使用。后端、Vite proxy、Web origin 及浏览器实际访问地址必须一致。
+
+### 保存了 Profile，但没有回复或任务没有启动
+
+确认 Profile 和 Runtime 已启用，模型路由和凭据绑定匹配，并检查工作区的项目/Planner/
+验证命令是否已配置。原生 Run 不读取全局 OpenCode 登录，单独运行 CLI 成功不能代替这里的
+凭据配置。主 Agent 回复不等于已提交规划；查看关联规划状态，并显式确认当前方案。
+用“测试已保存 Profile”诊断模型连接也会产生真实费用。
+
+### 任务一直等待，或者 Worker 不能改代码
+
+先查看当前卡点、前置依赖和 Runtime 共享容量；主对话、Planner、Worker 都可能占用容量。
+不要在不了解账户费用的情况下无限提高并发。编码 Worker 的 Profile 需明确选择
+`Native coding tools=write` 并具备对应工作空间授权，保存后的配置只用于新的安排。
+已有执行不会因你编辑默认值自动改变，运行中的调整要走明确的负责人交接。
+
+### 介入不可用、操作结果未知或知识页不可用
+
+会话结束后不自动续作，输入不可用不表示介入消息丢失。结果未知时查询原操作，不重复
+提交或重建任务。知识服务需要独立配置；它不可用不等于任务控制面没有启动。
 
 ---
 

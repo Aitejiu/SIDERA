@@ -38,19 +38,72 @@
 | 知识库 | 独立可选服务，不是默认安装后即可使用的能力 |
 | 团队与远程部署 | 尚不支持邀请、跨用户共享和生产级权限隔离；请勿部署到公网 |
 
-## 开始体验
+## 安装与启动
 
 需要 Node.js 24、Python 3.12、`uv`、Git、PostgreSQL 16 和本机 OpenCode。
 新版不需要 Akashic 或 Docker；真实执行会产生你所选服务商的调用费用。
 目前从源码安装，尚未提供一键安装器。
 
-跟随[安装与启动](docs/deployment/initial-demo.md)准备环境，再按这个顺序使用：
+先获取新版源码，安装 Web 依赖和隔离的后端环境：
 
-1. 登记运行环境，创建 Profile，设置默认安排和项目的验证命令。
-2. 与主 Agent 沟通目标，查看规划及负责人，确认准确版本后开始执行。
-3. 用看板或 DAG 跟踪任务，进入 WorkerItem 查看步骤、介入和 Trace，最后检查并验收成果。
+```bash
+git clone --branch feat/native-harness-modularity https://github.com/Aitejiu/SIDERA.git
+cd SIDERA
+npm --prefix apps/web ci
+SIDERA_INSTALL_ROOT="$(mktemp -d /private/tmp/sidera-install.XXXXXX)"
+python3.12 scripts/check-agent-module-installation.py \
+  --repository "$PWD" --output-root "$SIDERA_INSTALL_ROOT" \
+  --combination native-product
+export PATH="$SIDERA_INSTALL_ROOT/native-product-venv/bin:$PATH"
+```
 
-完整的页面操作见[使用指南](docs/guide/workspace.md)。请先在可以试验的 Git 项目中体验，
+接着按[安装指南](docs/deployment/initial-demo.md#配置产品环境)创建四个专用数据库、
+设置产品环境，并按[凭据设置](docs/deployment/initial-demo.md#配置模型凭据)启用本地凭据入口。
+不要跳过环境配置直接启动；产品不会自动读取 `.env` 或导入全局 OpenCode 登录。
+准备完成后执行：
+
+```bash
+sidera migrate
+sidera preflight --json
+```
+
+检查通过后，在加载了同一组配置的终端中启动后端：
+
+```bash
+sidera serve --host 127.0.0.1 --port 18080
+```
+
+另开终端，在仓库根目录启动 Web：
+
+```bash
+SIDERA_WEB_BACKEND=native \
+SIDERA_WEB_PRODUCT_URL=http://127.0.0.1:18080 \
+npm --prefix apps/web run dev -- --port 5173 --strictPort
+```
+
+第三个终端加载同一组产品配置和安装环境：
+
+```bash
+sidera session bootstrap
+sidera open
+```
+
+在打开的网页进入“智能体”→“本地会话”，使用 bootstrap 输出的私有文件里的 `token`
+连接。不要粘贴文件路径或整份 JSON；该令牌默认五分钟内有效，只能兑换一次。
+
+只想看页面、不希望调用模型？选择[无模型演示](docs/deployment/initial-demo.md#可操作的网页版演示)，
+它与上面的真实执行使用独立环境，不要混用数据库或启动命令。
+
+## 第一次使用
+
+1. **配置智能体。** 在“运行环境”登记本机 OpenCode，在“新建 Profile”中配置模型、指令和凭据；需要改代码的 Worker 要明确启用编码工具权限。
+2. **安排角色。** 在“默认安排”指定 Main、Planner 和 Worker；可复用同一个 Profile，也可分别配置。Runtime 容量由这些 Profile 共享。
+3. **连接项目。** 使用[项目配置命令](docs/deployment/initial-demo.md#配置项目与验证)登记要处理的 Git 仓库、Planner 和真正的验证命令。这一步目前仍需 CLI。
+4. **提交并确认。** 与主 Agent 描述目标和验收标准，查看关联规划，确认子任务、依赖和负责人后开始执行。仅收到聊天回复不代表任务已开始。
+5. **跟踪并介入。** 日常看任务与子任务的看板；需要理解依赖时切换 DAG。点进 WorkerItem 查看步骤、发送局部要求，必要时展开 Trace。
+6. **检查并验收。** 查看成果、变更和项目检查结果，再显式验收；后续是否应用到原项目由你决定。
+
+完整操作和[首个任务示例](docs/guide/workspace.md#试一个有依赖的小任务)见使用指南。请先在可以试验的 Git 项目中体验，
 为 Agent 明确配置权限和检查命令，不要把不可恢复的数据交给未验证的自动化执行。
 
 ## 接下来要做什么
