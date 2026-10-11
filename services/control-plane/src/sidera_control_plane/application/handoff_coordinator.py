@@ -706,29 +706,44 @@ class HandoffCoordinator:
     def _start_target_session(self, transition: HandoffTransition) -> HandoffStepResult:
         scheduler = self._require_scheduler()
         gateway = self._require_gateway()
-        assignment = scheduler.assign_handoff_target(
-            workspace_id=transition.workspace_id,
-            transition_id=transition.id,
-            expected_transition_version=transition.version,
-            now=self._clock(),
-        )
+        terminal_native_target = False
         if transition.handoff_schema_version == 2:
-            if assignment is None:
-                return HandoffStepResult.wait(pending_reason="target_waiting_capacity")
             with self._uow_factory() as uow:
-                reserved = uow.handoff_transitions.get(
-                    transition.id, transition.workspace_id
+                target = (
+                    uow.executions.get(
+                        transition.target_execution_id, transition.workspace_id
+                    )
+                    if transition.target_execution_id is not None else None
                 )
-            if (
-                reserved is None
-                or reserved.lease_owner != transition.lease_owner
-                or reserved.phase is not transition.phase
-            ):
-                raise HandoffCoordinatorError(
-                    "native handoff reservation claim changed"
-                )
-            transition.version = reserved.version
-            transition.target_worker_id = reserved.target_worker_id
+            terminal_native_target = target is not None and target.status in {
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELED,
+            }
+        if not terminal_native_target:
+            assignment = scheduler.assign_handoff_target(
+                workspace_id=transition.workspace_id,
+                transition_id=transition.id,
+                expected_transition_version=transition.version,
+                now=self._clock(),
+            )
+            if transition.handoff_schema_version == 2:
+                if assignment is None:
+                    return HandoffStepResult.wait(pending_reason="target_waiting_capacity")
+                with self._uow_factory() as uow:
+                    reserved = uow.handoff_transitions.get(
+                        transition.id, transition.workspace_id
+                    )
+                if (
+                    reserved is None
+                    or reserved.lease_owner != transition.lease_owner
+                    or reserved.phase is not transition.phase
+                ):
+                    raise HandoffCoordinatorError(
+                        "native handoff reservation claim changed"
+                    )
+                transition.version = reserved.version
+                transition.target_worker_id = reserved.target_worker_id
         result = gateway.start_handoff_target(
             workspace_id=transition.workspace_id,
             transition_id=transition.id,

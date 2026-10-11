@@ -33,11 +33,14 @@ from sidera_control_plane.application.handoff_coordinator import HandoffCoordina
 from sidera_control_plane.application.profile_handoff import (
     validate_native_handoff_confirmation,
 )
+from sidera_control_plane.application.scheduler import Scheduler
 from sidera_control_plane.application.worker_gateway import (
     GatewayMessageError,
     GatewayRecoveryRequired,
     WorkerGateway,
 )
+from sidera_control_plane.application.worker_policy import LowestCostWorkerPolicy
+from sidera_control_plane.application.worker_runtime import ResolvedWorkerRuntime
 from sidera_control_plane.application.workspace_handoff import (
     WorkspaceHandoffError,
     WorkspaceHandoffService,
@@ -87,6 +90,8 @@ from sidera_control_plane.domain.modules import (
 )
 from sidera_control_plane.domain.task import Task
 from sidera_control_plane.domain.worker import Worker
+from sidera_control_plane.domain.worker_item import WorkerItem
+from sidera_control_plane.domain.worker_item_projections import WorkerItemPlacementFact
 from sidera_control_plane.domain.workspace import (
     ExecutionWorkspaceManifest,
     WorkspaceLifecycle,
@@ -272,7 +277,7 @@ class TargetNative:
         return forbidden
 
 
-def make_start_case(*, session=True, claim="released", target_fence=1):
+def make_start_case(*, session=True, claim="released", target_fence=1, real_scheduler=False):
     from contextlib import contextmanager
 
     source = make_drain_case()
@@ -328,7 +333,7 @@ def make_start_case(*, session=True, claim="released", target_fence=1):
         execution_id=authority.execution_id, workspace_id=authority.workspace_id,
         task_id=authority.target_id, worker_item_id=transition.worker_item_id,
         lineage_id=uuid4(), attempt=1, max_attempts=1, purpose="code",
-        capability_requirements=frozenset({"code"}), pinned_worker_id=worker.id,
+        capability_requirements=frozenset({"code"}), pinned_worker_id=None,
         not_before=NOW, source_execution_id=source_execution.id,
         source_session_id=transition.source_session_id, handoff_transition_id=transition.id,
     )
@@ -337,7 +342,9 @@ def make_start_case(*, session=True, claim="released", target_fence=1):
         lease_id=authority.lease_id, workspace_id=authority.workspace_id,
         execution_id=execution.id, worker_id=worker.id, issued_at=NOW,
         expires_at=NOW + timedelta(minutes=5), fencing_token=target_fence,
-        assignment_reason={"reason": "exact native target"},
+        assignment_reason={
+            "policy": "handoff-native-v2", "handoff_transition_id": str(transition.id),
+        },
     )
     manifest = ExecutionWorkspaceManifest.create(
         id=authority.workspace_ref, workspace_id=authority.workspace_id,
@@ -482,11 +489,18 @@ def make_start_case(*, session=True, claim="released", target_fence=1):
         priority=1, requested_by=authority.principal_id,
     )
     uow.tasks = DrainRecords((task,))
-    uow.worker_items = DrainRecords((SimpleNamespace(
-        id=transition.worker_item_id, workspace_id=authority.workspace_id,
-        root_task_id=transition.native_payload.root_task_id, context_version=1,
+    uow.worker_items = DrainRecords((WorkerItem.create(
+        item_id=transition.worker_item_id, workspace_id=authority.workspace_id,
+        root_task_id=transition.native_payload.root_task_id,
+        title="Native handoff", responsibility="Continue the admitted Run", now=NOW,
     ),))
-    uow.worker_items.get_current_placement = lambda *a: None
+    placement = WorkerItemPlacementFact(
+        transition.native_payload.observed_plan_snapshot_id,
+        transition.native_payload.observed_plan_generation,
+        transition.worker_item_id, "native", "native", execution.task_id,
+        "implementation", ("code",),
+    )
+    uow.worker_items.get_current_placement = lambda *a: placement
     uow.plans = SimpleNamespace(get_head=lambda *a, **k: None)
     uow.results = SimpleNamespace(get_head=lambda *a, **k: None)
     uow.agent_bindings = SimpleNamespace(
@@ -499,6 +513,9 @@ def make_start_case(*, session=True, claim="released", target_fence=1):
     )
     uow.context_packages = SimpleNamespace(
         get=lambda identifier, workspace, **k: package if identifier == package.package_id else None,
+        get_for_consumer=lambda purpose, consumer, workspace, **k: package
+        if (purpose, consumer, workspace) == (ContextPurpose.EXECUTION, execution.id, authority.workspace_id)
+        else None,
         get_ack=lambda *a, **k: None,
     )
     uow.context_assemblies = SimpleNamespace(get_for_consumer=lambda *a, **k: assembly)
@@ -565,9 +582,20 @@ def make_start_case(*, session=True, claim="released", target_fence=1):
             workspace_id=authority.workspace_id, execution_id=execution.id
         )),
     )
+    scheduler = SimpleNamespace(assign_handoff_target=lambda **k: binding)
+    if real_scheduler:
+        runtime = ResolvedWorkerRuntime(
+            worker.id, worker.adapter_type, adapter_instance.id, 1,
+            workspace_instance.id, 1, adapter_definition.id, workspace_definition.id,
+            capabilities, {"execution_mode": "native"}, workspace_definition.capabilities,
+        )
+        scheduler = Scheduler(
+            uow_factory, LowestCostWorkerPolicy(), clock=lambda: NOW,
+            runtime_resolver=SimpleNamespace(lock_and_resolve=lambda *a: runtime),
+        )
     s.coordinator = HandoffCoordinator(
         uow_factory=uow_factory, gateway=s.gateway,
-        scheduler=SimpleNamespace(assign_handoff_target=lambda **k: binding),
+        scheduler=scheduler,
         clock=lambda: NOW, owner_id="native-start", lease_ttl_seconds=30,
     )
     return s
@@ -646,6 +674,7 @@ def start_target(s):
 def projection_targets(s):
     authority = s.authority
     return (
+        ("profile.read", authority.profile_ref),
         ("workspace.execute", authority.execution_workspace),
         ("source.read", authority.sources[0]),
         ("tool.execute", authority.tools[0]),
@@ -668,14 +697,15 @@ def test_admitted_projection_uses_durable_lease_between_claims(claim, link_statu
     s = make_start_case(claim=claim)
     s.link = replace(s.link, status=link_status)
     project_async(s)
-    assert len(s.host_calls) == 5 and s.outputs == ["secret", "native_open"]
+    assert len(s.host_calls) == 6 and s.outputs == ["secret", "native_open"]
 
 
 @pytest.mark.parametrize("claim", ("released", "expired"))
 @pytest.mark.parametrize("bad", (
-    "no_run", "receipt_missing", "receipt_unknown", "receipt_busy", "receipt_operation",
+    "no_run", "receipt_missing", "receipt_unknown", "receipt_busy", "receipt_rejected", "receipt_operation",
     "receipt_run", "session_missing", "session_id", "session_execution", "session_adapter",
     "session_closed", "transition_session", "link_terminal", "link_unknown", "phase", "blocked",
+    "blocked_unknown", "failed",
 ))
 def test_between_claims_projection_requires_exact_admission(claim, bad):
     s = make_start_case(claim=claim)
@@ -687,8 +717,8 @@ def test_between_claims_projection_requires_exact_admission(claim, bad):
         s.link = replace(s.link, start_receipt=None)
     elif bad.startswith("receipt_"):
         receipt = s.link.start_receipt.model_copy(update={
-            {"receipt_unknown": "status", "receipt_busy": "status", "receipt_operation": "operation_id", "receipt_run": "run_id"}[bad]:
-            {"receipt_unknown": StartStatus.UNKNOWN, "receipt_busy": StartStatus.BUSY, "receipt_operation": uuid4(), "receipt_run": uuid4()}[bad]
+            {"receipt_unknown": "status", "receipt_busy": "status", "receipt_rejected": "status", "receipt_operation": "operation_id", "receipt_run": "run_id"}[bad]:
+            {"receipt_unknown": StartStatus.UNKNOWN, "receipt_busy": StartStatus.BUSY, "receipt_rejected": StartStatus.REJECTED, "receipt_operation": uuid4(), "receipt_run": uuid4()}[bad]
         })
         # Deliberately corrupt storage; normal constructors reject foreign receipts.
         object.__setattr__(s.link, "start_receipt", receipt)
@@ -713,17 +743,17 @@ def test_between_claims_projection_requires_exact_admission(claim, bad):
     elif bad == "phase":
         transition.phase = HandoffPhase.ACKNOWLEDGE_CONTEXT
     else:
-        transition.status = HandoffTransitionStatus.BLOCKED
+        transition.status = HandoffTransitionStatus(bad)
     with pytest.raises(AgentError, match="Execution authority denied"):
         project_async(s)
     assert not s.native.reads and not s.outputs
 
 
 @pytest.mark.parametrize("claim", ("released", "expired"))
-@pytest.mark.parametrize("action", ("run.start", "run.input", "run.interrupt", "run.recover", "profile.read", "runtime.read"))
+@pytest.mark.parametrize("action", ("run.start", "run.input", "run.interrupt", "run.recover", "runtime.read"))
 def test_admitted_projection_exception_cannot_issue_control_actions(claim, action):
     s = make_start_case(claim=claim)
-    target = {"run.start": s.authority.profile_ref, "profile.read": s.authority.profile_ref, "runtime.read": s.authority.runtime_ref}.get(action, s.authority.workspace_id)
+    target = {"run.start": s.authority.profile_ref, "runtime.read": s.authority.runtime_ref}.get(action, s.authority.workspace_id)
     with pytest.raises(AgentError):
         s.reader.require(s.authority.id, action, target)
 
@@ -740,7 +770,7 @@ def test_original_dispatch_under_held_claim_keeps_preadmission_resolution():
 
 
 @pytest.mark.parametrize("claim", ("held", "released", "expired"))
-@pytest.mark.parametrize("action_index", range(5))
+@pytest.mark.parametrize("action_index", range(6))
 def test_ack_scope_still_allows_only_source_read_under_a_held_claim(claim, action_index):
     s = make_start_case(claim=claim)
     transition = s.uow.handoff_transitions.item
@@ -821,11 +851,12 @@ def test_async_projection_preserves_authority_fences_and_real_source_cleanup(bad
     assert not s.native.reads and not s.outputs
 
 
-@pytest.mark.parametrize("action_index", range(5))
+@pytest.mark.parametrize("action_index", range(6))
 def test_between_claims_projection_retains_exact_action_target_allowlists(action_index):
     s = make_start_case()
     action, target = projection_targets(s)[action_index]
     changes = {
+        "profile.read": {"revision": 2},
         "workspace.execute": {"directory": "/foreign"},
         "source.read": {"key": "foreign"},
         "tool.execute": {"connection_id": uuid4()},
@@ -991,23 +1022,73 @@ def test_gateway_classifies_target_closed_immediately_after_real_sync(monkeypatc
 
 
 @pytest.mark.parametrize("phase", (HandoffPhase.START_TARGET_SESSION, HandoffPhase.ACKNOWLEDGE_CONTEXT))
-def test_real_coordinator_fails_terminal_target_once_without_retry(phase):
-    s = make_start_case()
+@pytest.mark.parametrize("status", (ExecutionStatus.FAILED, ExecutionStatus.CANCELED, ExecutionStatus.SUCCEEDED))
+def test_real_coordinator_fails_terminal_target_once_without_retry(phase, status):
+    s = make_start_case(real_scheduler=True)
     transition = s.uow.handoff_transitions.item
     transition.phase = phase
     transition.target_session_id = s.session_id if phase is HandoffPhase.ACKNOWLEDGE_CONTEXT else None
     execution = s.uow.executions.values[s.authority.execution_id]
-    execution.status, execution.active_lease_id = ExecutionStatus.FAILED, None
-    original_operation = s.link.start_operation_id
+    execution.status, execution.active_lease_id = status, None
+    s.uow.leases.values[s.authority.lease_id].status = LeaseStatus.RELEASED
+    s.uow.sessions.values[s.session_id].close(lost=False, now=NOW)
+    original_link, original_attempt = s.link, transition.logical_attempt
+    original_sessions = set(s.uow.sessions.values)
+    original_operations = set(s.uow.gateway_operations.values)
     first = s.coordinator.run_once(limit=1)
     stored = s.uow.handoff_transitions.item
     assert first.failed == 1 and first.blocked == 0
     assert stored.status is HandoffTransitionStatus.FAILED
+    assert stored.failure_code == "native_handoff_target_terminal"
     assert stored.writer_state is HandoffWriterState.WRITER_NONE
     assert stored.next_attempt_at is None and stored.lease_owner is None
+    assert stored.lease_expires_at is None and stored.logical_attempt == original_attempt
     assert s.coordinator.run_once(limit=1).claimed == 0
-    assert s.link.start_operation_id == original_operation and len(s.native.starts) == 1
+    assert s.link == original_link and len(s.native.starts) == 1
     assert len(s.uow.executions.values) == 2
+    assert set(s.uow.sessions.values) == original_sessions
+    assert set(s.uow.gateway_operations.values) == original_operations
+    assert not s.native.reads
+    failures = [event for event in s.source.events if event.event_type == "HandoffBlocked"]
+    assert len(failures) == 1
+    assert failures[0].payload["failure_code"] == "native_handoff_target_terminal"
+    assert failures[0].payload["status"] == "failed"
+
+
+@pytest.mark.parametrize("bad", ("worker_item", "transition", "worker", "missing"))
+def test_coordinator_terminal_route_keeps_exact_target_identity_checks(bad):
+    s = make_start_case(real_scheduler=True)
+    execution = s.uow.executions.values[s.authority.execution_id]
+    execution.status, execution.active_lease_id = ExecutionStatus.FAILED, None
+    s.uow.leases.values[s.authority.lease_id].status = LeaseStatus.RELEASED
+    if bad == "missing":
+        del s.uow.executions.values[execution.id]
+    else:
+        field = {"worker_item": "worker_item_id", "transition": "handoff_transition_id", "worker": "assigned_worker_id"}[bad]
+        setattr(execution, field, uuid4())
+    result = s.coordinator.run_once(limit=1)
+    stored = s.uow.handoff_transitions.item
+    assert result.blocked == 1 and result.failed == 0
+    assert stored.status is HandoffTransitionStatus.BLOCKED
+    assert stored.failure_code == (
+        "handoff_target_stale" if bad == "missing"
+        else "handoff_target_worker_mismatch" if bad == "worker"
+        else "handoff_target_execution_mismatch"
+    )
+    assert len(s.native.starts) == 1 and not s.native.reads
+
+
+@pytest.mark.parametrize("bad", ("policy", "handoff_transition_id"))
+def test_nonterminal_start_keeps_real_scheduler_reservation_validation(bad):
+    s = make_start_case(real_scheduler=True)
+    lease = s.uow.leases.values[s.authority.lease_id]
+    lease.assignment_reason = {**lease.assignment_reason, bad: "foreign"}
+    result = s.coordinator.run_once(limit=1)
+    stored = s.uow.handoff_transitions.item
+    assert result.blocked == 1 and result.progressed == 0
+    assert stored.status is HandoffTransitionStatus.BLOCKED
+    assert stored.failure_code == "handoff_target_stale"
+    assert len(s.native.starts) == 1 and not s.native.reads
 
 
 @pytest.mark.parametrize("kind", ("known", "unknown"))

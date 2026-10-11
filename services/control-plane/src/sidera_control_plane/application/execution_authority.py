@@ -328,12 +328,13 @@ class ExecutionAuthorityReader:
         if not claimed:
             # Admission outlives the short dispatch claim. Only the exact saved
             # Run and active Session may finish projecting under its live Lease.
+            # Task-tool initialization also reads the pinned Profile metadata.
             receipt = link.start_receipt
             if (
                 transition.phase is not HandoffPhase.START_TARGET_SESSION
                 or action not in {
                     "workspace.execute", "source.read", "tool.execute",
-                    "secret.read", "resource.read",
+                    "secret.read", "resource.read", "profile.read",
                 }
                 or not isinstance(link.run_id, UUID)
                 or link.status not in {"starting", "running", "waiting"}

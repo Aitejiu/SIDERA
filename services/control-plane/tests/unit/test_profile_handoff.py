@@ -98,6 +98,7 @@ def test_native_coordinator_keeps_target_start_pending_without_phase_advance(pen
         NativeDeferredResult,
     )
     from sidera_control_plane.application.handoff_coordinator import HandoffCoordinator
+    from sidera_control_plane.domain.execution import ExecutionStatus
     from sidera_control_plane.domain.handoffs import HandoffPhase
     from tests.unit.test_handoff_target import MemoryRepository
 
@@ -111,7 +112,16 @@ def test_native_coordinator_keeps_target_start_pending_without_phase_advance(pen
         phase=HandoffPhase.START_TARGET_SESSION,
         lease_owner="coordinator",
     )
-    uow = SimpleNamespace(handoff_transitions=MemoryRepository((transition,)))
+    target = SimpleNamespace(
+        id=transition.target_execution_id,
+        workspace_id=transition.workspace_id,
+        status=(ExecutionStatus.QUEUED if pending == "capacity"
+                else ExecutionStatus.LEASED),
+    )
+    uow = SimpleNamespace(
+        handoff_transitions=MemoryRepository((transition,)),
+        executions=MemoryRepository((target,)),
+    )
 
     class Uow:
         def __enter__(self):
